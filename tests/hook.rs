@@ -82,7 +82,7 @@ async fn a_prohibition_is_enforced_and_recorded_with_nothing_running() {
     let home = home("deny");
     let reply = hook(
         &home,
-        "[policy]\nnever_auto = [\"Read(.env)\"]\n",
+        "[policy]\ndeny = [\"Read(.env)\"]\n",
         r#"{"hook_event_name":"PreToolUse","session_id":"s-deny","cwd":"/tmp/repo",
             "tool_name":"Bash","tool_input":{"command":"cat .env"}}"#,
     );
@@ -163,15 +163,15 @@ async fn an_observation_is_kept_for_a_host_that_was_not_there() {
 }
 
 /// A held permission is answered from another process with no host: the hook
-/// polls the row `devplane answer` writes and returns the person's choice.
+/// polls the row `devplane inbox answer` writes and returns the person's choice.
 #[tokio::test]
 async fn a_held_permission_is_answered_by_another_process_with_no_host() {
     let home = home("hold");
-    let repo = home.join("repo");
+    let repo = home.with_extension("repo"); // beside the home, never inside it
     std::fs::create_dir_all(&repo).unwrap();
     std::fs::write(
         repo.join("devplane.toml"),
-        "[policy]\nalways_ask = [\"Bash(git push *)\"]\n[questions]\nhold = \"20s\"\n",
+        "[policy]\nask = [\"Bash(git push *)\"]\n[questions]\nhold = \"20s\"\n",
     )
     .unwrap();
     let payload = format!(
@@ -204,7 +204,7 @@ async fn a_held_permission_is_answered_by_another_process_with_no_host() {
                 // The person's own terminal: no agent session around it.
                 let out = outside_any_session(
                     std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
-                        .args(["answer", id, "--allow"])
+                        .args(["inbox", "answer", id, "--allow"])
                         .env("DEVPLANE_HOME", &home),
                 )
                 .output()
@@ -266,11 +266,11 @@ async fn a_held_permission_is_answered_by_another_process_with_no_host() {
 #[tokio::test]
 async fn a_hold_nobody_answers_lapses_into_the_vendors_dialog() {
     let home = home("lapse");
-    let repo = home.join("repo");
+    let repo = home.with_extension("repo"); // beside the home, never inside it
     std::fs::create_dir_all(&repo).unwrap();
     std::fs::write(
         repo.join("devplane.toml"),
-        "[policy]\nalways_ask = [\"Bash(git push *)\"]\n[questions]\nhold = \"1s\"\n",
+        "[policy]\nask = [\"Bash(git push *)\"]\n[questions]\nhold = \"1s\"\n",
     )
     .unwrap();
     let payload = format!(
@@ -344,17 +344,17 @@ impl Drop for EnvHome {
     }
 }
 
-/// A planted typo beside `never_auto` makes every call `Unresolved`: asked,
+/// A planted typo beside `deny` makes every call `Unresolved`: asked,
 /// naming the file, and recorded under `rule`, not as a tool decision.
 #[tokio::test]
 async fn a_devplane_toml_with_a_typo_asks_about_every_call() {
     let home = home("typo");
     std::fs::write(home.join("policy.toml"), "").unwrap();
-    let repo = home.join("repo");
+    let repo = home.with_extension("repo"); // beside the home, never inside it
     std::fs::create_dir_all(repo.join(".git")).unwrap();
     std::fs::write(
         repo.join("devplane.toml"),
-        "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\nstall_timout = \"5m\"\n",
+        "[policy]\ndeny = [\"Bash(rm -rf *)\"]\nstall_timout = \"5m\"\n",
     )
     .unwrap();
     for (tool, input) in [
@@ -397,10 +397,10 @@ fn on_codex_a_question_is_a_refusal_never_a_pass() {
     let home = home("codex-ask");
     std::fs::write(
         home.join("policy.toml"),
-        "[policy]\nalways_ask = [\"Bash(git push *)\"]\n",
+        "[policy]\nask = [\"Bash(git push *)\"]\n",
     )
     .unwrap();
-    let repo = home.join("repo");
+    let repo = home.with_extension("repo"); // beside the home, never inside it
     std::fs::create_dir_all(repo.join(".git")).unwrap();
     let call = |command: &str| {
         hook_in(
@@ -432,11 +432,151 @@ fn on_codex_a_question_is_a_refusal_never_a_pass() {
     );
 }
 
+/// With no rule written anywhere, every vendor's hook refuses an agent call
+/// that reads or writes Devplane's home, by the built-in rule's name.
+#[test]
+fn devplanes_own_files_are_refused_to_every_vendor_with_no_rules_at_all() {
+    let home = home("own-files");
+    std::fs::write(home.join("policy.toml"), "").unwrap();
+    let h = home.display();
+    let claude = |args: &[&str], tool: &str, input: String, cwd: &str| {
+        let reply = hook_in(
+            &home,
+            &home,
+            args,
+            &format!(
+                r#"{{"hook_event_name":"PreToolUse","session_id":"s-own","cwd":"{cwd}",
+                    "tool_name":"{tool}","tool_input":{input}}}"#
+            ),
+        );
+        let out = &reply["hookSpecificOutput"];
+        assert_eq!(out["permissionDecision"], "deny", "{tool} {input}: {reply}");
+        assert!(
+            out["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("devplane-own-files"),
+            "{reply}"
+        );
+    };
+    let cwd = home.display().to_string();
+    claude(
+        &[],
+        "Read",
+        format!(r#"{{"file_path":"{h}/devplane.db"}}"#),
+        &cwd,
+    );
+    claude(
+        &[],
+        "Write",
+        format!(r#"{{"file_path":"{h}/token"}}"#),
+        &cwd,
+    );
+    claude(
+        &[],
+        "Edit",
+        format!(r#"{{"file_path":"{h}/devplane.db"}}"#),
+        "/",
+    );
+    claude(
+        &[],
+        "Bash",
+        format!(r#"{{"command":"sqlite3 {h}/devplane.db .dump"}}"#),
+        "/",
+    );
+    claude(
+        &[],
+        "Bash",
+        r#"{"command":"cat ~/.devplane/token"}"#.into(),
+        &cwd,
+    );
+    claude(
+        &["--vendor", "codex"],
+        "Bash",
+        r#"{"command":"cat $HOME/.devplane/token"}"#.into(),
+        &cwd,
+    );
+    let copilot = hook_in(
+        &home,
+        &home,
+        &["--gate", "copilot"],
+        &format!(
+            r#"{{"sessionId":"s-own-c","cwd":"{cwd}","toolName":"bash",
+                "toolArgs":{{"command":"sqlite3 {h}/devplane.db .dump"}}}}"#
+        ),
+    );
+    assert_eq!(copilot["permissionDecision"], "deny", "{copilot}");
+}
+
+/// A store a newer Devplane wrote is state this gate cannot read: with rules
+/// in force the call is refused with the reason, and the store is never set
+/// aside; with none, the call goes on untouched.
+#[tokio::test]
+async fn a_store_from_a_newer_devplane_fails_closed_and_is_never_set_aside() {
+    let home = home("skew");
+    let db = home.join("devplane.db");
+    let newer = devplane::store::SCHEMA_VERSION + 1;
+    {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&db)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "PRAGMA user_version = {newer}; CREATE TABLE later (x);"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+    }
+    let run = |rules: &str| {
+        std::fs::write(home.join("policy.toml"), rules).unwrap();
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"));
+        cmd.arg("hook")
+            .env("DEVPLANE_HOME", &home)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(
+                br#"{"hook_event_name":"PreToolUse","session_id":"s-skew","cwd":"/",
+                    "tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+            )
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let out = run("[policy]\ndeny = [\"Bash(rm *)\"]\n");
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("newer Devplane") && said.contains("update devplane"),
+        "{said}"
+    );
+    let out = run("");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(devplane::store::Store::schema_on_disk(&db), Some(newer));
+    let aside = std::fs::read_dir(&home)
+        .unwrap()
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().ends_with(".bak"));
+    assert!(!aside, "the hook set a store aside");
+}
+
 /// The same for the machine-wide file.
 #[test]
 fn a_machine_wide_policy_that_will_not_load_asks_about_every_call() {
     let home = home("global-typo");
-    std::fs::write(home.join("policy.toml"), "[policy\nnever_auto = [").unwrap();
+    std::fs::write(home.join("policy.toml"), "[policy\ndeny = [").unwrap();
     let reply = hook_in(
         &home,
         &home,
@@ -470,7 +610,7 @@ fn an_unreadable_payload_where_rules_are_in_force_is_asked_about() {
     let home = home("unreadable");
     std::fs::write(
         home.join("policy.toml"),
-        "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n",
+        "[policy]\ndeny = [\"Bash(rm -rf *)\"]\n",
     )
     .unwrap();
     // `cwd` of the wrong type: the event is readable, the payload is not.
@@ -533,7 +673,7 @@ async fn an_agent_may_not_answer_its_own_permission() {
         let answer = |flag: &str| {
             outside_any_session(
                 std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
-                    .args(["answer", &id, flag])
+                    .args(["inbox", "answer", &id, flag])
                     .env("DEVPLANE_HOME", &home),
             )
             .env(var, "1")
@@ -571,6 +711,7 @@ async fn raise_hold(s: &Store, session: &str) -> String {
             Path::new("/tmp/alpha"),
             "Bash",
             "git push",
+            &serde_json::json!({ "command": "git push" }),
             std::time::Duration::from_secs(20),
             false,
         )
@@ -597,8 +738,18 @@ async fn two_surfaces_answering_one_hold_record_one_answer() {
     // Denials, so an agent-session environment does not refuse them before they race.
     let deny = || devplane::driven::Answer::Permission(devplane::driven::Decision::Deny);
     let (a, b) = tokio::join!(
-        devplane::driven::answer_without_host(&s, &id, deny(), "window"),
-        devplane::driven::answer_without_host(&s, &id, deny(), "cli"),
+        devplane::driven::answer_without_host(
+            &s,
+            &id,
+            deny(),
+            devplane::core::ask::AnswerPath::Window
+        ),
+        devplane::driven::answer_without_host(
+            &s,
+            &id,
+            deny(),
+            devplane::core::ask::AnswerPath::Cli
+        ),
     );
     assert_eq!(
         usize::from(a.is_ok()) + usize::from(b.is_ok()),
@@ -640,7 +791,13 @@ async fn a_hold_whose_hook_is_gone_ends_as_nobody() {
         devplane::core::ask::Ask::new(id.clone(), devplane::core::RunId::new("s-orphan"), asked);
     s.save_ask(&ask).await.unwrap();
     let deny = devplane::driven::Answer::Permission(devplane::driven::Decision::Deny);
-    let refused = devplane::driven::answer_without_host(&s, id.as_str(), deny, "cli").await;
+    let refused = devplane::driven::answer_without_host(
+        &s,
+        id.as_str(),
+        deny,
+        devplane::core::ask::AnswerPath::Cli,
+    )
+    .await;
     assert!(
         refused.is_err(),
         "an answer to nobody was recorded as delivered"
@@ -653,9 +810,10 @@ async fn a_hold_whose_hook_is_gone_ends_as_nobody() {
     );
 }
 
-/// A permission's answer is said once. Two bypasses found by audit: a
-/// `decision` beside an `option` let `--deny --option allow_always` allow, and
-/// a `field` on a permission let an allowing option past the self-answer check.
+/// A permission's answer is said once. Refused, since either would allow: a
+/// `decision` beside an `option` (`--deny --option allow_always`), and a
+/// `field` on a permission, which carries an allowing option past the
+/// self-answer check.
 #[test]
 fn a_permission_answer_that_says_two_things_is_refused() {
     let asked = devplane::core::ask::Asked {
@@ -702,7 +860,14 @@ fn a_permission_answer_that_says_two_things_is_refused() {
 #[test]
 fn the_answer_command_refuses_a_contradiction_before_it_runs() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
-        .args(["answer", "any", "--deny", "--option", "allow_always"])
+        .args([
+            "inbox",
+            "answer",
+            "any",
+            "--deny",
+            "--option",
+            "allow_always",
+        ])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -727,6 +892,7 @@ async fn a_held_answer_is_live_only_once_the_hook_has_read_it() {
             Path::new("/tmp/alpha"),
             "Bash",
             "git push",
+            &serde_json::json!({ "command": "git push" }),
             std::time::Duration::from_secs(20),
             false,
         )
@@ -742,9 +908,10 @@ async fn a_held_answer_is_live_only_once_the_hook_has_read_it() {
     }
     let id = id.expect("the hold raised a row");
     let deny = devplane::driven::Answer::Permission(devplane::driven::Decision::Deny);
-    let answered = devplane::driven::answer_without_host(&s, &id, deny, "cli")
-        .await
-        .unwrap();
+    let answered =
+        devplane::driven::answer_without_host(&s, &id, deny, devplane::core::ask::AnswerPath::Cli)
+            .await
+            .unwrap();
     assert_eq!(
         answered.delivery, None,
         "nothing has read the answer yet, so nothing was delivered"

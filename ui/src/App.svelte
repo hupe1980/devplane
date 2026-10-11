@@ -4,16 +4,18 @@
   // The address is the source of truth: `#<surface>` or `#<surface>/<focus>`.
   // Tabs are a memory laid over it. Deep links arrive as a query (`?surface=`,
   // `?change=`, `?ask=`, `?run=`), read once and folded into the hash.
-  import { surfaces, listed, landing, type Feed } from "./lib/surfaces";
+  import { surfaces, listed, landing, opening, type Feed } from "./lib/surfaces";
   import { loadSurfaces } from "./lib/load";
   import { live } from "./lib/live.svelte";
   import { theme } from "./lib/theme.svelte";
   import { claimToken } from "./lib/api";
   import { untrack } from "svelte";
-  import { dispatch, help, onAction, run, spell } from "./lib/keys";
+  import { dispatch, onAction, run, sheet, spell } from "./lib/keys";
   import { same } from "./lib/resource.svelte";
   import { go } from "./lib/route";
   import Stale from "./lib/Stale.svelte";
+  import Lazy from "./lib/Lazy.svelte";
+  import Inline from "./lib/ui/Inline.svelte";
   import { trap } from "./lib/trap";
   import Split from "./lib/ui/Split.svelte";
   import Icon from "./lib/ui/Icon.svelte";
@@ -29,6 +31,8 @@
 
   let current = $state(landing()?.id ?? "");
   let focus = $state("");
+  /// The view the focused page shows it in, out of `#<surface>/<focus>/<view>`.
+  let view = $state("");
   let notice = $state("");
   let helpOpen = $state(false);
   const showing = $derived(surfaces().find((s) => s.id === current));
@@ -67,6 +71,35 @@
   $effect(() => keepFlag("vp-side", sideOpen));
   $effect(() => keepFlag("vp-panel", panelOpen));
 
+  // ── a narrow window ───────────────────────────────────────────────────────
+  // Under 1100 px a document open beside its list gets the room: the list
+  // folds away, and the sidebar toggle brings it back over that document
+  // without changing what a wide window remembers.
+  const NARROW_PX = 1100;
+  let wide = $state(typeof innerWidth === "number" ? innerWidth >= NARROW_PX : true);
+  $effect(() => {
+    const onResize = () => (wide = innerWidth >= NARROW_PX);
+    addEventListener("resize", onResize);
+    return () => removeEventListener("resize", onResize);
+  });
+  /// The sidebar asked for while narrow, per document; reset when it changes.
+  let narrowSide = $state(false);
+  /// A document is open on the page (the active tab, under any overlay).
+  const folds = $derived.by(() => {
+    if (wide) return false;
+    const t = tabs.list[tabs.active];
+    return !!t?.focus && !!surfaces().find((s) => s.id === t.surface)?.document;
+  });
+  const sideShown = $derived(folds ? narrowSide : sideOpen);
+  $effect(() => {
+    void focus;
+    untrack(() => (narrowSide = false));
+  });
+  function toggleSide() {
+    if (folds) narrowSide = !narrowSide;
+    else sideOpen = !sideOpen;
+  }
+
   // ── the address ───────────────────────────────────────────────────────────
   function read() {
     const raw = location.hash.slice(1);
@@ -74,17 +107,31 @@
     const id = cut === -1 ? raw : raw.slice(0, cut);
     if (!surfaces().some((s) => s.id === id)) {
       if (!raw) {
-        const home = landing()?.id;
-        if (home) go(`#${home}`);
+        // An empty address: the landing surface, unless one asks to open
+        // first (the first-run checklist). An address set meanwhile wins.
+        void opening().then((s) => {
+          const home = s?.id ?? landing()?.id;
+          if (home && !location.hash.slice(1)) go(`#${home}`);
+        });
       }
       return;
     }
     current = id;
-    focus = cut === -1 ? "" : decodeURIComponent(raw.slice(cut + 1));
+    // `#<surface>/<focus>/<view>`: the focus is encoded whole, so the next
+    // bare `/` starts the view the page shows it in (a change's Review tab).
+    const rest = cut === -1 ? "" : raw.slice(cut + 1);
+    const vcut = rest.indexOf("/");
+    focus = decodeURIComponent(vcut === -1 ? rest : rest.slice(0, vcut));
+    view = vcut === -1 ? "" : decodeURIComponent(rest.slice(vcut + 1));
     helpOpen = false;
     const s = surfaces().find((x) => x.id === id);
     // The palette and the answer window never become tabs.
-    if (s && !s.transient && !s.bare) show(id, focus);
+    if (s && !s.transient && !s.bare) show(id, focus, false, view);
+  }
+  /// Moves the address to another view of what is showing, as a page asks.
+  function showView(v: string) {
+    if (!page || !under.f) return;
+    go(`#${page.id}/${encodeURIComponent(under.f)}${v ? `/${encodeURIComponent(v)}` : ""}`);
   }
 
   function readQuery() {
@@ -95,10 +142,17 @@
     let id = "";
     let f = "";
     const want = q.get("surface");
-    if (want && surfaces().some((s) => s.id === want)) id = want;
+    // A named surface wins over a link's own surface, and the link's value is
+    // its focus: `?surface=answer&ask=<id>` opens the answer window on that ask.
+    const named = !!want && surfaces().some((s) => s.id === want);
+    if (named && want) id = want;
     for (const s of surfaces()) {
       const v = s.link ? q.get(s.link) : null;
       if (s.link && v) {
+        if (named) {
+          f ||= v;
+          continue;
+        }
         id = s.id;
         f = s.linkFocus ? s.linkFocus(v) : v;
       }
@@ -123,11 +177,11 @@
   /// A surface picked from the activity bar: its most recent tab, or itself.
   function pick(id: string) {
     const last = [...tabs.list].reverse().find((t) => t.surface === id);
-    if (id === current && sideOpen && surfaces().find((s) => s.id === id)?.side) {
-      sideOpen = false;
+    if (id === current && sideShown && surfaces().find((s) => s.id === id)?.side) {
+      toggleSide();
       return;
     }
-    sideOpen = true;
+    if (!sideShown) toggleSide();
     go(last ? hashOf(last) : `#${id}`);
   }
   function pickTab(i: number) {
@@ -151,7 +205,7 @@
         return true;
       }),
       onAction("toggle-side", () => {
-        sideOpen = !sideOpen;
+        toggleSide();
         return true;
       }),
       onAction("toggle-panel", () => {
@@ -208,12 +262,14 @@
   );
   /// The surface a run opens on, for the activity panel's rows.
   const runsAt = $derived(surfaces().find((s) => s.holds === "run")?.id ?? "");
-  const keys = $derived(help(current));
+  /// Read when the sheet opens, so it lists the mode the surface is in now
+  /// (a change's Review tab binds `j`/`k` to hunks).
+  const groups = $derived(helpOpen ? sheet(current) : []);
   /// Under a transient surface, the page is the active tab's.
   const under = $derived.by(() => {
-    if (!showing?.transient) return { s: showing, f: focus };
+    if (!showing?.transient) return { s: showing, f: focus, v: view };
     const t = tabs.list[tabs.active];
-    return { s: (t ? surfaces().find((x) => x.id === t.surface) : undefined) ?? landing(), f: t?.focus ?? "" };
+    return { s: (t ? surfaces().find((x) => x.id === t.surface) : undefined) ?? landing(), f: t?.focus ?? "", v: t?.view ?? "" };
   });
   const page = $derived(under.s);
   const Side = $derived(page?.side);
@@ -252,8 +308,8 @@
 
 {#if showing?.bare}
   <main id="surface" class="bare">
-    {#if feed.unauthorised}<p class="problem" role="alert">{feed.error}</p>{/if}
-    <showing.component {...props} />
+    {#if feed.unauthorised}<p class="problem" role="alert"><Inline text={feed.error} /></p>{/if}
+    <Lazy load={showing.page} component={showing.component} {...props} />
   </main>
 {:else}
   <!-- A button, not `href="#surface"`: the address is the route, and a
@@ -262,19 +318,19 @@
   <div class="wb">
     <TitleBar
       {crumbs}
-      {sideOpen}
+      sideOpen={sideShown}
       {panelOpen}
       find={() => run("open-palette", current)}
       create={() => run("new-change", current)}
-      toggleSide={() => (sideOpen = !sideOpen)}
+      {toggleSide}
       togglePanel={() => (panelOpen = !panelOpen)}
     />
     <div class="mid">
       <ActivityBar items={listed()} feed={feed as Feed} {current} {pick} />
-      <Split id="side" size={300} min={200} max={560} collapsed={!sideOpen || !Side}>
+      <Split id="side" size={300} min={200} max={560} collapsed={!sideShown || !Side}>
         {#snippet pane()}
           <aside class="side" aria-label="{showing?.title ?? ''} list">
-            {#if Side}<Side {...props} {focus} open={openFocus} />{/if}
+            {#if Side}<Lazy load={Side} {...props} {focus} open={openFocus} />{/if}
           </aside>
         {/snippet}
         <Split id="panel" axis="y" side="end" size={220} min={120} max={560} collapsed={!panelOpen}>
@@ -297,13 +353,13 @@
           {/if}
           <main id="surface" class="editor" tabindex="-1" aria-label={page?.heading}>
             {#if feed.unauthorised}
-              <p class="problem" role="alert">{feed.error}</p>
+              <p class="problem" role="alert"><Inline text={feed.error} /></p>
             {:else if feed.error}
               <Stale error={feed.error} stale_since={feed.stale_since} />
             {/if}
             {#if notice}<p class="notice" role="status">{notice}</p>{/if}
             {#if page}
-              <page.component {...props} focus={under.f} open={openFocus} />
+              <Lazy load={page.page} component={page.component} {...props} focus={under.f} view={under.v} {showView} open={openFocus} />
             {:else}
               <p>No surface is registered.</p>
             {/if}
@@ -326,7 +382,7 @@
   {#if showing?.transient}
     <div class="scrim" role="presentation" onclick={() => run("leave", current)}></div>
     <div class="overlay" role="dialog" aria-modal="true" aria-label={showing.title} use:trap>
-      <showing.component {...overlayProps} />
+      <Lazy load={showing.page} component={showing.component} {...overlayProps} />
     </div>
   {/if}
 
@@ -335,12 +391,17 @@
     <div class="scrim" role="presentation" onclick={() => (helpOpen = false)}></div>
     <div class="help" role="dialog" aria-modal="true" aria-label="keys bound here" use:trap>
       <header><Icon name="keyboard" size={16} /> <h2>Keys bound here</h2></header>
-      <dl>
-        {#each keys as k (k.surface + k.combo)}
-          <dt><kbd>{spell(k.combo)}</kbd></dt>
-          <dd>{k.label}{#if k.surface === "global"}<span class="dim"> · everywhere</span>{/if}</dd>
-        {/each}
-      </dl>
+      <!-- This item, this surface, everywhere: the order a hand reaches. -->
+      {#each groups as g (g.title)}
+        <h3>{g.title}</h3>
+        {@const keys = g.keys}
+        <dl>
+          {#each keys as k (k.surface + k.combo)}
+            <dt>{#each k.combos as c, ci (c)}{#if ci > 0}{" "}{/if}<kbd>{spell(c)}</kbd>{/each}</dt>
+            <dd>{k.label}</dd>
+          {/each}
+        </dl>
+      {/each}
     </div>
   {/if}
 {/if}
@@ -466,8 +527,16 @@
   .help dd {
     margin: 0;
   }
-  .dim {
-    color: var(--faint);
+  .help h3 {
+    margin: var(--s-4) 0 var(--s-2);
+    font-size: var(--t-xs);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--dim);
+  }
+  .help h3:first-of-type {
+    margin-top: 0;
   }
   kbd {
     font-family: var(--mono);

@@ -16,12 +16,22 @@
 
   const rows = $derived(pair(tasks, steps));
   const matched = $derived(rows.filter((r) => r.task && r.step).length);
+  const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many}`;
+  const tally = $derived(
+    [
+      matched ? `${n(matched, "task", "tasks")} matched to a plan step` : "",
+      tasks.length - matched ? `${n(tasks.length - matched, "task", "tasks")} not linked to a plan step` : "",
+      steps.length - matched ? `${n(steps.length - matched, "plan step", "plan steps")} not linked to a task` : "",
+    ]
+      .filter(Boolean)
+      .join(" · "),
+  );
 </script>
 
 <section class="plan" aria-label="tasks and the agent's plan">
   <div class="heads">
-    <h3>tasks sent <span class="n">{tasks.length}</span></h3>
-    <h3>the agent's plan <span class="n">{steps.length}</span></h3>
+    <h3>Tasks sent <span class="n">{tasks.length}</span></h3>
+    <h3>The agent's plan <span class="n">{steps.length}</span></h3>
   </div>
   {#if tasks.length === 0 && steps.length === 0}
     <p class="dim">No tasks were sent and no plan was reported.</p>
@@ -38,8 +48,8 @@
         </li>
       {/each}
     </ol>
-    <!-- Three counts, never a fraction. -->
-    <p class="dim tally">{matched} paired · {tasks.length - matched} tasks alone · {steps.length - matched} steps alone</p>
+    <!-- Counts in plain words, never a fraction; a zero is left unsaid. -->
+    {#if tally}<p class="dim tally">{tally}</p>{/if}
   {/if}
 </section>
 

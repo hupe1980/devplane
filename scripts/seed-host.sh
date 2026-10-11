@@ -39,15 +39,31 @@ export CLAUDE_CONFIG_DIR="$tmp/claude" DEVPLANE_HOME="$home"
 export GIT_AUTHOR_NAME=Seed GIT_AUTHOR_EMAIL=seed@example.com
 export GIT_COMMITTER_NAME=Seed GIT_COMMITTER_EMAIL=seed@example.com
 
+# A phase recording (`capture-fixtures.sh --phase`) wants a bare host, not the
+# populated one: `empty` saw one session start and end, `nothing-visible` saw
+# nothing at all. Both stop after the host is up.
+SEED_PHASE="${SEED_PHASE:-}"
+case "$SEED_PHASE" in
+  "" | empty | nothing-visible) ;;
+  *) echo "seed-host: unknown phase $SEED_PHASE (empty, nothing-visible)" >&2; exit 2 ;;
+esac
+
+if [ -n "$SEED_PHASE" ]; then
+  mkdir -p "$tmp/empty"
+  git -C "$tmp/empty" init -q -b main
+  printf '# empty\n' > "$tmp/empty/README.md"
+  git -C "$tmp/empty" add -A && git -C "$tmp/empty" commit -qm init
+fi
+
 # Five repositories, because the board groups by project. `saas` is a Spec Kit
 # project with a real specification and real gates; the rest are watched only.
-for name in saas core-lib ai-tool mobile infra; do
+for name in $([ -z "$SEED_PHASE" ] && echo saas core-lib ai-tool mobile infra); do
   mkdir -p "$tmp/$name"
   git -C "$tmp/$name" init -q -b main
   # The fixture agent's own log must not show up in a review.
   printf '.devplane/\n' > "$tmp/$name/.gitignore"
 done
-(
+[ -n "$SEED_PHASE" ] || (
   cd "$tmp/saas"
   mkdir -p .specify src/routes tests specs/042-login-rate-limit specs/043-drop-v1-api
   cat > devplane.toml <<'TOML'
@@ -57,10 +73,11 @@ name = "saas"
 [gates]
 check = ["sh ./scripts/lint.sh", "sh ./scripts/test.sh"]
 timeout = "60s"
+junit = ["reports/junit.xml"]
 
 [policy]
-never_auto = ["Read(.env)", "Bash(rm -rf *)"]
-always_ask = ["Bash(git push *)"]
+deny = ["Read(.env)", "Bash(rm -rf *)"]
+ask = ["Bash(git push *)"]
 
 [review.roles]
 shared   = ["src/types/**", "migrations/**"]
@@ -74,8 +91,51 @@ paths = ["src/routes/login.ts", "src/auth/**"]
 TOML
   mkdir -p scripts
   printf '#!/bin/sh\necho "lint: 14 files, 0 problems"\n' > scripts/lint.sh
-  printf '#!/bin/sh\necho "PASS tests/login.test.ts (6)"\necho "PASS tests/session.test.ts (11)"\n' > scripts/test.sh
-  printf 'export function login() {\n  return true;\n}\n' > src/routes/login.ts
+  # A pytest-shaped fake whose output is decided by the tree it runs in:
+  # `FILTER` keeps the tests named `login…` (as `-k login` does), and
+  # `test_lockout` fails when the login route lost its lockout. Each
+  # `test("…")` in tests/*.test.ts is one more case, `it.skip` a skipped one.
+  # It prints pytest's summary and writes JUnit to reports/junit.xml.
+  cat > scripts/test.sh <<'SH'
+#!/bin/sh
+FILTER=""
+mkdir -p reports
+pass=0; fail=0; skip=0; desel=0; xml=""
+for n in login login_twice login_remember lockout reset session_create session_expire \
+         session_refresh password_rules logout audit csrf; do
+  case "$FILTER:$n" in
+    "-k login:login"*|":"*) ;;
+    *) desel=$((desel+1)); continue ;;
+  esac
+  if [ "$n" = lockout ] && ! grep -q lockout src/routes/login.ts 2>/dev/null; then
+    fail=$((fail+1)); echo "FAILED tests/test_login.py::test_$n - assert locked_out(user)"
+    xml="$xml<testcase classname=\"tests.test_login\" name=\"test_$n\"><failure/></testcase>"
+  else
+    pass=$((pass+1)); xml="$xml<testcase classname=\"tests.test_login\" name=\"test_$n\"/>"
+  fi
+done
+for f in tests/*.test.ts; do
+  [ -f "$f" ] || continue
+  while IFS= read -r line; do
+    name=$(printf '%s' "$line" | sed -nE 's/^[[:space:]]*(it|test)(\.skip)?\("([^"]*)".*/\3/p')
+    [ -n "$name" ] || continue
+    case "$line" in
+      *.skip\(*) skip=$((skip+1)); xml="$xml<testcase classname=\"$f\" name=\"$name\"><skipped/></testcase>" ;;
+      *) pass=$((pass+1)); xml="$xml<testcase classname=\"$f\" name=\"$name\"/>" ;;
+    esac
+  done < "$f"
+done
+printf '<testsuites><testsuite name="pytest">%s</testsuite></testsuites>\n' "$xml" > reports/junit.xml
+out=""
+[ "$fail" -gt 0 ] && out="$fail failed"
+[ "$pass" -gt 0 ] && out="${out:+$out, }$pass passed"
+[ "$skip" -gt 0 ] && out="${out:+$out, }$skip skipped"
+[ "$desel" -gt 0 ] && out="${out:+$out, }$desel deselected"
+echo "============ ${out:-no tests ran} in 0.04s ============"
+[ "$fail" -eq 0 ]
+SH
+  printf 'reports/\n' >> .gitignore
+  printf '// A sixth failed attempt within a minute means a lockout.\nexport function login() {\n  return true;\n}\n' > src/routes/login.ts
   printf 'test("login", () => {});\n' > tests/login.test.ts
   cat > specs/042-login-rate-limit/spec.md <<'MD'
 # Feature Specification: Rate-limit the login route
@@ -110,13 +170,13 @@ MD
   printf '# Tasks\n\n- [ ] T001 [US1] Return 410 from every v1 route\n- [ ] T002 [US1] Remove the v1 client\n' > specs/043-drop-v1-api/tasks.md
   git add -A && git commit -qm "the login route, its gates and two specifications"
 )
-for name in core-lib ai-tool mobile infra; do
+for name in $([ -z "$SEED_PHASE" ] && echo core-lib ai-tool mobile infra); do
   printf '# %s\n' "$name" > "$tmp/$name/README.md"
   git -C "$tmp/$name" add -A && git -C "$tmp/$name" commit -qm init
 done
 
 # Started from inside the fixture, because the host registers its start directory.
-(cd "$tmp" && exec "$BIN" serve) >"$tmp/host.log" 2>&1 &
+(cd "$tmp${SEED_PHASE:+/empty}" && exec "$BIN" up --no-browser) >"$tmp/host.log" 2>&1 &
 pid=$!
 for _ in $(seq 1 50); do [ -s "$home/host.json" ] && break; sleep 0.2; done
 [ -s "$home/host.json" ] || { echo "seed-host: the host did not start"; cat "$tmp/host.log"; exit 1; }
@@ -144,6 +204,17 @@ session() { # id project tool input pct cost
     \"cost\":{\"total_cost_usd\":$6},\"workspace\":{\"current_dir\":\"$tmp/$2\"}}"
 }
 
+# The phase recordings stop here. `empty`: the Claude Code channel reported one
+# session, which ended, so the host can see sessions and holds none.
+if [ -n "$SEED_PHASE" ]; then
+  if [ "$SEED_PHASE" = empty ]; then
+    hook "{\"hook_event_name\":\"SessionStart\",\"session_id\":\"0e0e0e0e\",\"cwd\":\"$tmp/empty\",\"source\":\"startup\"}"
+    hook "{\"hook_event_name\":\"SessionEnd\",\"session_id\":\"0e0e0e0e\",\"cwd\":\"$tmp/empty\",\"reason\":\"exit\"}"
+  fi
+  sleep 2
+  return 0
+fi
+
 session 2b3c4d5e saas     Bash '{"command":"pnpm test --run"}'             62 1.92
 session c19d02aa saas     Read '{"file_path":"src/routes/session.ts"}'     41 0.38
 session 4f5e6d7c core-lib Bash '{"command":"cargo build --release"}'       3  0.02
@@ -168,7 +239,14 @@ statusline "{\"session_id\":\"a1b2c3d4\",\"model\":{\"display_name\":\"Opus 5\"}
   \"context_window\":{\"used_percentage\":89,\"context_window_size\":200000},\"cost\":{\"total_cost_usd\":0.41}}"
 
 # Changes, driven by the protocol fixture over the host's own API.
-for name in saas core-lib; do api POST api/projects/trust "{\"path\":\"$tmp/$name\"}" >/dev/null; done
+# Trusting is a person's decision: the host's route takes it only from the window,
+# so the seed trusts as a person does, from a terminal. The agent variables are
+# cleared because this script is often run from inside an agent's session.
+for name in saas core-lib; do
+  env -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_ENTRYPOINT -u DEVPLANE_RUN \
+    -u CODEX_SANDBOX -u CODEX_SANDBOX_NETWORK_DISABLED -u CODEX_THREAD_ID -u COPILOT_CLI \
+    "$BIN" project trust "$tmp/$name" >/dev/null
+done
 
 # One that reaches its gates having skipped the burst test; the review must lead with it.
 rate=$(api POST api/changes "{\"cwd\":\"$tmp/saas\",\"title\":\"Rate-limit the login route\",
@@ -177,12 +255,66 @@ rate=$(api POST api/changes "{\"cwd\":\"$tmp/saas\",\"title\":\"Rate-limit the l
 wt=$(printf '%s' "$rate" | grep -oE '"worktree": *"[^"]+"' | head -1 | sed 's/.*"worktree": *"//; s/"$//')
 [ -n "$wt" ] && [ -d "$wt" ] || { echo "seed-host: the change has no worktree: $rate" >&2; exit 1; }
 printf 'test("login", () => {});\nit.skip("rejects the sixth attempt in a minute", () => {});\n' > "$wt/tests/login.test.ts"
-# One that stops to ask the person something.
-api POST api/changes "{\"cwd\":\"$tmp/saas\",\"title\":\"Drop the v1 API\",
-  \"agent\":\"$ECHO\",\"spec\":\"specs/043-drop-v1-api\",\"prompt\":\"question: which clients still call v1?\"}" >/dev/null
+# One that stops to ask the person something, with a test written inside the
+# code it tests: base checks cannot separate the two.
+v1=$(api POST api/changes "{\"cwd\":\"$tmp/saas\",\"title\":\"Drop the v1 API\",
+  \"agent\":\"$ECHO\",\"spec\":\"specs/043-drop-v1-api\",\"prompt\":\"question: which clients still call v1?\"}")
+# One that drops the lockout and filters the run to the three `login` tests,
+# so `check` passes with 3 of the base's 12 — base checks find it out.
+speed=$(api POST api/changes "{\"cwd\":\"$tmp/saas\",\"title\":\"Speed up the login tests\",
+  \"agent\":\"$ECHO\",\"prompt\":\"write-file src/routes/login.ts\"}")
+# A permission Devplane itself holds: the agent asks over the protocol, so the
+# answer is the window's to give (the inbox's answerable permission).
+api POST api/changes "{\"cwd\":\"$tmp/saas\",\"title\":\"Clear the build cache\",
+  \"agent\":\"$ECHO\",\"prompt\":\"permission\"}" >/dev/null
+# Forty generated files in one change, the subject of hunk-to-hunk timing.
+forty=$(api POST api/changes "{\"cwd\":\"$tmp/core-lib\",\"title\":\"Forty files\",
+  \"agent\":\"$ECHO\",\"prompt\":\"write-file src/gen/f00.rs\"}")
+fwt=$(printf '%s' "$forty" | grep -oE '"worktree": *"[^"]+"' | head -1 | sed 's/.*"worktree": *"//; s/"$//')
+[ -n "$fwt" ] && [ -d "$fwt" ] || { echo "seed-host: the forty-file change has no worktree: $forty" >&2; exit 1; }
+mkdir -p "$fwt/src/gen"
+for i in $(seq -w 0 39); do
+  printf 'pub fn f%s(x: u32) -> u32 {\n    x + %d\n}\n' "$i" "$((10#$i))" > "$fwt/src/gen/f$i.rs"
+done
+# One whose agent says the specification and the tests conflict, through the
+# stop tool on Devplane's own server: the claim reads after the weakened checks
+# and above the gates, and the gate's verdict is its own.
+api POST api/changes "{\"cwd\":\"$tmp/saas\",\"title\":\"Keep sessions for 30 days\",
+  \"agent\":\"$ECHO\",\"prompt\":\"conflict\"}" >/dev/null
 # One in flight on another project.
 api POST api/changes "{\"cwd\":\"$tmp/core-lib\",\"title\":\"Retry only on 5xx\",
   \"agent\":\"$ECHO\",\"prompt\":\"slowish plan\"}" >/dev/null
 
 # Let the host fold what the hook processes appended, and the fixture finish.
 sleep 4
+
+# Base checks, the base's tests on each change and its new tests on the base.
+# Each change's edits land in its worktree, `check` runs on the tree as it is
+# now, then the pair is asked for and waited on, at most 60 s each.
+change_id() { printf '%s' "$1" | grep -oE '"change_id": *"[^"]+"' | head -1 | sed 's/.*"change_id": *"//; s/"$//'; }
+worktree_of() { printf '%s' "$1" | grep -oE '"worktree": *"[^"]+"' | head -1 | sed 's/.*"worktree": *"//; s/"$//'; }
+vwt=$(worktree_of "$v1")
+mkdir -p "$vwt/src/routes"
+printf 'export const v1 = () => 410;\ntest("v1 answers 410", () => {});\n' > "$vwt/src/routes/v1.ts"
+swt=$(worktree_of "$speed")
+sed 's/^FILTER=""/FILTER="-k login"/' "$swt/scripts/test.sh" > "$swt/scripts/test.sh.new"
+mv "$swt/scripts/test.sh.new" "$swt/scripts/test.sh"
+for c in "$rate" "$v1" "$speed"; do
+  id=$(change_id "$c")
+  api POST "api/changes/$id/verify" '{}' >/dev/null
+  api POST "api/changes/$id/base-checks" '{}' >/dev/null || true
+done
+for c in "$rate" "$v1" "$speed"; do
+  id=$(change_id "$c")
+  for _ in $(seq 1 120); do
+    row=$(api GET "api/changes/$id")
+    case "$row" in
+      *'"headline":'*) break ;;
+    esac
+    sleep 0.5
+  done
+  case "$row" in
+    *'"headline":'*) ;;
+    *) echo "seed-host: base checks did not finish for $id within 60 s" >&2 ;;
+  esac
+done

@@ -2,6 +2,7 @@
   // The banner over data that is not the present: when the host stops
   // answering, the last good read stays on screen, marked with its age.
   import { ago } from "./text";
+  import Inline from "./ui/Inline.svelte";
 
   let {
     error,
@@ -23,7 +24,7 @@
 <!-- Only the error is announced: the age ticks every second and would be
      read out again each time. -->
 <p class="stale">
-  <span role="status">{error}</span>
+  <span role="status"><Inline text={error} /></span>
   {#if age}
     <span class="age">· showing what was read {age} ago</span>
   {:else}

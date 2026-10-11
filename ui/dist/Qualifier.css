@@ -1,0 +1,20 @@
+
+  .qualifier.svelte-1lbadw3 {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.3em;
+    color: var(--wait);
+    font-weight: 600;
+    font-size: var(--t-xs);
+    white-space: nowrap;
+  }
+  .sep.svelte-1lbadw3 {
+    color: var(--dim);
+    font-weight: 400;
+  }
+  .unseen.svelte-1lbadw3 {
+    font-weight: 400;
+  }
+  .compact.svelte-1lbadw3 {
+    font-size: var(--t-xs);
+  }

@@ -7,30 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "devplane-safety-{tag}-{}-{}",
-        std::process::id(),
-        jiff::Timestamp::now().as_nanosecond()
-    ));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("git runs");
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
+mod common;
+use common::{git, scratch};
 
 fn repo(tag: &str) -> PathBuf {
     let dir = scratch(tag);
@@ -55,7 +33,10 @@ async fn a_taken_port_is_refused_rather_than_swapped() {
         .expect_err("a taken port must not bind");
     let msg = format!("{err:#}");
     assert!(msg.contains(&port.to_string()), "{msg}");
-    assert!(msg.contains("devplane connect"), "names the fix: {msg}");
+    assert!(
+        msg.contains("devplane agent connect"),
+        "names the fix: {msg}"
+    );
     assert!(msg.contains("--port"), "names the fix: {msg}");
     drop(squatter);
 }
@@ -261,7 +242,15 @@ async fn a_gate_leaves_no_process_behind() {
     let pidfile = dir.join("pid");
     let cmd = format!("sleep 60 & echo $! > {}; echo done", pidfile.display());
     let started = std::time::Instant::now();
-    let report = devplane::gates::run("check", &[cmd], &dir, Duration::from_secs(30), 1, &[]).await;
+    let report = devplane::gates::run(
+        "check",
+        &[cmd],
+        &dir,
+        Duration::from_secs(30),
+        1,
+        &devplane::gates::GateInput::default(),
+    )
+    .await;
     assert!(report.passed(), "{:?}", report.commands);
     assert!(
         started.elapsed() < Duration::from_secs(15),
@@ -288,7 +277,15 @@ async fn a_cancelled_gate_kills_its_group() {
     let cmd = format!("sleep 60 & echo $! > {}; wait", pidfile.display());
     let d = dir.clone();
     let task = tokio::spawn(async move {
-        devplane::gates::run("check", &[cmd], &d, Duration::from_secs(60), 1, &[]).await
+        devplane::gates::run(
+            "check",
+            &[cmd],
+            &d,
+            Duration::from_secs(60),
+            1,
+            &devplane::gates::GateInput::default(),
+        )
+        .await
     });
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let pid: i32 = loop {
@@ -311,4 +308,118 @@ async fn a_cancelled_gate_kills_its_group() {
         "the cancelled gate's child {pid} is still running"
     );
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Trust lets a headless agent run a repository's own hooks and MCP servers,
+/// and the control token is in a file an agent's tools can read: so the trust
+/// route refuses a request carrying only the token — or the token and a page's
+/// `Origin`, which any token holder can send — and takes only the window's
+/// proof for that path.
+#[tokio::test]
+async fn the_trust_route_refuses_the_control_token_alone() {
+    let (addr, c, host) = common::boot().await;
+    let repo = scratch("trust-route");
+    let path = repo.to_string_lossy().to_string();
+    let send = |extra: Option<(&'static str, String)>| {
+        let mut req = c
+            .post(format!("http://{addr}/api/projects/trust"))
+            .bearer_auth("tok")
+            .json(&serde_json::json!({ "path": path }));
+        if let Some((k, v)) = extra {
+            req = req.header(k, v);
+        }
+        req.send()
+    };
+    assert_eq!(send(None).await.unwrap().status(), 403, "the token alone");
+    assert_eq!(
+        send(Some(("Origin", format!("http://{addr}"))))
+            .await
+            .unwrap()
+            .status(),
+        403,
+        "the token and an Origin header"
+    );
+    assert!(
+        devplane::trust::Trusted::read(&host.home)
+            .unwrap()
+            .roots
+            .is_empty(),
+        "nothing was trusted"
+    );
+    let proof = devplane::config::trust_proof(common::WINDOW_KEY, &path);
+    assert_eq!(
+        send(Some(("X-Devplane-Trust-Proof", proof)))
+            .await
+            .unwrap()
+            .status(),
+        200,
+        "the window's proof for this path"
+    );
+}
+
+/// No command and no surface reaches the trust route without the window's
+/// proof: the CLI writes trust itself, and the page's one HTTP client adds the
+/// proof where the app gave it a key.
+#[test]
+fn nothing_reaches_the_trust_route_without_the_windows_proof() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut stack = vec![root.join("src/cli")];
+    let mut cli = vec![root.join("src/client.rs"), root.join("src/local.rs")];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                cli.push(p);
+            }
+        }
+    }
+    for f in &cli {
+        let body = std::fs::read_to_string(f).unwrap_or_default();
+        assert!(
+            !body.contains("/api/projects/trust"),
+            "{} calls the trust route, which takes only the window's proof",
+            f.display()
+        );
+    }
+    let client = std::fs::read_to_string(root.join("ui/src/lib/api.ts")).unwrap();
+    assert!(
+        client.contains("X-Devplane-Trust-Proof") && client.contains("/api/projects/trust"),
+        "the page's HTTP client no longer proves a trust request came from the window"
+    );
+}
+
+/// `devplane project trust` is a person's command: refused inside an agent's
+/// session, as `inbox answer --allow` is, and working from a terminal of
+/// their own with no host running.
+#[test]
+fn trusting_from_inside_an_agent_session_is_refused() {
+    let home = scratch("trust-home");
+    let repo = scratch("trust-repo");
+    let run = |agent: bool| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_devplane"));
+        cmd.args(["project", "trust", "--yes"])
+            .arg(&repo)
+            .env("DEVPLANE_HOME", &home);
+        for var in devplane::hook::AGENT_SESSION_VARS {
+            cmd.env_remove(var);
+        }
+        if agent {
+            cmd.env(devplane::driven::RUN_ENV, "run-1");
+        }
+        cmd.output().unwrap()
+    };
+    let refused = run(true);
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success() && said.contains("refused"),
+        "trusted from inside an agent session: {said}"
+    );
+    let ok = run(false);
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
 }

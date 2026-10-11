@@ -7,6 +7,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+use crate::common::{git, scratch};
+
 /// `HOME` is process-global, so only one sandbox may exist at a time. The race
 /// is between threads of one binary, so an in-process mutex suffices.
 fn home_lock() -> &'static Mutex<()> {
@@ -58,29 +60,6 @@ pub enum Shape {
     NoGates,
     /// `git init` and nothing else.
     NoCommits,
-}
-
-fn scratch(kind: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!(
-        "dp-removable-{}-{kind}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&d).expect("a scratch directory");
-    d
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let out = std::process::Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("git is on PATH");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 
 impl Sandbox {
@@ -249,7 +228,7 @@ impl Sandbox {
         std::fs::create_dir_all(&home).expect("a devplane home");
         // Port 0: test binaries run in parallel.
         let mut host = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
-            .arg("serve")
+            .args(["up", "--no-browser"])
             .arg("--port")
             .arg("0")
             .env("DEVPLANE_HOME", &home)
@@ -273,7 +252,7 @@ impl Sandbox {
         // Reap the child, or `quit` waits on a zombie that answers `kill(pid, 0)`.
         let reaper = std::thread::spawn(move || host.wait());
         let quit = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
-            .arg("quit")
+            .arg("down")
             .env("DEVPLANE_HOME", &home)
             .output()
             .expect("quit runs");

@@ -1,5 +1,5 @@
 // Talking to the host on loopback. The token arrives once in the URL from
-// `devplane open`, is kept for the tab, and is stripped from the address bar
+// `devplane up`, is kept for the tab, and is stripped from the address bar
 // so it never lands in a screenshot or a bookmark.
 
 const KEY = "vp_token";
@@ -25,7 +25,7 @@ export function claimToken(): string {
 
 export class Unauthorised extends Error {
   constructor() {
-    super("unauthorised — run `devplane open` again");
+    super("unauthorised — run `devplane up` again");
   }
 }
 
@@ -45,7 +45,7 @@ export class Unreachable extends Error {
     super(
       kind === "timeout"
         ? "Devplane is not answering (slow or wedged)"
-        : "Devplane is not running — start it with `devplane serve`",
+        : "Devplane is not running — start it with `devplane up --no-browser`",
     );
     this.kind = kind;
   }
@@ -56,20 +56,81 @@ export class Unreachable extends Error {
 export class Refused extends Error {
   readonly status: number;
   readonly body: unknown;
-  constructor(said: string, status: number, body: unknown) {
+  /// The route that refused, for the raw error behind a disclosure.
+  readonly path: string;
+  constructor(said: string, status: number, body: unknown, path = "") {
     super(said);
     this.status = status;
     this.body = body;
+    this.path = path;
   }
 }
 
 /// Whether a request writes: anything but a GET or HEAD.
 const writes = (opts: RequestInit) => !!opts.method && !/^(GET|HEAD)$/i.test(opts.method);
 
+/// The window's key, which the app hands its own webviews in memory and only
+/// on the host's origin. A browser tab has none, so the host records its
+/// answers as from the cli, and its trust requests are refused.
+function windowKey(): string {
+  const k = (window as unknown as { __devplane_window_key?: unknown }).__devplane_window_key;
+  return typeof k === "string" ? k : "";
+}
+
+/// `hex(HMAC-SHA256(key, message))`, as the host computes it.
+async function hmac(key: string, message: string): Promise<string> {
+  const enc = new TextEncoder();
+  const k = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(key),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", k, enc.encode(message)));
+  return Array.from(sig, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/// The window's proof for the requests the host takes only from it: an answer
+/// to one ask, trusting one repository, and writing or revoking one grant.
+/// Bound to that ask, path or rule, so it is worth nothing for another. Empty
+/// outside the window.
+async function windowProof(path: string, opts: RequestInit): Promise<Record<string, string>> {
+  const key = windowKey();
+  if (!key || !writes(opts) || !crypto?.subtle) return {};
+  // An answer, and taking a held one back: the host lets only the window
+  // withdraw what the window answered.
+  const asked = /^\/api\/asks\/([^/?#]+)\/(?:answer|undo)$/.exec(path);
+  if (asked) {
+    const id = decodeURIComponent(asked[1]);
+    return { "X-Devplane-Ask-Proof": await hmac(key, `ask ${id}`) };
+  }
+  // Writing or revoking a grant in the person's own policy.toml: bound to the
+  // project's root and the exact rule.
+  const grant = /^\/api\/grants(\/revoke)?$/.exec(path);
+  if (grant && typeof opts.body === "string") {
+    const { root, rule } = JSON.parse(opts.body) as { root?: unknown; rule?: unknown };
+    if (typeof root === "string" && typeof rule === "string") {
+      const [header, word] = grant[1]
+        ? ["X-Devplane-Revoke-Proof", "revoke"]
+        : ["X-Devplane-Grant-Proof", "grant"];
+      return { [header]: await hmac(key, `${word} ${root} ${rule}`) };
+    }
+  }
+  if (path === "/api/projects/trust" && typeof opts.body === "string") {
+    const repo = (JSON.parse(opts.body) as { path?: unknown }).path;
+    if (typeof repo === "string") {
+      return { "X-Devplane-Trust-Proof": await hmac(key, `trust ${repo}`) };
+    }
+  }
+  return {};
+}
+
 /// One request, with auth and error handling in one place. A 401 is its own
 /// error: the tab lost its token, and retrying cannot fix that.
 export async function api<T>(path: string, opts: RequestInit = {}): Promise<T> {
   const token = claimToken();
+  const proof = await windowProof(path, opts).catch(() => ({}));
   const timeout = writes(opts) ? {} : { signal: AbortSignal.timeout(READ_TIMEOUT_MS) };
   let res: Response;
   try {
@@ -79,6 +140,7 @@ export async function api<T>(path: string, opts: RequestInit = {}): Promise<T> {
       headers: {
         ...(opts.body ? { "content-type": "application/json" } : {}),
         ...(opts.headers ?? {}),
+        ...proof,
         Authorization: `Bearer ${token}`,
       },
       ...timeout,
@@ -101,7 +163,7 @@ export async function api<T>(path: string, opts: RequestInit = {}): Promise<T> {
     }
     const error = (body as { error?: unknown } | null)?.error;
     const said = typeof error === "string" ? error : body === null ? text.trim().slice(0, 300) : "";
-    throw new Refused(said || `${path} → ${res.status}`, res.status, body);
+    throw new Refused(said || `${path} → ${res.status}`, res.status, body ?? (text.trim().slice(0, 2000) || null), path);
   }
   return (await res.json()) as T;
 }

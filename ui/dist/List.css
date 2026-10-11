@@ -1,0 +1,184 @@
+
+  .list.svelte-3ehcwp {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    flex: 1;
+  }
+  header.svelte-3ehcwp {
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+    height: 2.2rem;
+    padding: 0 var(--s-2) 0 var(--s-4);
+    flex: none;
+  }
+  .t.svelte-3ehcwp {
+    font-size: var(--t-xs);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--dim);
+  }
+  .n.svelte-3ehcwp {
+    font-size: var(--t-xs);
+    color: var(--faint);
+    font-variant-numeric: tabular-nums;
+  }
+  header.svelte-3ehcwp .icon:where(.svelte-3ehcwp) {
+    margin-left: auto;
+    display: grid;
+    place-items: center;
+    width: 1.6rem;
+    height: 1.6rem;
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    background: none;
+    color: var(--dim);
+    cursor: pointer;
+  }
+  header.svelte-3ehcwp .icon:where(.svelte-3ehcwp):hover {
+    background: var(--raise);
+    color: var(--ink);
+  }
+  .filter.svelte-3ehcwp {
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+    margin: 0 var(--s-3) var(--s-2);
+    padding: 0 var(--s-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--faint);
+    flex: none;
+  }
+  .filter.svelte-3ehcwp:focus-within {
+    border-color: var(--accent);
+  }
+  .filter.svelte-3ehcwp input:where(.svelte-3ehcwp) {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    background: none;
+    color: var(--ink);
+    font: inherit;
+    font-size: var(--t-sm);
+    padding: 0.3rem 0;
+    outline: none;
+  }
+  .rows.svelte-3ehcwp {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    outline: none;
+    padding-bottom: var(--s-3);
+  }
+  .group.svelte-3ehcwp {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    width: 100%;
+    padding: 0.3rem var(--s-3);
+    border: 0;
+    background: none;
+    color: var(--dim);
+    font: inherit;
+    font-size: var(--t-xs);
+    font-weight: 700;
+    cursor: pointer;
+    text-align: start;
+  }
+  .group.svelte-3ehcwp .n:where(.svelte-3ehcwp) {
+    margin-left: auto;
+  }
+  .row.svelte-3ehcwp {
+    display: grid;
+    gap: 0.2rem;
+    padding: 0.45rem var(--s-3) 0.45rem 2.2rem;
+    cursor: pointer;
+    border-left: 2px solid transparent;
+  }
+  .row.svelte-3ehcwp:hover {
+    background: var(--raise);
+  }
+  .row[aria-selected="true"].svelte-3ehcwp {
+    background: var(--select);
+    border-left-color: var(--accent);
+  }
+  .rows.svelte-3ehcwp:focus-visible .row[aria-selected="true"]:where(.svelte-3ehcwp) {
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
+  }
+  .title.svelte-3ehcwp {
+    color: var(--ink);
+    font-size: var(--t-sm);
+    font-weight: 550;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .meta.svelte-3ehcwp {
+    flex-wrap: wrap;
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+    font-size: var(--t-xs);
+    min-width: 0;
+  }
+  .wait.svelte-3ehcwp {
+    color: var(--wait);
+  }
+  .claimed.svelte-3ehcwp {
+    color: var(--wait);
+    font-size: var(--t-xs);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dim.svelte-3ehcwp {
+    color: var(--faint);
+  }
+  .branch.svelte-3ehcwp {
+    font-family: var(--mono);
+    font-size: 0.6875rem;
+    color: var(--faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .quiet.svelte-3ehcwp {
+    margin: var(--s-3) var(--s-4);
+    font-size: var(--t-sm);
+    color: var(--dim);
+  }
+  .link.svelte-3ehcwp {
+    border: 0;
+    background: none;
+    padding: 0;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+  }
+  .skel.svelte-3ehcwp {
+    height: 3.2rem;
+    margin: var(--s-1) var(--s-3);
+    border-radius: var(--radius);
+    background: var(--raise);
+    opacity: 0.6;
+  }
+  .foot.svelte-3ehcwp {
+    flex: none;
+    border: 0;
+    border-top: 1px solid var(--line);
+    background: none;
+    color: var(--faint);
+    font: inherit;
+    font-size: var(--t-xs);
+    padding: var(--s-2);
+    cursor: pointer;
+  }
+  .foot.svelte-3ehcwp:hover {
+    color: var(--ink);
+  }

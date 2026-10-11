@@ -1,0 +1,39 @@
+
+  .empty.svelte-x83d2f {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: var(--s-2);
+    padding: var(--s-7) var(--s-5);
+    color: var(--dim);
+  }
+  .glyph.svelte-x83d2f {
+    color: var(--faint);
+    display: grid;
+    place-items: center;
+    width: 2.75rem;
+    height: 2.75rem;
+    border-radius: 50%;
+    background: var(--panel);
+    border: 1px solid var(--line);
+  }
+  p.svelte-x83d2f {
+    margin: 0;
+    max-width: 34rem;
+  }
+  .title.svelte-x83d2f {
+    color: var(--ink);
+    font-weight: 600;
+    font-size: var(--t-md);
+  }
+  .body.svelte-x83d2f {
+    font-size: var(--t-sm);
+  }
+  .limit.svelte-x83d2f {
+    font-size: var(--t-xs);
+    color: var(--wait);
+  }
+  .action.svelte-x83d2f {
+    margin-top: var(--s-2);
+  }

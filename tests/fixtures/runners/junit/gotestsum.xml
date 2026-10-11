@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="7" failures="1" errors="0" time="2.603421">
+	<testsuite tests="6" failures="1" skipped="1" time="2.451000" name="example.com/gop/a" timestamp="2026-09-27T07:45:32+02:00">
+		<properties>
+			<property name="go.version" value="go1.27.0 darwin/arm64"></property>
+		</properties>
+		<testcase classname="example.com/gop/a" name="TestFails" time="0.000000">
+			<failure message="Failed" type="">=== RUN   TestFails&#xA;    a_test.go:6: asked&#xA;--- FAIL: TestFails (0.00s)&#xA;</failure>
+		</testcase>
+		<testcase classname="example.com/gop/a" name="TestSkip" time="0.000000">
+			<skipped message="=== RUN   TestSkip&#xA;    a_test.go:5: later&#xA;--- SKIP: TestSkip (0.00s)&#xA;"></skipped>
+		</testcase>
+		<testcase classname="example.com/gop/a" name="TestOne" time="0.000000"></testcase>
+		<testcase classname="example.com/gop/a" name="TestSub/x" time="0.000000"></testcase>
+		<testcase classname="example.com/gop/a" name="TestSub/y" time="0.000000"></testcase>
+		<testcase classname="example.com/gop/a" name="TestSub" time="0.000000"></testcase>
+	</testsuite>
+	<testsuite tests="1" failures="0" time="2.585000" name="example.com/gop/b" timestamp="2026-09-27T07:45:32+02:00">
+		<properties>
+			<property name="go.version" value="go1.27.0 darwin/arm64"></property>
+		</properties>
+		<testcase classname="example.com/gop/b" name="TestB" time="0.000000"></testcase>
+	</testsuite>
+</testsuites>

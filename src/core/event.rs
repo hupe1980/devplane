@@ -145,7 +145,6 @@ impl ApiUsage {
 // Exported because `AbandonedQuestion` carries a `Vec<Choice>`; a type
 // reachable from an exported one must be exported too.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub struct Choice {
     /// The protocol's id for this option. Absent for an observed session,
     /// whose dialog belongs to the provider and cannot be answered from here.
@@ -218,6 +217,10 @@ pub struct RateWindow {
     pub used_percent: f64,
     /// Unix epoch seconds.
     pub resets_at: Option<i64>,
+}
+
+fn not_known() -> crate::core::decision::SessionKind {
+    crate::core::decision::SessionKind::NotKnown
 }
 
 /// A single observation about a run.
@@ -298,6 +301,44 @@ pub enum Event {
         /// The vendor's own spelling, parsed by `PermissionMode` at the edge
         /// and kept verbatim when it is a value this build does not know.
         mode: String,
+        /// When the vendor says the mode changed (`event.timestamp`), where
+        /// it is not when this arrived: telemetry is batched. `None` for a
+        /// hook, whose own time is the envelope's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<jiff::Timestamp>,
+        /// The vendor's per-process order (`event.sequence`), for two
+        /// observations in one instant.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sequence: Option<u64>,
+    },
+    /// A vendor's own report of who decided one tool call (Claude Code's
+    /// `tool_decision`), every one kept, whatever its `source`. An observation
+    /// only: it never moves a run's waiting state, and it is a decision row
+    /// only where [`crate::core::decision::attribute`] establishes the decider.
+    VendorDecided {
+        vendor: String,
+        tool: String,
+        /// `accept` or `reject`, as sent.
+        decision: String,
+        /// The vendor's word verbatim; `None` when it sent none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sequence: Option<u64>,
+        /// The vendor's `event.timestamp`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<jiff::Timestamp>,
+        /// What the attribution was computed from, filled at the edge when it
+        /// arrived: the mode in force at `at` (`None` = not known), the
+        /// session's kind, and the vendor's rule Devplane found matching.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode_in_force: Option<String>,
+        #[serde(default = "not_known")]
+        session: crate::core::decision::SessionKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        matched: Option<crate::core::decision::VendorRule>,
     },
     /// A permission decision was taken, by a rule, a hook or the human.
     PermissionDecided {
@@ -439,6 +480,11 @@ pub enum Event {
     AgentModeSeen {
         mode: String,
     },
+    /// What a driven change says about its session's mode: after set-up, and
+    /// on every reported change. The log keeps every one; the run the last.
+    ModeStated {
+        statement: crate::core::run::ModeStatement,
+    },
     /// What the agent's own `session/list` says about this session. An event,
     /// not a direct edit, so it survives replay. It carries no state field and
     /// the reducer applies it only to fill gaps.
@@ -508,9 +554,64 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "is_zero")]
         omitted_bytes: u64,
     },
+    /// The agent said, through Devplane's stop tool, that the specification
+    /// and the tests of its change conflict. The agent's claim, kept on the
+    /// change; on the run's timeline it changes no state — the stop that
+    /// follows does.
+    StopClaimed {
+        claim: String,
+        reason: String,
+        #[serde(default)]
+        paths: Vec<String>,
+    },
+    /// How a driven session ended on the agent's side: `sent` when it was
+    /// closed over the protocol (`session/close`) before the process went,
+    /// `false` when the agent does not offer a close or did not answer one.
+    SessionClosed {
+        sent: bool,
+    },
+    /// A notice the agent addressed to the person (`session/update` kind
+    /// `notice`): advisory, the agent's own words, never an instruction to
+    /// Devplane.
+    NoticeSeen {
+        /// `info`, `warning`, `error`, or the agent's own value.
+        severity: String,
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+    /// The agent said it needs signing in before a session can start, and
+    /// offered these ways. The run ends; nothing was asked for or stored.
+    SignInRequired {
+        methods: Vec<SignInMethod>,
+    },
+    /// Devplane's MCP server could not be offered to this session, so the
+    /// agent cannot ask Devplane about its change.
+    ToolsNotOffered,
     /// Something changed that no observation describes (a change phase, a gate
     /// verdict, a snooze). Tells subscribers to ask again; applied to no run.
     Refresh,
+}
+
+/// One way an agent says it can be signed in, as it named it. Agent text:
+/// shown quoted, acted on only by the person's choice, and never carrying a
+/// credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignInMethod {
+    /// The agent's id for the method, what `authenticate` names.
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// `agent` (the agent signs in itself when asked), `terminal` (the
+    /// agent's own login, run in a terminal the person operates), or `other`
+    /// for any kind the protocol does not define: shown, never acted on.
+    pub kind: String,
+    /// Terminal methods only: what is added to the agent's command.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -554,6 +655,11 @@ impl Event {
             | Event::TasksSent { .. }
             | Event::SpecObserved { .. }
             | Event::EditReported { .. }
+            | Event::StopClaimed { .. }
+            | Event::SessionClosed { .. }
+            | Event::NoticeSeen { .. }
+            | Event::SignInRequired { .. }
+            | Event::ToolsNotOffered
             | Event::Refresh => Source::Host,
             _ => Source::Hook,
         }
@@ -572,6 +678,7 @@ impl Event {
             Event::ToolFinished { .. } => "tool_finished",
             Event::PlanUpdated { .. } => "plan_updated",
             Event::PermissionModeSeen { .. } => "permission_mode_seen",
+            Event::VendorDecided { .. } => "vendor_decided",
             Event::PermissionDecided { .. } => "permission_decided",
             Event::QuestionAnswered { .. } => "question_answered",
             Event::ConfigChanged { .. } => "config_changed",
@@ -592,6 +699,7 @@ impl Event {
             Event::ModelChanged { .. } => "model_changed",
             Event::SessionEnded { .. } => "session_ended",
             Event::AgentModeSeen { .. } => "agent_mode_seen",
+            Event::ModeStated { .. } => "mode_stated",
             Event::SessionListed { .. } => "session_listed",
             Event::RosterSeen { .. } => "roster_seen",
             Event::StatusSample(_) => "status_sample",
@@ -600,6 +708,11 @@ impl Event {
             Event::TasksSent { .. } => "tasks_sent",
             Event::SpecObserved { .. } => "spec_observed",
             Event::EditReported { .. } => "edit_reported",
+            Event::StopClaimed { .. } => "stop_claimed",
+            Event::SessionClosed { .. } => "session_closed",
+            Event::NoticeSeen { .. } => "notice_seen",
+            Event::SignInRequired { .. } => "sign_in_required",
+            Event::ToolsNotOffered => "tools_not_offered",
             Event::Refresh => "refresh",
         }
     }
@@ -617,6 +730,8 @@ impl Event {
                 | Event::Lost { .. }
                 | Event::TasksSent { .. }
                 | Event::SpecObserved { .. }
+                | Event::SessionClosed { .. }
+                | Event::ToolsNotOffered
                 | Event::Refresh
         )
     }

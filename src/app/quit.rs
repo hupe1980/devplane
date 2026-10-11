@@ -1,4 +1,4 @@
-//! Quitting: say what it stops, then stop it, the way `devplane quit` does.
+//! Quitting: say what it stops, then stop it, the way `devplane down` does.
 //!
 //! The answer window's `quit` surface reads `/api/quitting`, prints the CLI's
 //! sentence, and offers Quit (posts `/api/quit`) or Keep running. `/api/quit`

@@ -56,7 +56,7 @@ impl Snapshot {
     pub fn limits(&self) -> Option<&'static str> {
         (!self.from_host).then_some(
             "read from the store — no host is running, so live sessions, GitHub and the \
-             gate probe are not visible from here; `devplane open` starts one",
+             gate probe are not visible from here; `devplane up` starts one",
         )
     }
 
@@ -163,6 +163,10 @@ pub struct ChangeBrief {
     /// The gates' word (`verified`, `stale`, `failed`, `not run`, `no gates
     /// declared`), or `configuration unreadable` when `devplane.toml` fails.
     pub standing: String,
+    /// When the tree `state` and `standing` read was read: the board shows
+    /// them from the last read, not a read made now. `None` when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_as_of: Option<String>,
 }
 
 /// What the board shows for one run; a view, so domain fields do not leak
@@ -180,9 +184,13 @@ pub struct RunView {
     #[serde(default)]
     pub permission_mode: Option<String>,
     /// Whether a person is in the loop for an ordinary call; `None` when the
-    /// mode is unreported or unrecognised.
+    /// mode is unreported or unrecognised. For a driven run, from its mode
+    /// statement.
     #[serde(default)]
     pub asks_a_person: Option<bool>,
+    /// What a driven run says about its session's permission mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_statement: Option<ModeStatementView>,
     pub state: String,
     #[serde(default)]
     pub waiting_for: Option<String>,
@@ -237,6 +245,44 @@ pub struct RunView {
     pub sent_says: String,
 }
 
+/// A run's mode statement as surfaces carry it: the sentence, and the facts it
+/// is made of. *Decides without you* is never folded into a count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeStatementView {
+    pub sentence: String,
+    /// The agent's own id for the mode.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// The agent's own name for it.
+    #[serde(default)]
+    pub name: Option<String>,
+    pub reading: crate::core::run::Reading,
+    #[serde(default)]
+    pub decides: Option<String>,
+    pub why: crate::core::run::Why,
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// When it was said.
+    #[serde(default)]
+    pub at: Option<String>,
+}
+
+impl ModeStatementView {
+    pub fn of(run: &Run) -> Option<Self> {
+        let s = run.mode_statement.as_ref()?;
+        Some(Self {
+            sentence: s.sentence(),
+            mode: s.mode.clone(),
+            name: s.name.clone(),
+            reading: s.reading,
+            decides: s.decides.clone(),
+            why: s.why,
+            detail: s.detail.clone(),
+            at: run.mode_statement_at.map(|t| t.to_string()),
+        })
+    }
+}
+
 impl RunView {
     pub fn of(run: &Run, project_name: Option<String>, now: jiff::Timestamp) -> Self {
         Self {
@@ -246,7 +292,11 @@ impl RunView {
             agent: run.agent.clone(),
             mode: run.mode.as_str().into(),
             permission_mode: run.permission_mode.as_ref().map(|m| m.label().to_string()),
-            asks_a_person: run.permission_mode.as_ref().and_then(|m| m.asks_a_person()),
+            asks_a_person: match &run.mode_statement {
+                Some(s) => s.asks_a_person(),
+                None => run.permission_mode.as_ref().and_then(|m| m.asks_a_person()),
+            },
+            mode_statement: ModeStatementView::of(run),
             state: run.state.as_str().into(),
             waiting_for: match &run.state {
                 crate::core::RunState::Waiting(w) => Some(format!("{w:?}").to_lowercase()),
@@ -398,6 +448,7 @@ pub fn board(snap: &Snapshot, all: bool, broken: &[(PathBuf, String)]) -> BoardR
                     branch: w.branch.clone(),
                     updated_at: w.updated_at.to_string(),
                     standing: w.verdict(declared, w.tree_now.as_ref()).word().to_string(),
+                    tree_as_of: w.tree_as_of.map(|t| t.to_string()),
                 }
             })
             .collect(),
@@ -432,13 +483,15 @@ pub async fn current_inbox(
         .as_ref()
         .map(|f| f.items.clone())
         .unwrap_or_default();
-    let forge_snoozed = forge.snoozed;
+    let mut snoozed = forge.snoozed;
     let forge_items = forge.items;
 
-    // Unanswered questions in committed spec files, one item per project that
-    // declares markers. Derived here because `World` may not walk a folder.
+    // Unresolved-question lines in each in-flight change's specification,
+    // one item per line, read from the checkout the change works in. Derived
+    // here because `World` may not walk a folder.
     let mut from_disk = {
         let mut out = Vec::new();
+        let asked = crate::core::attention::AttentionKind::SpecQuestion;
         for p in snap.world.projects() {
             let markers = crate::core::ProjectConfig::load(&p.root)
                 .map(|c| c.spec.open_questions)
@@ -446,43 +499,69 @@ pub async fn current_inbox(
             if markers.is_empty() {
                 continue;
             }
-            let plans: Vec<(String, crate::spec::Plan)> = changes
+            for w in changes
                 .iter()
                 .filter(|w| w.project_id == p.id && !w.is_settled())
-                .filter_map(|w| {
-                    let spec = w.spec.as_deref()?;
-                    Some((
-                        w.id.as_str().to_string(),
-                        crate::spec::Plan::read(&p.root, spec, &markers),
-                    ))
-                })
-                .collect();
-            out.extend(crate::core::attention::plan_question_item_at(
-                &p.name,
-                &p.id,
-                &plans,
-                snap.started_at.unwrap_or(snap.now),
-            ));
+            {
+                let questions = crate::draft::question_lines(w, &p.root, &markers);
+                if questions.is_empty() {
+                    continue;
+                }
+                let mark = crate::core::attention::ActivityMark::of_change(w, |r| {
+                    snap.world.run(r).map(|r| r.last_event_at)
+                });
+                let items = crate::core::attention::spec_question_items_at(
+                    &p.name,
+                    w,
+                    &questions,
+                    &markers,
+                    snap.started_at.unwrap_or(snap.now),
+                );
+                for item in items {
+                    if w.snoozed.hides(&asked, snap.now, &mark)
+                        && let Some(until) = w.snoozed.until(&asked)
+                    {
+                        snoozed.push(crate::core::attention::SnoozedRow::new(
+                            item.id.as_str().to_string(),
+                            &asked,
+                            item.title,
+                            until,
+                            &format!("/api/changes/{}", w.id.as_str()),
+                            !w.current_run().is_some_and(|r| snap.live.contains(r)),
+                        ));
+                        continue;
+                    }
+                    out.push(item);
+                }
+            }
         }
         out
     };
 
     // Spec drift under a run, for every open change; its snooze covers it.
-    let mut drifts_snoozed = 0;
     {
         let runs: Vec<&Run> = snap.world.runs().collect();
+        let drifted = crate::core::attention::AttentionKind::SpecDrifted;
         for w in changes.iter().filter(|w| !w.is_settled()) {
+            let mark = crate::core::attention::ActivityMark::of_change(w, |r| {
+                snap.world.run(r).map(|r| r.last_event_at)
+            });
             for d in w.drifts(&runs) {
-                if w.snoozed.hides(
-                    &crate::core::attention::AttentionKind::SpecDrifted,
-                    snap.now,
-                ) {
-                    drifts_snoozed += 1;
+                let item = crate::core::attention::spec_drifted_item_at(w, &d, snap.now);
+                if w.snoozed.hides(&drifted, snap.now, &mark)
+                    && let Some(until) = w.snoozed.until(&drifted)
+                {
+                    snoozed.push(crate::core::attention::SnoozedRow::new(
+                        item.id.as_str().to_string(),
+                        &drifted,
+                        item.title,
+                        until,
+                        &format!("/api/changes/{}", w.id.as_str()),
+                        !w.current_run().is_some_and(|r| snap.live.contains(r)),
+                    ));
                     continue;
                 }
-                from_disk.push(crate::core::attention::spec_drifted_item_at(
-                    w, &d, snap.now,
-                ));
+                from_disk.push(item);
             }
         }
     }
@@ -515,7 +594,7 @@ pub async fn current_inbox(
         forge_items,
         from_disk,
     );
-    derived.snoozed += forge_snoozed + drifts_snoozed;
+    derived.snoozed.extend(snoozed);
     let items = &mut derived.items;
     // Asks that outlived the process that asked them, only where the run is
     // not live (a live run already produced its own item).
@@ -525,58 +604,10 @@ pub async fn current_inbox(
         }
         items.push(crate::core::attention::stranded_ask_item(ask, snap.now));
     }
-    // Reports, for whoever decides: the target for an open one, the filer for
-    // a GitHub draft. The target's `[questions] deadline` sets the wait.
-    items.extend(report_items(snap, store).await);
     let mut derived = derived.rank();
     fill_offers(snap, store, policy, &mut derived.items).await;
     derived
 }
-
-/// Every report that needs a person, as inbox rows.
-async fn report_items(
-    snap: &Snapshot,
-    store: &crate::store::Store,
-) -> Vec<crate::core::AttentionItem> {
-    let reports = match store.reports(REPORTS_READ).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "could not read the reports");
-            return Vec::new();
-        }
-    };
-    let windows: BTreeMap<ProjectId, Option<std::time::Duration>> = snap
-        .world
-        .projects()
-        .map(|p| {
-            let window = crate::core::ProjectConfig::load(&p.root)
-                .ok()
-                .and_then(|c| c.questions.deadline())
-                .and_then(|d| match d {
-                    crate::core::ask::Deadline::Never => None,
-                    crate::core::ask::Deadline::After(s) => {
-                        Some(std::time::Duration::from_secs(s.into()))
-                    }
-                });
-            (p.id.clone(), window)
-        })
-        .collect();
-    reports
-        .iter()
-        .filter_map(|r| {
-            let window = match &r.target {
-                crate::core::report::Target::Project { project, .. } => {
-                    windows.get(project).copied().flatten()
-                }
-                _ => None,
-            };
-            crate::core::attention::report_item_at(r, window, snap.now)
-        })
-        .collect()
-}
-
-/// The most reports one read considers.
-const REPORTS_READ: i64 = 500;
 
 /// The rule to paste, on every permission item that can have one. A query,
 /// so bounded: only when a permission item is open, scoped to its repository.
@@ -662,7 +693,101 @@ async fn fill_offers(
             Ok(offer) => items[n].offer = Some(offer),
             Err(why) => items[n].no_offer = Some(why.into()),
         }
+        let project = items[n].project_id.clone();
+        items[n].grant = grant_note(store, policy, &cwd, &tool, &input, project.as_ref()).await;
     }
+}
+
+/// What a permission item says about a grant: the person's own rule offered
+/// after their repeated, identical, proved answers; why none is; or a grant
+/// of theirs that lapsed. Counted from the `asks` rows alone.
+async fn grant_note(
+    store: &crate::store::Store,
+    policy: &crate::policy_cache::PolicyCache,
+    cwd: &std::path::Path,
+    tool: &str,
+    input: &Value,
+    project: Option<&crate::core::ProjectId>,
+) -> crate::core::attention::GrantNote {
+    use crate::core::attention::GrantNote;
+    use crate::core::grant;
+    let now = jiff::Timestamp::now();
+    if let Some(g) = policy.lapsed_for(cwd, tool, input, now) {
+        return GrantNote {
+            grant_lapsed: Some(format!(
+                "Your grant `{}` for this project lapsed at {} — so this is asked again. \
+                 Change or remove its `until` in {} to answer it again.",
+                g.rule(),
+                g.until().map(|t| t.to_string()).unwrap_or_default(),
+                grant::FILE
+            )),
+            ..GrantNote::default()
+        };
+    }
+    let (Some(root), Some(content)) = (
+        crate::repo::governing_root(cwd).and_then(|r| r.canonicalize().ok()),
+        crate::core::policy::rule_content(tool, input),
+    ) else {
+        return GrantNote::default();
+    };
+    let history: Vec<grant::Answered> = store
+        .answered_permissions(2000)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|a| a.project.as_ref() == project)
+        .filter_map(grant::Answered::from_ask)
+        .collect();
+    let (grants, error) = policy.grants();
+    if error.is_some() {
+        // A file that will not load is the person's to fix; nothing is offered
+        // on top of it.
+        return GrantNote::default();
+    }
+    let shared = crate::core::ProjectConfig::load(&root)
+        .map(|c| c.workspace.share)
+        .unwrap_or_default();
+    let agent = crate::policy_cache::agent_allow_rules(&root, dirs::home_dir().as_deref());
+    let allows = |rule: &str| !crate::policy_cache::widens_the_agent(rule, &agent);
+    let cx = grant::OfferContext {
+        root: &root,
+        thresholds: grants.thresholds(&root),
+        shared: &shared,
+        has_table: grants.has_project(&root),
+        granted: grants.in_project(&root).iter().map(|g| g.rule()).collect(),
+        agent_allows: &allows,
+    };
+    match grant::offer(tool, &content, &history, &cx) {
+        Ok(o) => GrantNote {
+            grant_offer: Some(o),
+            ..GrantNote::default()
+        },
+        Err(no) => GrantNote {
+            grant_no: no.says(),
+            ..GrantNote::default()
+        },
+    }
+}
+
+/// The offer for `rule` in the project at `root`, re-derived from the ledger
+/// now: what accepting a grant requires.
+pub async fn grant_offered_now(
+    store: &crate::store::Store,
+    policy: &crate::policy_cache::PolicyCache,
+    root: &std::path::Path,
+    project: Option<&crate::core::ProjectId>,
+    rule: &str,
+) -> Option<crate::core::grant::GrantOffer> {
+    let parsed = crate::core::Rule::parse(rule, crate::core::policy::Class::Allow)?;
+    let tool = parsed.tool_name().to_string();
+    let content = rule
+        .strip_prefix(&format!("{tool}("))
+        .and_then(|r| r.strip_suffix(')'))?
+        .to_string();
+    let field = crate::core::policy::rule_content_field(&tool)?;
+    let input = serde_json::json!({ field: content });
+    let note = grant_note(store, policy, root, &tool, &input, project).await;
+    note.grant_offer.filter(|o| o.rule == rule)
 }
 
 /// One waiting row, with the name of the project it came from.
@@ -693,13 +818,29 @@ pub struct InboxQuery {
     pub needs_you: bool,
 }
 
+/// The inbox's one number ([`crate::core::attention::count`]) as of `snap`,
+/// with `held` the ask a held answer belongs to. What the tray and the dock
+/// badge show; `/api/inbox` carries the same figure as `count`.
+pub async fn inbox_count(
+    snap: &Snapshot,
+    store: &crate::store::Store,
+    policy: &crate::policy_cache::PolicyCache,
+    held: Option<&str>,
+) -> usize {
+    let derived = current_inbox(snap, store, policy).await;
+    crate::core::attention::count(derived.items, held)
+}
+
 /// The inbox as a person sees it: narrowed, inhibited, folded, with the close.
+/// `held` is the ask a held answer belongs to: its item is out of the list
+/// and out of the count while it waits.
 pub async fn inbox(
     snap: &Snapshot,
     store: &crate::store::Store,
     policy: &crate::policy_cache::PolicyCache,
     q: &InboxQuery,
-) -> Value {
+    held: Option<&str>,
+) -> InboxView {
     let names = snap.names();
     // Read before the mark advances, so *new* means new when it was opened.
     let mark = store.last_look().await;
@@ -711,9 +852,17 @@ pub async fn inbox(
         project: q.project.as_deref(),
         needs_you: q.needs_you,
     };
-    let derived = current_inbox(snap, store, policy).await;
+    let mut derived = current_inbox(snap, store, policy).await;
+    if let Some(h) = held {
+        derived
+            .items
+            .retain(|i| i.ask.as_ref().is_none_or(|a| a.as_str() != h));
+    }
+    // The whole inbox's number, whatever this read narrows to.
+    let count = crate::core::attention::count(derived.items.clone(), None);
     let raised = derived.items.len();
-    let snoozed = derived.snoozed;
+    let snoozed = derived.snoozed.len();
+    let snoozed_rows = derived.snoozed;
     let (in_scope, narrowed) = crate::core::attention::narrow(
         derived.items,
         &narrowing,
@@ -755,10 +904,9 @@ pub async fn inbox(
     // The close is composed here so no surface words a day itself. Empty means
     // nothing raised at all, and it does not render over a narrowed list.
     let nothing_raised = rows.is_empty() && folded.is_empty() && inhibited.is_empty();
-    let close = if narrowing.is_none() {
-        close(snap, store, nothing_raised).await
-    } else {
-        Value::Null
+    let close = match narrowing.is_none() {
+        true => Some(close(snap, store, nothing_raised).await),
+        false => None,
     };
 
     // Recorded after the close, so the boundary reported is the one that held.
@@ -771,16 +919,99 @@ pub async fn inbox(
             .collect();
         let _ = store.mark_folded(&hidden).await;
     }
-    json!({
-        "items": rows,
-        "folded": folded,
-        "inhibited": inhibited,
-        "narrowed": narrowed,
-        // A snooze is a choice; counted so the list does not look like calm.
-        "snoozed": snoozed,
-        "close": close,
-        "limits": snap.limits(),
-    })
+    InboxView {
+        items: rows,
+        folded,
+        inhibited,
+        narrowed,
+        count,
+        snoozed,
+        snoozed_rows,
+        close,
+        limits: snap.limits().map(str::to_string),
+        held: None,
+        landed: None,
+    }
+}
+
+/// `/api/inbox`: served by the host, composed by a terminal with no host, and
+/// read back by the terminal as this same type.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InboxView {
+    pub items: Vec<WaitingRow>,
+    #[serde(default)]
+    pub folded: Vec<crate::core::attention::Summary>,
+    #[serde(default)]
+    pub inhibited: Vec<crate::core::attention::Inhibited>,
+    #[serde(default)]
+    pub narrowed: Option<crate::core::attention::Narrowed>,
+    /// The inbox's one number, of the whole inbox even when this read is
+    /// narrowed ([`crate::core::attention::count`]): what the badge, the
+    /// activity bar and the status bar show.
+    #[serde(default)]
+    pub count: usize,
+    /// A snooze is a choice; counted so the list does not look like calm.
+    #[serde(default)]
+    pub snoozed: usize,
+    /// What the snooze keeps off the list, one row per item, each with its
+    /// way back: `snoozed` is their number.
+    #[serde(default)]
+    pub snoozed_rows: Vec<crate::core::attention::SnoozedRow>,
+    /// The boundary and the day's close; absent over a narrowed list.
+    #[serde(default)]
+    pub close: Option<Close>,
+    /// Why the answer is partial, when it was read without a host.
+    #[serde(default)]
+    pub limits: Option<String>,
+    /// The answer the window gave and has not sent yet: its item is out of
+    /// `items` while held, and is shown here instead — never hidden uncounted.
+    #[serde(default)]
+    pub held: Option<crate::hold::HeldView>,
+    /// What the last held answer came to once it was sent.
+    #[serde(default)]
+    pub landed: Option<crate::hold::Landed>,
+}
+
+impl InboxView {
+    /// Lays the host's held answer over the inbox: the item it answers leaves
+    /// the list while it waits, and the hold says what it is.
+    pub fn hold(
+        &mut self,
+        held: Option<crate::hold::HeldView>,
+        landed: Option<crate::hold::Landed>,
+    ) {
+        // The item it answers was left out of the list and the count when the
+        // inbox was composed ([`inbox`]'s `held`).
+        if let Some(h) = &held {
+            self.items
+                .retain(|r| r.item.ask.as_ref().is_none_or(|a| a.as_str() != h.ask));
+        }
+        self.held = held;
+        self.landed = landed;
+    }
+}
+
+/// The boundary since the last look and, for an empty inbox, what the day
+/// came to. Every sentence is composed here; surfaces only lay them out.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Close {
+    #[serde(default)]
+    pub since_last_look: Option<String>,
+    #[serde(default)]
+    pub looked_at: Option<String>,
+    /// The day could not be read; never shown as an empty day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreadable: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet: Option<bool>,
+    #[serde(default)]
+    pub sentences: Vec<String>,
+    #[serde(default)]
+    pub next: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keeps_running: Option<String>,
 }
 
 /// The review's leading facts for a change ready to decide, composed from the
@@ -793,6 +1024,11 @@ async fn ready_facts(
     let r = review_read(snap, store, id, true).await.ok()?;
     let files: Vec<&ReviewFile> = r.groups.iter().flat_map(|g| g.files.iter()).collect();
     let hunks = files.iter().map(|f| f.hunks.len() as u32).sum();
+    let hunks_seen = files
+        .iter()
+        .flat_map(|f| f.hunks.iter())
+        .filter(|h| h.seen)
+        .count() as u32;
     let not_covered = r.coverage_absent.is_none().then(|| {
         files
             .iter()
@@ -807,22 +1043,24 @@ async fn ready_facts(
             .map(|f| f.hunks.len() as u32)
             .sum()
     });
-    Some(crate::core::review::ReadyFacts::of(
-        r.qualifier,
-        hunks,
-        not_covered,
-        not_asked_for,
-    ))
+    Some(crate::core::review::ReadyFacts {
+        hunks_seen: Some(hunks_seen),
+        ..crate::core::review::ReadyFacts::of(r.qualifier, hunks, not_covered, not_asked_for)
+    })
 }
 
 /// The boundary, and — for an empty inbox — what the day came to.
-pub async fn close(snap: &Snapshot, store: &crate::store::Store, empty: bool) -> Value {
+pub async fn close(snap: &Snapshot, store: &crate::store::Store, empty: bool) -> Close {
     let now = snap.now;
     let last = store.last_look().await;
     let since = crate::core::close::since_last_look(now, last);
     let looked_at = last.map(|t| t.to_string());
     if !empty {
-        return json!({ "since_last_look": since, "looked_at": looked_at });
+        return Close {
+            since_last_look: since,
+            looked_at,
+            ..Close::default()
+        };
     }
     // Midnight local: the day the person's machine had.
     let start = jiff::Zoned::now()
@@ -834,11 +1072,12 @@ pub async fn close(snap: &Snapshot, store: &crate::store::Store, empty: bool) ->
     let day = match store.day(&start.to_string()).await {
         Ok(d) => d,
         Err(e) => {
-            return json!({
-                "since_last_look": since,
-                "looked_at": looked_at,
-                "unreadable": e.to_string(),
-            });
+            return Close {
+                since_last_look: since,
+                looked_at,
+                unreadable: Some(e.to_string()),
+                ..Close::default()
+            };
         }
     };
     let (decisions, waited) = day;
@@ -880,66 +1119,112 @@ pub async fn close(snap: &Snapshot, store: &crate::store::Store, empty: bool) ->
              running and repeats nothing."
         ),
     };
-    json!({
-        "since_last_look": since,
-        "looked_at": looked_at,
-        "clear": true,
-        "quiet": tally.quiet(),
-        "sentences": tally.sentences(),
-        "next": soonest,
-        "keeps_running": keeps_running,
-    })
+    Close {
+        since_last_look: since,
+        looked_at,
+        unreadable: None,
+        clear: true,
+        quiet: Some(tally.quiet()),
+        sentences: tally.sentences(),
+        next: soonest,
+        keeps_running: Some(keeps_running),
+    }
 }
 
 // ── Asks ────────────────────────────────────────────────────────────────────
 
+/// One ask, with its outcome sentence composed in `core::ask`: what the
+/// host answers and what the CLI reads back, one type for both.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskView {
+    pub id: String,
+    pub kind: String,
+    pub run: String,
+    pub project: Option<String>,
+    pub message: String,
+    pub payload: Value,
+    pub asked_at: String,
+    pub open: bool,
+    pub outcome: String,
+    pub deadline: crate::core::ask::Deadline,
+    pub deadline_says: String,
+    pub answered_at: Option<String>,
+    pub answered_from: Option<String>,
+    pub delivery: Option<crate::core::ask::Delivery>,
+    pub delivered: Option<bool>,
+    pub ended: Option<crate::core::ask::Ended>,
+}
+
+/// A question nobody answered in a watched session: the agent asked and
+/// moved on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AbandonedAsk {
+    pub run: String,
+    pub project: Option<String>,
+    pub question: String,
+    pub options: Vec<crate::core::event::Choice>,
+    pub asked_at: String,
+    pub abandoned_at: String,
+    pub moved_on_to: Option<String>,
+    pub authority: String,
+    pub outcome: String,
+}
+
+/// `/api/asks`: everything an agent has asked, and what became of each one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AsksView {
+    pub open: Vec<AskView>,
+    pub settled: Vec<AskView>,
+    pub abandoned: Vec<AbandonedAsk>,
+    /// Which vendors are unseen, so an empty list never reads as none.
+    pub blind_to: Vec<String>,
+}
+
 /// One ask, with its outcome sentence composed in `core::ask`.
-pub fn render_ask(a: &Ask) -> Value {
-    json!({
-        "id": a.id.as_str(),
-        "kind": a.kind.as_str(),
-        "run": a.run.as_str(),
-        "project": a.project.as_ref().map(|p| p.as_str()),
-        "message": a.message,
-        "payload": a.payload,
-        "asked_at": a.asked_at.to_string(),
-        "open": a.is_open(),
-        "outcome": a.outcome(),
-        "deadline": a.deadline,
-        "deadline_says": a.deadline.says(),
-        "answered_at": a.answered_at.map(|t| t.to_string()),
-        "answered_from": a.answered_from,
-        "delivery": a.delivery,
-        "delivered": a.delivery.as_ref().map(|d| d.reached_the_agent()),
-        "ended": a.ended,
-    })
+pub fn render_ask(a: &Ask) -> AskView {
+    AskView {
+        id: a.id.as_str().to_string(),
+        kind: a.kind.as_str().to_string(),
+        run: a.run.as_str().to_string(),
+        project: a.project.as_ref().map(|p| p.as_str().to_string()),
+        message: a.message.clone(),
+        payload: a.payload.clone(),
+        asked_at: a.asked_at.to_string(),
+        open: a.is_open(),
+        outcome: a.outcome(),
+        deadline: a.deadline,
+        deadline_says: a.deadline.says(),
+        answered_at: a.answered_at.map(|t| t.to_string()),
+        answered_from: a.answered_from.clone(),
+        delivery: a.delivery.clone(),
+        delivered: a.delivery.as_ref().map(|d| d.reached_the_agent()),
+        ended: a.ended.clone(),
+    }
 }
 
 /// Everything an agent has asked, and what became of each one.
-pub fn asks(snap: &Snapshot, recent: &[Ask]) -> Value {
+pub fn asks(snap: &Snapshot, recent: &[Ask]) -> AsksView {
     let settled: Vec<_> = recent.iter().filter(|a| !a.is_open()).collect();
     // Questions nobody answered from watched-only sessions: not answerable
     // `asks` rows, but *the agent gave up* is one of the outcomes.
-    let mut abandoned: Vec<Value> = snap
+    let mut abandoned: Vec<AbandonedAsk> = snap
         .world
         .runs()
         .flat_map(|r| {
-            r.abandoned_questions.iter().map(move |q| {
-                json!({
-                    "run": r.id.as_str(),
-                    "project": r.project_id.as_ref().map(|p| p.as_str()),
-                    "question": q.question,
-                    "options": q.options,
-                    "asked_at": q.asked_at.to_string(),
-                    "abandoned_at": q.abandoned_at.to_string(),
-                    "moved_on_to": q.moved_on_to,
-                    "authority": "nobody",
-                    "outcome": "nobody answered: the agent asked and moved on",
-                })
+            r.abandoned_questions.iter().map(move |q| AbandonedAsk {
+                run: r.id.as_str().to_string(),
+                project: r.project_id.as_ref().map(|p| p.as_str().to_string()),
+                question: q.question.clone(),
+                options: q.options.clone(),
+                asked_at: q.asked_at.to_string(),
+                abandoned_at: q.abandoned_at.to_string(),
+                moved_on_to: q.moved_on_to.clone(),
+                authority: "nobody".to_string(),
+                outcome: "nobody answered: the agent asked and moved on".to_string(),
             })
         })
         .collect();
-    abandoned.sort_by(|a, b| b["abandoned_at"].as_str().cmp(&a["abandoned_at"].as_str()));
+    abandoned.sort_by(|a, b| b.abandoned_at.cmp(&a.abandoned_at));
     // Which vendors are unseen, so an empty list never reads as none.
     let mut blind: Vec<String> = snap
         .world
@@ -953,12 +1238,12 @@ pub fn asks(snap: &Snapshot, recent: &[Ask]) -> Value {
         .collect();
     blind.sort();
     blind.dedup();
-    json!({
-        "open": snap.open_asks.iter().map(render_ask).collect::<Vec<_>>(),
-        "settled": settled.iter().map(|a| render_ask(a)).collect::<Vec<_>>(),
-        "abandoned": abandoned,
-        "blind_to": blind,
-    })
+    AsksView {
+        open: snap.open_asks.iter().map(render_ask).collect(),
+        settled: settled.iter().map(|a| render_ask(a)).collect(),
+        abandoned,
+        blind_to: blind,
+    }
 }
 
 // ── Modes ───────────────────────────────────────────────────────────────────
@@ -1032,15 +1317,320 @@ pub async fn decisions(
     about: Option<&str>,
     limit: i64,
     without_me: bool,
-) -> anyhow::Result<Vec<crate::core::Decision>> {
+) -> anyhow::Result<Vec<DecisionRow>> {
     let d = store.decisions(about, limit).await?;
-    Ok(match without_me {
+    let d: Vec<crate::core::Decision> = match without_me {
         true => d
             .into_iter()
             .filter(|r| r.authority.was_taken_for_you())
             .collect(),
         false => d,
-    })
+    };
+    // Each run's reported edits are read once, only for runs whose decisions
+    // name a call.
+    // A watched call carries the vendor's id too, and its agent reports no
+    // edits through this channel: only a driven run's rows get the field.
+    let mut by_run: std::collections::HashMap<crate::core::RunId, (Vec<EditView>, bool, bool)> =
+        Default::default();
+    for run in d
+        .iter()
+        .filter(|r| r.call_id.is_some())
+        .filter_map(|r| r.run_id.clone())
+    {
+        if by_run.contains_key(&run) {
+            continue;
+        }
+        let edits = store
+            .edits_reported(&run)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| EditView::of(e.event))
+            .collect();
+        let kept = keeps_transcripts(store, &run).await;
+        let driven = driven_run(store, &run).await;
+        by_run.insert(run, (edits, kept, driven));
+    }
+    // The vendor's own `hook` reports, attached to the row they name.
+    let reports = hook_reports(store, &d).await;
+    Ok(d.into_iter()
+        .map(|decision| {
+            let (edits, kept) = match (&decision.call_id, &decision.run_id) {
+                (Some(call), Some(run)) => match by_run.get(run).cloned() {
+                    Some((all, kept, true)) => {
+                        let mine: Vec<EditView> =
+                            all.into_iter().filter(|e| &e.call_id == call).collect();
+                        (Some(mine), kept)
+                    }
+                    _ => (None, true),
+                },
+                _ => (None, true),
+            };
+            let report = match (&decision.call_id, decision.vendor.is_none()) {
+                (Some(call), true) => reports.get(call).cloned(),
+                _ => None,
+            };
+            let no_edit = match &edits {
+                Some(e) if e.is_empty() && !kept => {
+                    Some("no diff was kept: this project keeps no transcripts".to_string())
+                }
+                Some(e) if e.is_empty() => Some("the agent sent no diff for this call".to_string()),
+                _ => None,
+            };
+            DecisionRow {
+                decision,
+                edits,
+                no_edit,
+                report,
+            }
+        })
+        .collect())
+}
+
+/// Whether Devplane drives a run: its first event is the host's own.
+async fn driven_run(store: &crate::store::Store, run: &crate::core::RunId) -> bool {
+    store
+        .events_for_run(run, 1)
+        .await
+        .unwrap_or_default()
+        .first()
+        .is_some_and(|e| e.source == crate::core::Source::Host)
+}
+
+/// The runs a ledger query is about: the run itself, or a change's runs.
+async fn runs_about(
+    store: &crate::store::Store,
+    about: Option<&str>,
+) -> Option<Vec<crate::core::RunId>> {
+    let id = about?;
+    let changes = store.load_changes().await.unwrap_or_default();
+    match changes.into_iter().find(|c| c.id.as_str() == id) {
+        Some(c) => Some(c.runs),
+        None => Some(vec![crate::core::RunId::new(id)]),
+    }
+}
+
+/// A vendor's report of who decided one call, as a surface shows it beside
+/// the row it belongs to or in the list of calls nobody can be named for.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VendorReport {
+    pub at: jiff::Timestamp,
+    pub run: String,
+    pub tool: String,
+    /// `accept` or `reject`, as the vendor sent it.
+    pub decision: String,
+    pub vendor: String,
+    /// The vendor's word verbatim; absent when it sent none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    /// Why no decider is named, in the sentence surfaces print. Absent on a
+    /// report attached to a row. There is no authority field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+impl VendorReport {
+    fn of(e: &crate::core::EventEnvelope) -> Option<Self> {
+        let crate::core::Event::VendorDecided {
+            vendor,
+            tool,
+            decision,
+            source,
+            call_id,
+            at,
+            ..
+        } = &e.event
+        else {
+            return None;
+        };
+        Some(Self {
+            at: at.unwrap_or(e.at),
+            run: e.run_id.to_string(),
+            tool: tool.clone(),
+            decision: decision.clone(),
+            vendor: vendor.clone(),
+            source: source.clone(),
+            call_id: call_id.clone(),
+            why: None,
+        })
+    }
+}
+
+/// The vendor's `hook` reports about the calls these rows name, by call id.
+async fn hook_reports(
+    store: &crate::store::Store,
+    rows: &[crate::core::Decision],
+) -> std::collections::HashMap<String, VendorReport> {
+    let mut runs: Vec<crate::core::RunId> = rows
+        .iter()
+        .filter(|r| r.call_id.is_some() && r.vendor.is_none())
+        .filter_map(|r| r.run_id.clone())
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    runs.retain(|r| seen.insert(r.clone()));
+    let mut out = std::collections::HashMap::new();
+    if runs.is_empty() {
+        return out;
+    }
+    for e in store
+        .vendor_reports(Some(&runs), 1000)
+        .await
+        .unwrap_or_default()
+    {
+        if let crate::core::Event::VendorDecided {
+            source: Some(src),
+            call_id: Some(call),
+            ..
+        } = &e.event
+            && src == "hook"
+            && let Some(r) = VendorReport::of(&e)
+        {
+            out.insert(call.clone(), r);
+        }
+    }
+    out
+}
+
+/// The calls a vendor reported deciding that no authority can be named for,
+/// newest first, each with its reason — never a decision row, never an
+/// authority. Computed when read from the kept reports, so a hook's row
+/// arriving after the vendor's report changes the answer the same way in
+/// either order.
+pub async fn unattributed(
+    store: &crate::store::Store,
+    about: Option<&str>,
+    limit: i64,
+) -> anyhow::Result<Vec<VendorReport>> {
+    use crate::core::decision::{Attributed, Why, attribute};
+    let runs = runs_about(store, about).await;
+    let events = store.vendor_reports(runs.as_deref(), limit).await?;
+    let mut out = Vec::new();
+    // An exporter that retried a batch sent the same report twice.
+    let mut seen = std::collections::HashSet::new();
+    for e in &events {
+        let crate::core::Event::VendorDecided {
+            tool,
+            decision,
+            source,
+            call_id,
+            sequence,
+            mode_in_force,
+            session,
+            matched,
+            ..
+        } = &e.event
+        else {
+            continue;
+        };
+        if call_id.is_some()
+            && !seen.insert((e.run_id.clone(), call_id.clone(), source.clone(), *sequence))
+        {
+            continue;
+        }
+        let why = match attribute(
+            source.as_deref(),
+            decision,
+            tool,
+            mode_in_force.as_deref(),
+            *session,
+            matched.as_ref(),
+        ) {
+            Attributed::Row(_) => continue,
+            Attributed::Unattributed(why) => why,
+            Attributed::Hook => {
+                let joined = match call_id {
+                    Some(call) => store
+                        .decisions_for_call(call)
+                        .await?
+                        .iter()
+                        .any(|d| d.vendor.is_none()),
+                    None => false,
+                };
+                match joined {
+                    true => continue,
+                    false => Why::HookNotJoined,
+                }
+            }
+        };
+        if let Some(mut r) = VendorReport::of(e) {
+            r.why = Some(why.says());
+            out.push(r);
+        }
+    }
+    Ok(out)
+}
+
+/// A decision as the ledger shows it: the row, and for a driven call the
+/// edits its agent reported for that call — empty when it reported none or
+/// none was kept, absent for anything that is not a driven call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionRow {
+    #[serde(flatten)]
+    pub decision: crate::core::Decision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edits: Option<Vec<EditView>>,
+    /// Why a driven call's row shows no diff, in one of two sentences: the
+    /// agent sent none, or the project keeps no transcripts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_edit: Option<String>,
+    /// The vendor's own report that a hook decided this call, joined by the
+    /// call's id: Devplane's row stays the only row, with the report beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<VendorReport>,
+}
+
+/// Whether the project a run worked in keeps transcripts, read from the
+/// directory its first event names; a run that cannot say reads as keeping
+/// them (the default), so *no diff sent* is the claim made.
+async fn keeps_transcripts(store: &crate::store::Store, run: &crate::core::RunId) -> bool {
+    let first = store.events_for_run(run, 1).await.unwrap_or_default();
+    let Some(crate::core::Event::SessionStarted { cwd, .. }) =
+        first.into_iter().next().map(|e| e.event)
+    else {
+        return true;
+    };
+    let root = crate::repo::governing_root(&cwd).unwrap_or(cwd);
+    crate::core::ProjectConfig::load(&root)
+        .map(|c| c.agent.keep_transcripts)
+        .unwrap_or(true)
+}
+
+/// One edit an agent reported for one call, as shown beside the decision
+/// about the call: the agent's claim, labelled so, never evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditView {
+    pub call_id: String,
+    pub path: PathBuf,
+    #[serde(default)]
+    pub old_text: Option<String>,
+    pub new_text: String,
+    #[serde(default)]
+    pub omitted_bytes: u64,
+    pub says: String,
+}
+
+impl EditView {
+    fn of(event: crate::core::Event) -> Option<Self> {
+        match event {
+            crate::core::Event::EditReported {
+                call_id,
+                path,
+                old_text,
+                new_text,
+                omitted_bytes,
+            } => Some(Self {
+                call_id,
+                path,
+                old_text,
+                new_text,
+                omitted_bytes,
+                says: crate::driven::EDIT_SAYS.into(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 // ── Agents ──────────────────────────────────────────────────────────────────
@@ -1076,123 +1666,26 @@ pub async fn agents(snap: &Snapshot, store: &crate::store::Store) -> Vec<Value> 
         .collect()
 }
 
-// ── Reports ─────────────────────────────────────────────────────────────────
-
-/// One report with every sentence already written. `quoted` is the only
-/// rendering a person reads: attributed, with every line prefixed.
-#[derive(Debug, Serialize)]
-pub struct ReportView {
-    #[serde(flatten)]
-    pub report: crate::core::report::Report,
-    pub quoted: String,
-    pub routed_says: String,
-    pub state_says: String,
-    /// *filed 3h ago*.
-    pub age_says: String,
-    /// *api — claude, run acp-…, change c-…, 14:02*.
-    pub provenance_says: String,
-    pub target_says: String,
-    /// What a person can do about it, in the inbox row's words.
-    pub actions: Vec<crate::core::Action>,
-}
-
-impl ReportView {
-    pub fn of(report: crate::core::report::Report, now: jiff::Timestamp) -> Self {
-        use crate::core::Action;
-        use crate::core::report::{State, Target};
-        let actions = match (&report.state, &report.target) {
-            (State::Open, Target::Project { .. }) => vec![
-                Action::StartFromReport,
-                Action::RejectReport,
-                Action::DeferReport,
-            ],
-            (State::Deferred { .. }, Target::Project { .. }) => vec![Action::StartFromReport],
-            (State::Drafted, _) => vec![Action::OpenDraft, Action::DiscardDraft],
-            _ => Vec::new(),
-        };
-        let secs = (now.as_second() - report.provenance.at.as_second()).max(0);
-        Self {
-            quoted: report.quoted(),
-            routed_says: report.routed_says(),
-            state_says: report.state_says(),
-            age_says: format!("filed {} ago", crate::render::ago(secs)),
-            provenance_says: report.provenance.says(),
-            target_says: report.target_says(),
-            actions,
-            report,
-        }
-    }
-}
-
-/// What a report read asks for: to, from, and whether answered ones count.
-#[derive(Debug, Default, Clone, Deserialize)]
-pub struct ReportQuery {
-    #[serde(default)]
-    pub to: Option<String>,
-    #[serde(default)]
-    pub from: Option<String>,
-    #[serde(default)]
-    pub all: bool,
-}
-
-/// Reports, newest first, narrowed as asked; an unregistered project name
-/// matches nothing.
-pub async fn reports(
-    snap: &Snapshot,
-    store: &crate::store::Store,
-    q: &ReportQuery,
-) -> anyhow::Result<Vec<ReportView>> {
-    let id_of = |named: &str| -> ProjectId {
-        snap.world
-            .projects()
-            .find(|p| p.name == named || p.id.as_str() == named)
-            .map(|p| p.id.clone())
-            .unwrap_or_else(|| ProjectId::new(named))
-    };
-    // Indexed read where one end is named; the bounded whole otherwise.
-    let found = match (q.to.as_deref(), q.from.as_deref()) {
-        (Some(t), _) => store.reports_to(&id_of(t), false).await?,
-        (None, Some(f)) => store.reports_from(&id_of(f), false).await?,
-        (None, None) => store.reports(REPORTS_READ).await?,
-    };
-    Ok(found
-        .into_iter()
-        .filter(|r| {
-            q.from
-                .as_deref()
-                .is_none_or(|f| r.provenance.project == id_of(f))
-        })
-        .filter(|r| q.all || !r.state.is_resolved())
-        .map(|r| ReportView::of(r, snap.now))
-        .collect())
-}
-
-/// One report by id, or the start of one.
-pub async fn report(
-    snap: &Snapshot,
-    store: &crate::store::Store,
-    id: &str,
-) -> anyhow::Result<Option<ReportView>> {
-    Ok(store.report(id).await?.map(|r| ReportView::of(r, snap.now)))
-}
-
 // ── Change ────────────────────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+/// One change as every surface reads it: the host serialises it, and the
+/// terminal reads it back as the same type. Borrowed where the host builds
+/// it, owned where a client decodes it.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ChangeView<'a> {
     #[serde(flatten)]
-    pub change: &'a Change,
+    pub change: std::borrow::Cow<'a, Change>,
     /// Where it is, computed from the record and the tree last seen.
     pub state: crate::core::ChangeState,
-    pub glyph: &'static str,
+    pub glyph: String,
     /// What it is waiting on, as a phrase, when it is waiting.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waiting_says: Option<String>,
     /// Working in the person's own checkout, with the sentence naming what
     /// that gives up (parallel safety, a clean review base).
     pub in_place: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub in_place_says: Option<&'static str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_place_says: Option<String>,
     /// What the gates say now: verified, stale with both digests, failed, not
     /// run, or *no gates declared*.
     pub standing: crate::core::change::Standing,
@@ -1208,12 +1701,12 @@ pub struct ChangeView<'a> {
     pub claim: Option<String>,
     /// Which absence this is: `transcripts_off` or `nothing_said`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub claim_absent: Option<&'static str>,
+    pub claim_absent: Option<String>,
     /// The specification this change answers, as it is on disk now.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<crate::spec::Plan>,
     /// Done, and the plan it answers is not. A sentence, never a verdict.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub plan_contradicts_done: bool,
     /// The plan moved under this change. `None` when unknowable.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1235,27 +1728,102 @@ pub struct ChangeView<'a> {
     /// Size and where the weight sits (*12 files · 640+ 80− lines · 3 shared ·
     /// 1 security*), or why it was not read. Counts only, no time estimate.
     pub shape_says: String,
-    /// Reports this change filed, and the one it started from, quoted.
-    pub reports: Vec<ReportView>,
     /// What the change's own diff weakened, by kind, beside its state.
     pub qualifier: crate::core::review::Qualifier,
+    /// How many tests ran, and the base checks: beside `standing`, never in
+    /// it. Absent until `check` has run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_checks: Option<crate::core::base_checks::View>,
+    /// The open stop claim: what an agent said through the stop tool, quoted
+    /// and attributed. Read after the weakened checks and before the gates,
+    /// and never an input to `standing` or `state`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_claim: Option<ClaimView>,
+    /// Every stop claim on the change, newest first, open or closed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claim_history: Vec<ClaimView>,
+    /// The project keeps GSD's `.planning/` out of git, so this change's
+    /// worktree lacks it: the sentence naming `.worktreeinclude`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planning_absent: Option<String>,
+    /// What the current run says about its session's permission mode, never
+    /// folded: *decides without you* is the sentence a reviewer most needs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_statement: Option<ModeStatementView>,
 }
 
-#[derive(Debug, Serialize)]
+/// A stop claim as every surface shows it: the one label, the agent's words
+/// as text, and who said it. Nothing here is named like a verdict.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaimView {
+    pub id: String,
+    /// Always *the agent says the spec and the tests conflict*.
+    pub says: String,
+    /// The agent's reason, control characters made visible. Text, never markup.
+    pub reason: String,
+    pub paths: Vec<String>,
+    pub agent: String,
+    pub run: String,
+    pub at: jiff::Timestamp,
+    /// *saas — echo, run acp-…, change c-…, 2026-09-27 10:02 UTC*.
+    pub origin_says: String,
+    /// The whole claim as quoted lines, for a terminal.
+    pub quoted: String,
+    /// How the run that claimed ended.
+    pub ending: String,
+    /// `open` or `closed`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_by: Option<crate::core::claim::ClosedBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_says: Option<String>,
+    /// Whether the claiming run's conversation can be resumed, so a person's
+    /// own words can reach it.
+    #[serde(default)]
+    pub can_tell: bool,
+}
+
+impl ClaimView {
+    pub fn of(c: &crate::core::claim::StopClaim) -> Self {
+        use crate::core::claim::{ClaimState, visible};
+        let (state, closed_by) = match &c.state {
+            ClaimState::Open => ("open", None),
+            ClaimState::Closed { by, .. } => ("closed", Some(*by)),
+        };
+        Self {
+            id: c.id.to_string(),
+            says: c.says().to_string(),
+            reason: visible(&c.reason),
+            paths: c.paths.iter().map(|p| visible(p)).collect(),
+            agent: c.origin.agent().to_string(),
+            run: c.origin.run().to_string(),
+            at: c.origin.at(),
+            origin_says: c.origin.says(),
+            quoted: c.quoted(),
+            ending: crate::core::claim::ENDING.to_string(),
+            state: state.to_string(),
+            closed_by,
+            closed_says: closed_by.map(|b| b.says().to_string()),
+            can_tell: false,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TokenRowView {
     #[serde(flatten)]
     pub row: crate::spec::TokenRow,
     pub says: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DriftView {
     #[serde(flatten)]
     pub drift: crate::core::change::Drift,
     pub says: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RunRowView {
     pub id: String,
     pub sent_says: String,
@@ -1289,10 +1857,10 @@ impl<'a> ChangeView<'a> {
         let (state, standing) = (change.state(declared, now), change.verdict(declared, now));
         Self {
             state,
-            glyph: state.glyph(),
+            glyph: state.glyph().to_string(),
             waiting_says: change.waiting.as_ref().map(crate::core::Waiting::says),
             in_place: change.in_place(),
-            in_place_says: change.in_place_says(),
+            in_place_says: change.in_place_says().map(str::to_string),
             standing_says: standing.says(),
             standing,
             gate: change.check_report().map(|g| GateView {
@@ -1320,9 +1888,13 @@ impl<'a> ChangeView<'a> {
             drifts: Vec::new(),
             run_rows: Vec::new(),
             shape_says: SHAPE_NOT_COMPUTED.to_string(),
-            reports: Vec::new(),
             qualifier: crate::core::review::Qualifier::default(),
-            change,
+            base_checks: None,
+            stop_claim: change.open_claim().map(ClaimView::of),
+            claim_history: change.stop_claims.iter().rev().map(ClaimView::of).collect(),
+            planning_absent: None,
+            mode_statement: None,
+            change: std::borrow::Cow::Borrowed(change),
         }
     }
 
@@ -1348,13 +1920,27 @@ impl<'a> ChangeView<'a> {
             .iter()
             .filter_map(|id| runs.iter().copied().find(|r| r.id == *id))
             .collect();
+        // A person's words reach a claiming run by resuming its conversation.
+        let resumable = |run: &str| {
+            mine.iter()
+                .any(|r| r.id.as_str() == run && r.agent_session.is_some())
+        };
+        if let Some(c) = self.stop_claim.as_mut() {
+            c.can_tell = resumable(&c.run);
+        }
         let stale = matches!(
             self.standing,
             crate::core::change::Standing::Stale { .. }
                 | crate::core::change::Standing::ChecksChanged { .. }
         );
         let last_pass = self.change.last_pass_at();
+        // A layout with no task file (or a schema not read) counts nothing,
+        // whatever box-like lines its files hold; its sentence says why.
+        let unread = self.plan.as_ref().and_then(|p| p.no_progress.clone());
         match trace {
+            _ if unread.is_some() => {
+                self.counts_says = unread;
+            }
             None => {
                 self.counts_says = Some(
                     "the specification folder could not be read, so nothing is counted".into(),
@@ -1480,7 +2066,7 @@ async fn read_diff_facts(
     v: &mut ChangeView<'_>,
     shape: bool,
 ) {
-    let Some((set, config)) = read_set(snap, v.change).await else {
+    let Some((set, config)) = read_set(snap, &v.change).await else {
         let on_disk = v.change.worktree.as_deref().is_some_and(|d| d.is_dir());
         if shape {
             v.shape_says = match on_disk {
@@ -1498,11 +2084,8 @@ async fn read_diff_facts(
         let ordered = crate::core::review::order(&set, config.review.roles.as_ref());
         v.shape_says = crate::core::review::shape(&set, &ordered).says();
     }
-    let rows = weakened_by(&set, &config);
-    let seen = store
-        .weakened_seen(v.change.id.as_str())
-        .await
-        .unwrap_or_default();
+    let rows = weakened_for(&set, &config, &v.change);
+    let seen = rows_read(store, v.change.id.as_str(), &rows, &set).await;
     v.qualifier = crate::core::review::Qualifier::of(&rows, &seen);
 }
 
@@ -1546,7 +2129,12 @@ async fn change_views<'a>(snap: &'a Snapshot, store: &crate::store::Store) -> Ve
                 .and_then(|root| crate::core::ProjectConfig::load(root).ok());
             // A pass by commands the project no longer declares is not verified.
             let checks = config.as_ref().map(|c| c.gates.check.as_slice());
-            let view = ChangeView::of(w, can_retry, checks);
+            let mut view = ChangeView::of(w, can_retry, checks);
+            view.base_checks = crate::base_checks::view(w, config.as_ref());
+            view.mode_statement = w
+                .current_run()
+                .and_then(|r| snap.world.run(r))
+                .and_then(ModeStatementView::of);
             match (w.spec.as_deref(), roots.get(&w.project_id), config) {
                 (Some(spec), Some(root), Some(config)) => {
                     // Boxes are read where the agent worked, as the gate is.
@@ -1567,20 +2155,6 @@ async fn change_views<'a>(snap: &'a Snapshot, store: &crate::store::Store) -> Ve
         })
         .collect();
 
-    let filed = store.reports(REPORTS_READ).await.unwrap_or_default();
-    for view in views.iter_mut() {
-        let id = &view.change.id;
-        view.reports = filed
-            .iter()
-            .filter(|r| {
-                r.provenance.change.as_ref() == Some(id)
-                    || view.change.from_report.as_ref() == Some(&r.id)
-            })
-            .cloned()
-            .map(|r| ReportView::of(r, snap.now))
-            .collect();
-    }
-
     for (view, w) in views.iter_mut().zip(all.iter()) {
         if !w.claim_is_worth_showing() {
             continue;
@@ -1598,12 +2172,31 @@ async fn change_views<'a>(snap: &'a Snapshot, store: &crate::store::Store) -> Ve
             let keeps = roots
                 .get(&w.project_id)
                 .and_then(|root| crate::core::ProjectConfig::load(root).ok())
-                .map(|c| c.transcripts.keep)
+                .map(|c| c.agent.keep_transcripts)
                 .unwrap_or(true);
-            view.claim_absent = Some(match keeps {
-                true => "nothing_said",
-                false => "transcripts_off",
-            });
+            view.claim_absent = Some(
+                match keeps {
+                    true => "nothing_said",
+                    false => "transcripts_off",
+                }
+                .to_string(),
+            );
+        }
+    }
+
+    // A gitignored GSD planning folder is not carried into a worktree. Git is
+    // asked only where the folder is missing from one.
+    for (view, w) in views.iter_mut().zip(all.iter()) {
+        let (Some(root), Some(tree)) = (
+            roots.get(&w.project_id),
+            w.worktree.as_deref().filter(|d| d.is_dir()),
+        ) else {
+            continue;
+        };
+        if crate::spec::planning_absent(root, tree, true).is_some()
+            && crate::git::is_ignored(root, ".planning").await == Some(true)
+        {
+            view.planning_absent = crate::spec::planning_absent(root, tree, true);
         }
     }
     views
@@ -1620,7 +2213,9 @@ pub async fn change_one(
         .into_iter()
         .find(|v| v.change.id == *id)?;
     read_diff_facts(snap, store, &mut v, true).await;
-    Some(serde_json::to_value(&v).unwrap_or(Value::Null))
+    let mut out = serde_json::to_value(&v).unwrap_or(Value::Null);
+    crate::draft::decorate(snap, &v.change, &mut out);
+    Some(out)
 }
 
 /// The done certificate for one change, fully composed.
@@ -1644,17 +2239,16 @@ pub async fn change_certificate(
     };
     // What the change did to its own checks, from its diff; `None` without a
     // worktree or with an unreadable diff, which the certificate states.
-    let (weakened, unreadable) = match weakened_of(snap, change).await {
-        None => (None, None),
-        Some(Ok(rows)) => (Some(rows), None),
-        Some(Err(e)) => (None, Some(format!("{e:#}"))),
+    let (weakened, unreadable, seen) = match read_rows_of(snap, change).await {
+        None => (None, None, Default::default()),
+        Some(Ok((rows, set))) => {
+            // Every row read by a person before the offer, said as such; the
+            // rows themselves are stated either way.
+            let seen = rows_read(store, change.id.as_str(), &rows, &set).await;
+            (Some(rows), None, seen)
+        }
+        Some(Err(e)) => (None, Some(format!("{e:#}")), Default::default()),
     };
-    // Every row read by a person before the offer, said as such; the rows
-    // themselves are stated either way.
-    let seen = store
-        .weakened_seen(change.id.as_str())
-        .await
-        .unwrap_or_default();
     let all_seen = weakened.as_ref().is_some_and(|w| {
         !w.is_empty()
             && w.iter()
@@ -1673,6 +2267,31 @@ pub async fn change_certificate(
     cert.weakened = weakened;
     cert.weakened_unreadable = unreadable;
     cert.weakened_read = all_seen;
+    // The same computation as the change's own view, so they cannot disagree.
+    let config = snap
+        .world
+        .project(&change.project_id)
+        .and_then(|p| crate::core::ProjectConfig::load(&p.root).ok());
+    cert.base_checks = crate::base_checks::view(change, config.as_ref());
+    // The statement's two edge reads: who decided this change's tool calls,
+    // counted; and `devplane.toml` in the checked commit, when that commit
+    // is the tree that was checked.
+    cert.decided_by = store.authority_counts(&change.id, &change.runs).await.ok();
+    if let Some(sha) = cert
+        .evidence
+        .and_then(|r| r.commit.as_ref())
+        .filter(|c| c.clean)
+        .and_then(|c| c.commit.clone())
+    {
+        let dir = change.worktree.clone().filter(|w| w.exists()).or_else(|| {
+            snap.world
+                .project(&change.project_id)
+                .map(|p| p.root.clone())
+        });
+        if let Some(dir) = dir {
+            cert.config_blob = crate::git::blob_at(&dir, &sha, "devplane.toml").await;
+        }
+    }
     Some(json!({
         "finished": cert.is_finished(),
         "markdown": cert.markdown_bounded(),
@@ -1704,31 +2323,79 @@ pub fn weakened_by(
     crate::core::review::weakened(set, config.review.roles.as_ref(), &gate_commands(config))
 }
 
-/// The same, read from a checkout now against its base.
-/// An unreadable diff is an error, never "nothing weakened".
-pub async fn weakened_in(
-    root: Option<&std::path::Path>,
-    dir: &std::path::Path,
-) -> anyhow::Result<Vec<crate::core::review::Weakened>> {
-    let config = root
-        .and_then(|r| crate::core::ProjectConfig::load(r).ok())
-        .unwrap_or_default();
-    let base = base_of(root, dir).await;
-    let set = crate::git::change_set(dir, &base).await?;
-    Ok(weakened_by(&set, &config))
+/// A change's weakened rows: its diff's, then the base tests that fail on it
+/// from a **current** base-checks result (a stale one adds none). The one
+/// list the qualifier, the review's first group, the inbox row, the
+/// certificate and the offer's refusal all read.
+pub fn weakened_for(
+    set: &crate::core::diff::ChangeSet,
+    config: &crate::core::ProjectConfig,
+    change: &Change,
+) -> Vec<crate::core::review::Weakened> {
+    // Observed failures lead: they are what the diff's patterns could miss.
+    let mut rows = crate::core::base_checks::current_rows(change, config);
+    rows.extend(weakened_by(set, config));
+    rows
 }
 
-/// A change's weakened rows, or `None` without a checkout on disk.
-pub async fn weakened_of(
+/// The same, read from a checkout now against its base, with the change set
+/// the rows were read from, for what reads the host's seen marks against it.
+/// An unreadable diff is an error, never "nothing weakened"; so is an
+/// unreadable `devplane.toml`, whose gates name files the defaults do not.
+pub async fn read_rows_in(
+    root: Option<&std::path::Path>,
+    dir: &std::path::Path,
+    change: Option<&Change>,
+) -> anyhow::Result<(
+    Vec<crate::core::review::Weakened>,
+    crate::core::diff::ChangeSet,
+)> {
+    let config = match root {
+        Some(r) => crate::core::ProjectConfig::load(r).map_err(|e| {
+            anyhow::anyhow!("configuration unreadable, so what the gates run is unknown: {e}")
+        })?,
+        None => crate::core::ProjectConfig::default(),
+    };
+    let base = base_of(root, dir).await;
+    let set = crate::git::change_set(dir, &base)
+        .await
+        .map_err(|e| anyhow::anyhow!("the change's diff could not be read: {e:#}"))?;
+    let rows = match change {
+        Some(c) => weakened_for(&set, &config, c),
+        None => weakened_by(&set, &config),
+    };
+    Ok((rows, set))
+}
+
+/// A change's weakened rows with the change set they were read from, or
+/// `None` without a checkout on disk.
+pub async fn read_rows_of(
     snap: &Snapshot,
     change: &Change,
-) -> Option<anyhow::Result<Vec<crate::core::review::Weakened>>> {
+) -> Option<
+    anyhow::Result<(
+        Vec<crate::core::review::Weakened>,
+        crate::core::diff::ChangeSet,
+    )>,
+> {
     let dir = change.worktree.as_deref().filter(|d| d.is_dir())?;
     let root = snap
         .world
         .project(&change.project_id)
         .map(|p| p.root.clone());
-    Some(weakened_in(root.as_deref(), dir).await)
+    Some(read_rows_in(root.as_deref(), dir, Some(change)).await)
+}
+
+/// The weakened rows a person has read, from the host's seen marks: a row is
+/// read when every hunk it was found in is marked seen.
+pub async fn rows_read(
+    store: &crate::store::Store,
+    change: &str,
+    rows: &[crate::core::review::Weakened],
+    set: &crate::core::diff::ChangeSet,
+) -> std::collections::HashSet<(String, String)> {
+    let seen = store.seen(change).await.unwrap_or_default();
+    crate::core::review::rows_seen(rows, set, &seen)
 }
 
 /// A change's qualifier: its weakened rows by kind, and how many are unseen.
@@ -1744,54 +2411,80 @@ pub async fn qualifier_of(
     let Some((set, config)) = read_set(snap, change).await else {
         return crate::core::review::Qualifier::unreadable();
     };
-    let rows = weakened_by(&set, &config);
-    let seen = store
-        .weakened_seen(change.id.as_str())
-        .await
-        .unwrap_or_default();
+    let rows = weakened_for(&set, &config, change);
+    let seen = rows_read(store, change.id.as_str(), &rows, &set).await;
     crate::core::review::Qualifier::of(&rows, &seen)
 }
 
-/// Why marking a weakened row seen was refused.
+/// Why marking a unit seen was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeenRefusal {
     NoSuchChange,
-    /// No current row matches; carries the rows that do exist.
-    NoSuchRow(Vec<crate::core::review::Weakened>),
+    /// Nothing at that path has that digest (or the path has nothing); carries
+    /// the digests that are there.
+    NoSuchUnit(Vec<String>),
 }
 
-/// Marks every current weakened row at `path` seen as the person's, or only
-/// the one whose matched text is `matched`. Never marks a row that is not
-/// there.
+/// What one mark covered: the units marked, and the weakened rows it
+/// completed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Marked {
+    pub seen: Vec<SeenUnit>,
+    pub weakened_seen: Vec<crate::core::review::Weakened>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeenUnit {
+    pub path: String,
+    pub digest: String,
+}
+
+/// Marks one unit at `path` seen as the person's — the hunk whose digest is
+/// `digest` — or, without one, every unit at `path` (its hunks, and the rows
+/// read there). Never marks a unit that is not in the change now.
 pub async fn mark_seen(
     snap: &Snapshot,
     store: &crate::store::Store,
     id: &crate::core::ChangeId,
     path: &str,
-    matched: Option<&str>,
-) -> Result<Vec<crate::core::review::Weakened>, SeenRefusal> {
+    digest: Option<&str>,
+) -> Result<Marked, SeenRefusal> {
     let change = snap.change(id).ok_or(SeenRefusal::NoSuchChange)?;
-    let rows = weakened_of(snap, change)
-        .await
-        .and_then(Result::ok)
-        .unwrap_or_default();
-    let hit: Vec<crate::core::review::Weakened> = rows
-        .iter()
-        .filter(|w| w.path == path && matched.is_none_or(|m| m == w.matched))
-        .cloned()
-        .collect();
+    let (rows, set) = match read_rows_of(snap, change).await {
+        Some(Ok(x)) => x,
+        _ => return Err(SeenRefusal::NoSuchUnit(Vec::new())),
+    };
+    let there = crate::core::review::units_at(path, &set, &rows);
+    let hit: Vec<String> = match digest {
+        Some(d) => there.iter().filter(|x| *x == d).cloned().collect(),
+        None => there.clone(),
+    };
     if hit.is_empty() {
-        return Err(SeenRefusal::NoSuchRow(rows));
+        return Err(SeenRefusal::NoSuchUnit(there));
     }
-    for w in &hit {
-        if let Err(e) = store
-            .mark_weakened_seen(id.as_str(), &w.path, &w.matched)
-            .await
-        {
+    let before = rows_read(store, id.as_str(), &rows, &set).await;
+    for d in &hit {
+        if let Err(e) = store.mark_seen(id.as_str(), path, d).await {
             tracing::warn!(error = %e, "a seen mark was not written");
         }
     }
-    Ok(hit)
+    let after = rows_read(store, id.as_str(), &rows, &set).await;
+    Ok(Marked {
+        seen: hit
+            .into_iter()
+            .map(|digest| SeenUnit {
+                path: path.to_string(),
+                digest,
+            })
+            .collect(),
+        weakened_seen: rows
+            .into_iter()
+            .filter(|w| {
+                let k = (w.path.clone(), w.matched.clone());
+                after.contains(&k) && !before.contains(&k)
+            })
+            .collect(),
+    })
 }
 
 /// The base a change is read against: declared, else discovered, never
@@ -1861,6 +2554,26 @@ pub struct ReviewView {
     pub latest_run: Option<String>,
     /// The first group's rows, counted by kind, with how many are unseen.
     pub qualifier: crate::core::review::Qualifier,
+    /// Every comment on the change, oldest first, with where its line is now.
+    #[serde(default)]
+    pub comments: Vec<CommentView>,
+    /// The files none of whose hunks a person marked seen, by path, in
+    /// reading order — never a share of the change.
+    #[serde(default)]
+    pub not_opened: Vec<String>,
+    #[serde(default)]
+    pub not_opened_says: Option<String>,
+}
+
+/// A comment as the review shows it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommentView {
+    #[serde(flatten)]
+    pub comment: crate::core::comments::ReviewComment,
+    pub anchor: crate::core::comments::Anchor,
+    /// For a sent comment once its run has finished a turn since: whether
+    /// the hunk it was written against changed. `None` until then.
+    pub hunk_changed: Option<bool>,
 }
 
 /// A weakened row as the review shows it: with whether a person marked it seen.
@@ -1869,6 +2582,11 @@ pub struct WeakenedRow {
     #[serde(flatten)]
     pub row: crate::core::review::Weakened,
     pub seen: bool,
+    /// The gate that runs what this row weakened: the one whose command
+    /// names its path, else the declared `check`. `None` when no gate is
+    /// declared.
+    #[serde(default)]
+    pub gate_says: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1904,6 +2622,10 @@ pub struct ReviewFile {
     /// Why there are no hunks, when there are none: binary, or not shown.
     pub body_says: Option<String>,
     pub hunks: Vec<ReviewHunk>,
+    /// A file with no hunks is one unit to mark: whether it is marked.
+    pub unit_seen: Option<bool>,
+    /// A hunk here was marked seen, and the agent has since rewritten it.
+    pub changed_since_seen: bool,
     /// What to run to see each fact on this row for yourself.
     pub marker_commands: Vec<String>,
 }
@@ -1914,6 +2636,10 @@ pub struct ReviewHunk {
     pub lines: Vec<(crate::core::diff::Kind, String)>,
     /// Whitespace only: collapsed by default, counted, expandable.
     pub formatter_only: bool,
+    /// The hunk's content digest: what a seen mark and a comment are keyed by.
+    pub digest: String,
+    /// A person marked this hunk seen (in the host, for every surface).
+    pub seen: bool,
 }
 
 /// A decision, briefly: who decided, what, when, about what.
@@ -1971,6 +2697,39 @@ fn relative_to(run: &Run, raw: &str) -> String {
         }
     }
     raw.trim_start_matches("./").to_string()
+}
+
+/// A change's comments, each with where its line is now and — once the run
+/// it was sent to has finished a turn since — whether its hunk changed.
+async fn comment_views(
+    snap: &Snapshot,
+    store: &crate::store::Store,
+    change: &Change,
+    set: &crate::core::diff::ChangeSet,
+) -> Vec<CommentView> {
+    use crate::core::comments;
+    use crate::core::run::RunState;
+    let rows = store.comments(change.id.as_str()).await.unwrap_or_default();
+    rows.into_iter()
+        .map(|c| {
+            let turned = match (&c.sent_at, &c.run_id) {
+                (Some(at), Some(run)) => at.parse::<jiff::Timestamp>().ok().is_some_and(|at| {
+                    snap.world
+                        .run(&crate::core::RunId::new(run.clone()))
+                        .is_some_and(|r| {
+                            !matches!(r.state, RunState::Starting | RunState::Working)
+                                && r.last_activity_at > at
+                        })
+                }),
+                _ => false,
+            };
+            CommentView {
+                anchor: comments::anchor(&c, set),
+                hunk_changed: turned.then(|| !comments::hunk_still_there(&c, set)),
+                comment: c,
+            }
+        })
+        .collect()
 }
 
 /// The review of one change: one `git diff`, one standing read, then a fold
@@ -2065,9 +2824,20 @@ async fn review_read(
 
     let roles = config.review.roles.as_ref();
     let covers = config.review.covers.as_deref();
+    let marks = store.seen(change.id.as_str()).await.unwrap_or_default();
     let ordered = review::order(&set, roles);
     let shape = review::shape(&set, &ordered);
     let intent = review::by_intent(&set, &wrote);
+    // A draft asks for one thing, its folder: the rest is *not asked for*.
+    let intent = match change.draft.as_ref() {
+        Some(d) if d.asks_for_folder() => match d.run.as_ref() {
+            Some(run) => {
+                crate::core::draft::asked_for_folder(intent, &set, run, &d.folder, &d.sent)
+            }
+            None => intent,
+        },
+        _ => intent,
+    };
 
     let group_of = |i: usize| intent.groups.iter().position(|g| g.files.contains(&i));
     let group_title = |g: &review::IntentGroup| {
@@ -2081,6 +2851,32 @@ async fn review_read(
         .iter()
         .chain(config.gates.named.values().flat_map(|g| g.run.iter()))
         .collect();
+    // The gate that runs a weakened file: named where a command names it,
+    // else the `check` gate, which runs the project's tests.
+    let ran_by = |path: &str| -> Option<String> {
+        let named = config
+            .gates
+            .check
+            .iter()
+            .map(|c| ("check", c))
+            .chain(
+                config
+                    .gates
+                    .named
+                    .iter()
+                    .flat_map(|(n, g)| g.run.iter().map(move |c| (n.as_str(), c))),
+            )
+            .find(|(_, c)| c.contains(path));
+        match named {
+            Some((gate, cmd)) => Some(format!("the `{gate}` gate runs it: `{cmd}`")),
+            None => (!config.gates.check.is_empty()).then(|| {
+                format!(
+                    "the `check` gate ran over it: `{}`",
+                    config.gates.check.join("` · `")
+                )
+            }),
+        }
+    };
     let runs_test = |test: &str| -> String {
         gate_commands
             .iter()
@@ -2134,10 +2930,15 @@ async fn review_read(
             crate::core::diff::Body::Hunks(h) => (
                 None,
                 h.iter()
-                    .map(|h| ReviewHunk {
-                        header: h.header.clone(),
-                        lines: h.lines.clone(),
-                        formatter_only: review::formatter_only(&f.path, h),
+                    .map(|h| {
+                        let digest = review::hunk_digest(h);
+                        ReviewHunk {
+                            header: h.header.clone(),
+                            lines: h.lines.clone(),
+                            formatter_only: review::formatter_only(&f.path, h),
+                            seen: marks.contains(&(f.path.clone(), digest.clone())),
+                            digest,
+                        }
                     })
                     .collect(),
             ),
@@ -2152,7 +2953,24 @@ async fn review_read(
                 (Some(format!("not shown — {why}")), Vec::new())
             }
         };
+        let units: Vec<String> = set
+            .uncut()
+            .files
+            .iter()
+            .filter(|u| u.path == f.path)
+            .flat_map(review::file_units)
+            .collect();
+        let unit_seen = hunks.is_empty().then(|| {
+            units
+                .iter()
+                .all(|d| marks.contains(&(f.path.clone(), d.clone())))
+        });
+        let changed_since_seen = marks
+            .iter()
+            .any(|(p, d)| *p == f.path && !units.contains(d));
         ReviewFile {
+            unit_seen,
+            changed_since_seen,
             path: f.path.clone(),
             status_says: match &f.status {
                 crate::core::diff::Status::Added => "added".into(),
@@ -2178,11 +2996,8 @@ async fn review_read(
 
     // Checks weakened or changed come first, before the rest is read as
     // though they meant what they did. Absent, not empty, when none.
-    let weak = weakened_by(&set, &config);
-    let seen = store
-        .weakened_seen(change.id.as_str())
-        .await
-        .unwrap_or_default();
+    let weak = weakened_for(&set, &config, change);
+    let seen = review::rows_seen(&weak, &set, &marks);
     let qualifier = review::Qualifier::of(&weak, &seen);
     let mut first: Vec<usize> = Vec::new();
     for w in &weak {
@@ -2202,6 +3017,7 @@ async fn review_read(
                 .into_iter()
                 .map(|row| WeakenedRow {
                     seen: seen.contains(&(row.path.clone(), row.matched.clone())),
+                    gate_says: ran_by(&row.path),
                     row,
                 })
                 .collect(),
@@ -2264,8 +3080,20 @@ async fn review_read(
         unavailable: intent.unavailable.clone(),
     };
 
+    let reading: Vec<&str> = groups
+        .iter()
+        .flat_map(|g| g.files.iter().map(|f| f.path.as_str()))
+        .collect();
+    let not_opened = review::not_opened(reading.iter().copied(), &set, &marks);
+    let comments = match for_list {
+        true => Vec::new(),
+        false => comment_views(snap, store, change, &set).await,
+    };
     let collapsed = shape.formatter_only;
     Ok(ReviewView {
+        not_opened_says: review::not_opened_says(&not_opened),
+        not_opened,
+        comments,
         change: change.id.to_string(),
         title: change.title.clone(),
         standing_says: standing.says(),
@@ -2395,7 +3223,7 @@ pub async fn specs(snap: &Snapshot, store: &crate::store::Store) -> Value {
             });
             // The two counts, over the working change's own runs.
             let (counts, token_rows) = match (w, &trace) {
-                (Some(w), Some(t)) if !t.unrecognised => {
+                (Some(w), Some(t)) if !t.unrecognised && plan.no_progress.is_none() => {
                     let mine: Vec<&Run> =
                         w.runs.iter().filter_map(|id| snap.world.run(id)).collect();
                     let gates = cfg.as_ref().is_some_and(|c| c.has_gates());
@@ -2492,7 +3320,9 @@ pub fn projects(snap: &Snapshot) -> Vec<Value> {
                 "trusted": p.trusted,
                 "sessions": live.get(&p.id).copied().unwrap_or(0),
                 "repo": p.repo_slug(),
-                "default_agent": cfg.as_ref().and_then(|c| c.project.default_agent.clone()),
+                "default_agent": cfg.as_ref().and_then(|c| c.agent.default.clone()),
+                // Whether a change here can become verified at all.
+                "declares_check": cfg.as_ref().is_some_and(|c| c.has_gates()),
             })
         })
         .collect()
@@ -2527,7 +3357,6 @@ pub fn setup(snap: &Snapshot) -> Value {
             }),
         }
     });
-    let provider = crate::core::provider::from_env();
     let projects: Vec<Value> = snap
         .world
         .projects()
@@ -2561,19 +3390,275 @@ pub fn setup(snap: &Snapshot) -> Value {
             "home": home.as_ref().map(|h| h.display().to_string()),
             "database": home.as_ref().map(|h| h.join("devplane.db").display().to_string()),
         },
-        "provider": {
-            "name": provider.as_str(),
-            "because": provider.because(),
-            "vendor_supervision": provider.has_vendor_supervision(),
-            "off": provider.missing(),
-            "partial": provider.partial(),
-        },
         "connect": connect,
         "gate": { "syntax_modelled_on": crate::core::policy::SYNTAX_MODELLED_ON },
         "machine_policy": machine_policy,
         "projects": projects,
         "agents": snap.agents,
     })
+}
+
+// ── Diagnostics ─────────────────────────────────────────────────────────────
+
+/// `/api/diagnostics`: what only a running host knows about its own health,
+/// read back by `devplane doctor` as this same type.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Diagnostics {
+    pub version: String,
+    /// Decision sources a vendor reported that its documentation does not
+    /// define, against the date the documented ones were read.
+    #[serde(default)]
+    pub decision_sources: Option<DecisionSources>,
+    pub gate: DiagnosticsGate,
+    /// Live sessions whose environment Devplane could read — only the
+    /// `SessionStart` hook can, so this is the question-clock coverage.
+    pub modes: DiagnosticsModes,
+    /// Agents a previous host started that are still running, unreachable.
+    pub leaked_agents: Vec<LeakedAgent>,
+    /// What each inbox kind raised in the last week and what became of it.
+    pub attention: Option<Value>,
+    pub pid: u32,
+    pub started_at: String,
+    pub uptime_seconds: i64,
+    pub summary: crate::core::BoardSummary,
+    pub channels: Vec<crate::store::ChannelHealth>,
+    /// The OpenCode subscription; absent where it was not asked for.
+    pub opencode: Option<OpenCodeHealth>,
+    pub forge: DiagnosticsForge,
+    pub stall_seconds: i64,
+    /// Projects whose `devplane.toml` will not load, so their rules are gone.
+    pub unreadable_configs: Vec<UnreadableConfig>,
+    /// Stored rows this build cannot decode.
+    pub unreadable_rows: Vec<UnreadableRow>,
+    /// How much of the store never arrived.
+    pub unwritten: Unwritten,
+    /// Claude Code's own auto-mode classifier, read back, never written.
+    pub auto_mode: AutoModeView,
+    /// What the app's notifications can do on this machine, in one line;
+    /// absent when the host is not the app.
+    #[serde(default)]
+    pub notifications: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DiagnosticsGate {
+    pub syntax_modelled_on: String,
+    pub sessions_reporting_a_version: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DiagnosticsModes {
+    pub clock_read: usize,
+    pub clock_unread: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LeakedAgent {
+    pub pid: u32,
+    pub command: String,
+    pub worktree: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OpenCodeHealth {
+    pub server: String,
+    pub says: String,
+    pub live: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DiagnosticsForge {
+    pub viewer: Option<String>,
+    pub error: Option<String>,
+    /// Per GitHub host: signed in as whom, and when GitHub last answered.
+    /// Never the token.
+    pub github: Vec<crate::github::HostView>,
+    pub last_poll_at: Option<String>,
+    pub projects: usize,
+    pub skipped: usize,
+    /// Which projects were ruled out, and why.
+    pub skipped_projects: Vec<SkippedProject>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SkippedProject {
+    pub project: String,
+    pub reason: String,
+    pub at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UnreadableConfig {
+    pub project: String,
+    pub error: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UnreadableRow {
+    pub row: String,
+    pub error: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Unwritten {
+    pub events: u64,
+    pub decisions: u64,
+    pub last_reason: Option<String>,
+}
+
+/// The classifier's configuration counted, or why it could not be read.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AutoModeView {
+    Unavailable {
+        unavailable: crate::observe::automode::Unavailable,
+    },
+    Read {
+        configured: bool,
+        environment: usize,
+        allow: usize,
+        soft_deny: usize,
+        hard_deny: usize,
+    },
+}
+
+/// What `devplane doctor` says about the deciders vendors reported: each
+/// value outside the documented ones, when it was first seen, and the date
+/// those were read. Calls carrying such a value are not attributed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DecisionSources {
+    /// When the documented values were last read against the vendor's page.
+    pub checked: String,
+    pub unrecognised: Vec<UnrecognisedSource>,
+    /// The line a person reads.
+    pub says: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UnrecognisedSource {
+    pub value: String,
+    pub first_seen: String,
+}
+
+pub async fn decision_sources(store: &crate::store::Store) -> anyhow::Result<DecisionSources> {
+    use crate::core::vendors::{
+        CLAUDE_CODE_DECISION_SOURCES, CLAUDE_CODE_DECISION_SOURCES_CHECKED,
+    };
+    let unrecognised: Vec<UnrecognisedSource> = store
+        .vendor_sources_seen()
+        .await?
+        .into_iter()
+        .filter(|(v, _)| !CLAUDE_CODE_DECISION_SOURCES.contains(&v.as_str()))
+        .map(|(value, first_seen)| UnrecognisedSource { value, first_seen })
+        .collect();
+    let checked = CLAUDE_CODE_DECISION_SOURCES_CHECKED.to_string();
+    let says = match unrecognised.as_slice() {
+        [] => format!(
+            "every source seen was one of the six Claude Code documents (checked {checked})"
+        ),
+        some => some
+            .iter()
+            .map(|u| {
+                format!(
+                    "{:?} first seen {} — not in Claude Code's six (checked {checked}); \
+                     calls carrying it are not attributed",
+                    u.value,
+                    u.first_seen
+                        .get(0..16)
+                        .unwrap_or(&u.first_seen)
+                        .replace('T', " ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    Ok(DecisionSources {
+        checked,
+        unrecognised,
+        says,
+    })
+}
+
+// ── Grants ──────────────────────────────────────────────────────────────────
+
+/// One reversal of a grant's decision, with its cause.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrantReversal {
+    pub decision: String,
+    pub cause: String,
+}
+
+/// One grant in the person's file, with what it decided — counts about the
+/// grant, never about the person.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrantRow {
+    pub name: String,
+    pub rule: String,
+    pub root: String,
+    pub until: Option<String>,
+    pub lapsed: bool,
+    /// Calls it allowed.
+    pub decided: u32,
+    /// Of those, how many an observable event later reversed; absent where
+    /// none of its calls was on a change, so nothing could be observed.
+    pub reversed: Option<u32>,
+    pub reversals: Vec<GrantReversal>,
+    pub widens: bool,
+}
+
+/// The causes a reversal is counted from, said wherever the count is.
+pub const REVERSALS_COUNTED: &str = "Reversals are counted when a gate failed on a change after \
+    the grant decided on it. A commit you reverted is not counted: nothing in the record shows it.";
+
+/// Every grant in the person's file, with its decisions and reversals.
+pub async fn grant_rows(
+    store: &crate::store::Store,
+    grants: &crate::core::grant::Grants,
+    now: jiff::Timestamp,
+) -> Vec<GrantRow> {
+    let mut out = Vec::new();
+    for g in grants.all() {
+        let decided = store
+            .decisions_by_grant(&g.name())
+            .await
+            .unwrap_or_default();
+        let mut on_change = false;
+        let mut reversals = Vec::new();
+        for d in &decided {
+            let Some(change) = &d.change_id else {
+                continue;
+            };
+            on_change = true;
+            let failed = store
+                .gate_failures(change.as_str())
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .any(|f| f.at > d.at);
+            if failed {
+                reversals.push(GrantReversal {
+                    decision: d.id.clone(),
+                    cause: format!(
+                        "a gate failed on change {} after it decided",
+                        change.as_str()
+                    ),
+                });
+            }
+        }
+        let agent = crate::policy_cache::agent_allow_rules(g.root(), dirs::home_dir().as_deref());
+        out.push(GrantRow {
+            name: g.name(),
+            rule: g.rule().to_string(),
+            root: g.root().display().to_string(),
+            until: g.until().map(|t| t.to_string()),
+            lapsed: g.is_lapsed(now),
+            decided: decided.len() as u32,
+            reversed: on_change.then_some(reversals.len() as u32),
+            reversals,
+            widens: crate::policy_cache::widens_the_agent(g.rule(), &agent),
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -2585,6 +3670,7 @@ mod tests {
         CommitStamp {
             commit: Some(format!("commit-of-{tree}")),
             tree: Some(tree.into()),
+            tree_unknown: None,
             branch: Some("feat/x".into()),
             clean,
             changed_files: changed,
@@ -2602,6 +3688,8 @@ mod tests {
         c.worktree = Some("/repo/.claude/worktrees/x".into());
         c.runs.push(RunId::new("r1"));
         c.gates.push(GateReport {
+            junit: Vec::new(),
+            base_commit: None,
             gate: "check".into(),
             at: jiff::Timestamp::now(),
             duration_ms: 1,
@@ -2611,6 +3699,21 @@ mod tests {
             commit: Some(stamp(tree, true, 0)),
         });
         c
+    }
+
+    /// The terminal reads a change as the very type the host wrote: what is
+    /// serialised reads back, field for field.
+    #[test]
+    fn a_change_view_reads_back_as_the_type_the_host_serialised() {
+        let mut c = passed_at("aaaaaaa111");
+        c.tree_now = Some(stamp("aaaaaaa111", true, 0));
+        let v = ChangeView::of(&c, false, Some(&["cargo test".to_string()]));
+        let wire = serde_json::to_value(&v).unwrap();
+        let back: ChangeView<'static> = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(back.change.as_ref(), &c);
+        assert_eq!(back.state, v.state);
+        assert_eq!(back.standing, v.standing);
+        assert_eq!(serde_json::to_value(&back).unwrap(), wire);
     }
 
     /// A stale pass reaches the surface as stale, naming both trees.

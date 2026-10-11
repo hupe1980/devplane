@@ -1,5 +1,29 @@
-# Turns a tag into installable artifacts via `dist`; configured in
-# `[workspace.metadata.dist]` in Cargo.toml.
+# Turns a tag into installable artifacts: the command line's archives and
+# installers via `dist` (configured in `[workspace.metadata.dist]` in
+# Cargo.toml), and the desktop app's packages via the Tauri CLI (`packages`).
+#
+# Signing credentials live only in the `release` environment, never in the
+# repository and never reachable from a pull request. Each is optional: a leg
+# whose credentials are absent still builds, names every file `-unsigned`, says
+# which credential was missing in its summary, and publishes no update manifest.
+#
+#   macOS (Developer ID + notarisation)
+#     APPLE_CERTIFICATE           base64 of the Developer ID Application .p12
+#     APPLE_CERTIFICATE_PASSWORD  that .p12's password
+#     APPLE_SIGNING_IDENTITY      "Developer ID Application: <name> (<team id>)"
+#     APPLE_ID                    the Apple ID notarisation runs as
+#     APPLE_PASSWORD              an app-specific password for that Apple ID
+#     APPLE_TEAM_ID               the ten-character team id
+#   Windows (Authenticode)
+#     WINDOWS_SIGN_COMMAND        a command that signs the file `%1` in place,
+#                                 e.g. `trusted-signing-cli -e <endpoint> -a <account> -c <profile> %1`
+#     AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID
+#                                 passed through for a cloud signing tool that reads them
+#   Every platform (the release key that signs updates)
+#     TAURI_SIGNING_PRIVATE_KEY           from `cargo tauri signer generate`
+#     TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password (empty if it has none)
+#   and the key's public half committed as `plugins.updater.pubkey` in
+#   tauri.conf.json, which every app is built with.
 name: release
 
 on:
@@ -134,10 +158,269 @@ jobs:
           name: artifacts-${{ matrix.target }}
           path: target/distrib/*
 
+  # The desktop app, one leg per platform, from the same commit as the CLI.
+  # No `target` key: these are the host's own triples, and a test holds the
+  # `target` lines of this file equal to the CLI's dist targets.
+  packages:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: plan
+    environment: release
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos-aarch64
+            bundles: app,dmg
+          - os: windows-latest
+            platform: windows-x86_64
+            bundles: nsis
+          # The oldest glibc the AppImage should run on.
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+            bundles: deb,appimage
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: The app's Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev patchelf file libfuse2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build the interface
+        run: cd ui && npm ci && npm run build
+      - name: Install the Tauri CLI
+        run: npm install --global @tauri-apps/cli@2.12.1
+
+      # Which of this leg's credentials are present. Absent ones are named in
+      # the summary and the leg builds unsigned.
+      - name: Credentials
+        id: creds
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WINDOWS_SIGN_COMMAND: ${{ secrets.WINDOWS_SIGN_COMMAND }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          case "$PLATFORM" in
+            macos-*) need="APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY" ;;
+            windows-*) need="WINDOWS_SIGN_COMMAND TAURI_SIGNING_PRIVATE_KEY" ;;
+            linux-*) need="TAURI_SIGNING_PRIVATE_KEY" ;;
+          esac
+          missing=""
+          for name in $need; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -z "$(jq -r '.plugins.updater.pubkey // ""' tauri.conf.json)" ]; then
+            missing="$missing plugins.updater.pubkey(tauri.conf.json)"
+          fi
+          missing="${missing# }"
+          if [ -n "$missing" ]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### $PLATFORM: unsigned"
+              echo
+              echo "Built without signing, so every file is named \`-unsigned\` and no update manifest is published. Missing:"
+              echo
+              for m in $missing; do echo "- \`$m\`"; done
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "### $PLATFORM: signed" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # The Developer ID identity, in a keychain of this run's own, so the
+      # bundler signs the app and this job can sign the disk image after it.
+      - name: Import the Developer ID certificate
+        if: runner.os == 'macOS' && steps.creds.outputs.signed == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/release.keychain-db"
+          pass="$(openssl rand -hex 24)"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$pass" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$pass" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$pass" "$keychain" >/dev/null
+          existing=$(security list-keychains -d user | tr -d '"')
+          # shellcheck disable=SC2086 # one keychain path per word
+          security list-keychains -d user -s "$keychain" $existing
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      # What the signed legs add to tauri.conf.json, written here so the
+      # committed file names no signing tool a fork lacks.
+      - name: Signing configuration
+        if: steps.creds.outputs.signed == 'true'
+        env:
+          WINDOWS_SIGN_COMMAND: ${{ secrets.WINDOWS_SIGN_COMMAND }}
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            jq -n --arg cmd "$WINDOWS_SIGN_COMMAND" \
+              '{bundle: {createUpdaterArtifacts: true, windows: {signCommand: $cmd}}}' > "$RUNNER_TEMP/signing.json"
+          else
+            jq -n '{bundle: {createUpdaterArtifacts: true}}' > "$RUNNER_TEMP/signing.json"
+          fi
+
+      - name: Build the packages (signed)
+        if: steps.creds.outputs.signed == 'true'
+        env:
+          DEVPLANE_GITHUB_CLIENT_ID: ${{ vars.DEVPLANE_GITHUB_CLIENT_ID }}
+          # Read by build.rs: `devplane doctor` says "signed build".
+          DEVPLANE_SIGNED: "1"
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: tauri build --ci --features app --bundles ${{ matrix.bundles }} --config "$RUNNER_TEMP/signing.json"
+
+      - name: Build the packages (unsigned)
+        if: steps.creds.outputs.signed != 'true'
+        env:
+          DEVPLANE_GITHUB_CLIENT_ID: ${{ vars.DEVPLANE_GITHUB_CLIENT_ID }}
+        run: tauri build --ci --features app --bundles ${{ matrix.bundles }} --no-sign
+
+      # The bundler notarises and staples the app; the disk image around it is
+      # signed, notarised and stapled here, so it opens offline too.
+      - name: Notarise the disk image
+        if: runner.os == 'macOS' && steps.creds.outputs.signed == 'true'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for dmg in target/release/bundle/dmg/*.dmg; do
+            codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg"
+            xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" --wait
+            xcrun stapler staple "$dmg"
+          done
+
+      # Checked with the platform's own tools before anything is uploaded; a
+      # failure fails the leg, and so the release.
+      - name: Verify the signatures
+        if: steps.creds.outputs.signed == 'true'
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            macOS)
+              for app in target/release/bundle/macos/*.app; do
+                codesign --verify --deep --strict --verbose=2 "$app"
+                spctl --assess --type execute --verbose=2 "$app"
+                xcrun stapler validate "$app"
+              done
+              for dmg in target/release/bundle/dmg/*.dmg; do
+                codesign --verify --strict --verbose=2 "$dmg"
+                spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
+                xcrun stapler validate "$dmg"
+              done
+              ;;
+            Windows)
+              signtool=$(find "/c/Program Files (x86)/Windows Kits/10/bin" -path '*/x64/signtool.exe' | sort -V | tail -1)
+              # The executable the installer carries is the one the bundler
+              # signed before packing it.
+              "$signtool" verify //pa //v target/release/devplane.exe
+              for exe in target/release/bundle/nsis/*-setup.exe; do
+                "$signtool" verify //pa //v "$exe"
+              done
+              ;;
+          esac
+          # Every update package carries the release key's signature.
+          for f in target/release/bundle/macos/*.app.tar.gz target/release/bundle/nsis/*-setup.exe \
+                   target/release/bundle/appimage/*.AppImage; do
+            [ -e "$f" ] || continue
+            [ -s "$f.sig" ] || { echo "no update signature for $f" >&2; exit 1; }
+          done
+
+      # One directory of files to publish: each package, `-unsigned` before
+      # its extension when this leg was not signed, with its SHA-256 beside it.
+      - name: Collect the packages
+        env:
+          SIGNED: ${{ steps.creds.outputs.signed }}
+          PLATFORM: ${{ matrix.platform }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          out=packages
+          mkdir -p "$out"
+          bundle=target/release/bundle
+          take() { # file, published name
+            cp "$1" "$out/$2"
+            [ -f "$1.sig" ] && cp "$1.sig" "$out/$2.sig"
+            return 0
+          }
+          shopt -s nullglob
+          for f in "$bundle"/dmg/*.dmg "$bundle"/nsis/*-setup.exe "$bundle"/deb/*.deb "$bundle"/appimage/*.AppImage; do
+            name=$(basename "$f")
+            if [ "$SIGNED" != true ]; then
+              name="${name%.*}-unsigned.${name##*.}"
+            fi
+            take "$f" "$name"
+          done
+          # The macOS update archive, named by version so releases never collide.
+          for f in "$bundle"/macos/*.app.tar.gz; do
+            take "$f" "Devplane_${version}_aarch64.app.tar.gz"
+          done
+          # The .deb is not an update package, so the bundler does not sign
+          # it; the release key does, so every package can be checked by it.
+          if [ "$SIGNED" = true ]; then
+            for f in "$out"/*.deb; do
+              tauri signer sign "$f"
+            done
+          fi
+          cd "$out"
+          for f in *; do
+            case "$f" in *.sig|*.sha256) continue ;; esac
+            if command -v sha256sum >/dev/null; then sha256sum "$f" > "$f.sha256"; else shasum -a 256 "$f" > "$f.sha256"; fi
+          done
+          if [ "$SIGNED" != true ]; then
+            echo "$PLATFORM" > "unsigned-$PLATFORM"
+          fi
+          ls -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.platform }}
+          path: packages/*
+          if-no-files-found: error
+
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, packages]
     runs-on: ubuntu-latest
+    outputs:
+      unsigned: ${{ steps.packages.outputs.unsigned }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -150,19 +433,91 @@ jobs:
       # Installers come from the manifest, not the binaries, so they build once.
       - name: Installers and checksums
         run: dist build --artifacts=global --output-format=json > dist-global.json
-      # This version's section of CHANGELOG.md, as the release notes.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: packages-*
+          merge-multiple: true
+          path: packages
+      # Any unsigned leg: no update manifest. Otherwise `latest.json`, in the
+      # updater's documented format, from the legs' signatures.
+      - name: Update manifest
+        id: packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          shopt -s nullglob
+          markers=(packages/unsigned-*)
+          if [ ${#markers[@]} -gt 0 ]; then
+            echo "unsigned=true" >> "$GITHUB_OUTPUT"
+            cat "${markers[@]}" | sort > unsigned.txt
+            rm -f "${markers[@]}"
+            echo "unsigned: $(paste -sd' ' unsigned.txt); no latest.json"
+            exit 0
+          fi
+          echo "unsigned=false" >> "$GITHUB_OUTPUT"
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
+          entry() { # file
+            [ -s "packages/$1.sig" ] || { echo "no signature for $1" >&2; exit 1; }
+            jq -n --arg url "$base/$1" --arg sig "$(cat "packages/$1.sig")" '{url: $url, signature: $sig}'
+          }
+          mac="Devplane_${version}_aarch64.app.tar.gz"
+          win="Devplane_${version}_x64-setup.exe"
+          lin="Devplane_${version}_amd64.AppImage"
+          awk -v v="$version" '
+            $0 ~ "^## " v "( |$)" { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > manifest-notes.md
+          jq -n --arg version "$version" --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --rawfile notes manifest-notes.md \
+            --argjson mac "$(entry "$mac")" --argjson win "$(entry "$win")" --argjson lin "$(entry "$lin")" \
+            '{version: $version, notes: $notes, pub_date: $date, platforms: {
+                "darwin-aarch64": $mac, "darwin-aarch64-app": $mac,
+                "windows-x86_64": $win, "windows-x86_64-nsis": $win,
+                "linux-x86_64": $lin, "linux-x86_64-appimage": $lin }}' > packages/latest.json
+          cat packages/latest.json
+      # This version's section of CHANGELOG.md, as the release notes, between
+      # what to know before downloading and the table of every package.
       - name: Release notes
         shell: bash
         run: |
+          set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           awk -v v="$version" '
             $0 ~ "^## " v "( |$)" { on = 1; next }
             on && /^## / { exit }
             on { print }
-          ' CHANGELOG.md > notes.md
-          [ -s notes.md ] || { echo "CHANGELOG.md has no section for $version" >&2; exit 1; }
-          printf '\n**Install:** `curl -LsSf https://github.com/%s/releases/download/%s/devplane-installer.sh | sh`\n' \
-            "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" >> notes.md
+          ' CHANGELOG.md > changes.md
+          [ -s changes.md ] || { echo "CHANGELOG.md has no section for $version" >&2; exit 1; }
+          {
+            echo "The Linux packages use the WebKitGTK runtime (\`libwebkit2gtk-4.1-0\`): the \`.deb\` installs it through your package manager, the AppImage carries its own. The macOS app is for Apple Silicon Macs."
+            echo
+            if [ -s unsigned.txt ]; then
+              echo "**These packages are unsigned:** $(paste -sd',' unsigned.txt | sed 's/,/, /g'). Your system will warn before opening them; they are not offered as updates."
+              echo
+            fi
+            cat changes.md
+            echo
+            echo "| Package | Platform | Signed | SHA-256 |"
+            echo "|---|---|---|---|"
+            for f in packages/*.sha256; do
+              name=$(basename "$f" .sha256)
+              case "$name" in
+                *.dmg|*.app.tar.gz) platform="macOS (Apple Silicon)" ;;
+                *.exe) platform="Windows (x86-64)" ;;
+                *.deb) platform="Linux (x86-64, .deb)" ;;
+                *.AppImage) platform="Linux (x86-64, AppImage)" ;;
+                *) platform="" ;;
+              esac
+              case "$name" in *-unsigned.*) signed=no ;; *) signed=yes ;; esac
+              echo "| \`$name\` | $platform | $signed | \`$(cut -d' ' -f1 "$f")\` |"
+            done
+            # shellcheck disable=SC2016 # the backticks are Markdown
+            printf '\n**Install:** `curl -LsSf https://github.com/%s/releases/download/%s/devplane-installer.sh | sh`\n' \
+              "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME"
+          } > notes.md
+          cat notes.md
       # A draft: nothing is announced until every channel below can follow it.
       # Regular files only: skip dist's staging directories and manifests.
       - name: Upload to a draft release
@@ -172,7 +527,7 @@ jobs:
         run: |
           files=()
           while IFS= read -r f; do files+=("$f"); done \
-            < <(find target/distrib -maxdepth 1 -type f ! -name '*.json')
+            < <(find target/distrib -maxdepth 1 -type f ! -name '*.json'; find packages -maxdepth 1 -type f)
           [ ${#files[@]} -gt 0 ] || { echo "no artifacts to publish"; exit 1; }
           printf 'uploading %s\n' "${files[@]}"
           # A re-run after a partial upload adds to the existing release.
@@ -187,6 +542,11 @@ jobs:
   # The release goes public once its artifacts are uploaded and crates.io has
   # the crate. npm follows it: its package installs from the release's assets,
   # so publishing it first would leave a window of 404s.
+  #
+  # An unsigned release never displaces a signed one as latest: the updater's
+  # manifest and the default download stay on the last signed release. Until
+  # any release has been signed there is nothing to displace, so the command
+  # line's `releases/latest` install keeps following the newest tag.
   github-release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [publish, crates-io]
@@ -195,7 +555,18 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          UNSIGNED: ${{ needs.publish.outputs.unsigned }}
+        run: |
+          latest=true
+          if [ "$UNSIGNED" = true ]; then
+            current=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName,assets \
+              --jq 'select(any(.assets[]; .name == "latest.json")) | .tagName' 2>/dev/null || true)
+            if [ -n "$current" ]; then
+              latest=false
+              echo "unsigned: $current stays the latest release"
+            fi
+          fi
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest="$latest"
 
   npm:
     if: startsWith(github.ref, 'refs/tags/v')

@@ -1,0 +1,40 @@
+schema_version: "1.0"
+
+extension:
+  id: "devplane"
+  name: "Devplane"
+  version: "0.12.0"
+  description: "Runs the project's own gates after implement and reports what each command exited with. Decides on exit codes, never on a reading."
+  author: "hupe1980"
+  repository: "https://github.com/hupe1980/devplane"
+  license: "MIT OR Apache-2.0"
+  homepage: "https://hupe1980.github.io/devplane/docs/specs/"
+
+requires:
+  speckit_version: ">=1.0.7"
+  tools:
+    - name: "devplane"
+      version: ">=0.12.0"
+      required: true
+
+provides:
+  commands:
+    - name: "speckit.devplane.gate"
+      file: "commands/gate.md"
+      description: "Run this project's own gates and report what they exited with"
+
+# Mandatory, and deliberately without a `condition`: a hook carrying one is
+# skipped by every Spec Kit command that has no HookExecutor to evaluate it.
+hooks:
+  after_implement:
+    command: "speckit.devplane.gate"
+    optional: false
+    description: "Run this project's own gates and report what they said"
+    prompt: "Run the project's gates and report the verdict verbatim."
+
+tags:
+  - "gates"
+  - "testing"
+  - "ci-cd"
+  - "quality"
+  - "verification"

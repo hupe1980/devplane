@@ -3,8 +3,9 @@
   // questions, and the change working to it. Devplane reads the spec, never
   // grades it: counts and names only, no percentage or bar.
   import Icon from "../../lib/ui/Icon.svelte";
-  import Pill from "../../lib/ui/Pill.svelte";
-  import Qualifier from "../../lib/Qualifier.svelte";
+  import ChangeState from "../../lib/ChangeState.svelte";
+  import Skeleton from "../../lib/Skeleton.svelte";
+  import Inline from "../../lib/ui/Inline.svelte";
   import Empty from "../../lib/ui/Empty.svelte";
   import { run } from "../../lib/keys";
   import { specs, watch, key } from "./store.svelte";
@@ -21,14 +22,15 @@
 
 {#if !focus || !found}
   {#if specs.projects === null}
-    <div class="pad quiet">Reading the specifications…</div>
+    <!-- The sidebar names the failure; the page does not promise rows. -->
+    <div class="pad"><Skeleton rows={4} failed={!!specs.error} /></div>
   {:else}
     <Empty
       icon="spec"
       title={total ? "Pick a specification" : "No specification on this machine"}
       body={total
         ? `${total} specifications across ${specs.projects.length} projects. A specification is read as it is on disk: its outline, its boxes, and the requirements its tasks cite.`
-        : "Devplane reads Spec Kit, OpenSpec and Kiro folders where they already are, and a plain folder a project names in devplane.toml."}
+        : "Devplane reads Spec Kit, OpenSpec, Kiro and GSD folders where they already are, and a plain folder a project names in devplane.toml."}
     />
   {/if}
 {:else}
@@ -38,7 +40,8 @@
       <p class="where"><Icon name="folder" size={12} /> {found.p.project} <span>/</span> <code>{r.plan.path}</code></p>
       <h1>{r.plan.outline[0]?.text ?? r.plan.path}</h1>
       <div class="facts">
-        {#if r.plan.progress}<span><b>{r.plan.progress.total}</b> boxes · <b>{r.plan.progress.done}</b> ticked</span>{/if}
+        {#if r.plan.progress}<span><b>{r.plan.progress.total}</b> boxes · <b>{r.plan.progress.done}</b> ticked</span>
+        {:else if r.plan.no_progress}<span class="quiet"><Inline text={r.plan.no_progress} /></span>{/if}
         <span>{r.plan.files} files</span>
         {#if r.plan.open_questions > 0}<span class="wait"><Icon name="question" size={13} /> {r.plan.open_questions} open questions</span>{/if}
         {#if r.drifted}<span class="wait"><Icon name="alert" size={13} /> changed under a run</span>{/if}
@@ -46,8 +49,8 @@
       <div class="acts">
         {#if r.change_id}
           <a class="btn" href={`#change/${encodeURIComponent(r.change_id)}`}><Icon name="change" size={14} /> {r.title}</a>
-          {#if r.state}<Pill word={r.state} /><Qualifier q={r.qualifier} />{/if}
-          {#if r.counts_says}<span class="quiet">{r.counts_says}</span>{/if}
+          {#if r.state}<ChangeState state={r.state} q={r.qualifier} />{/if}
+          {#if r.counts_says}<span class="quiet"><Inline text={r.counts_says} /></span>{/if}
         {:else}
           <button class="btn primary" onclick={() => run("new-change", "plan")}><Icon name="play" size={14} /> Start a change…</button>
           <span class="quiet">No change is working to this specification; pick it in the form.</span>

@@ -1,11 +1,12 @@
 <script lang="ts">
   // Every specification on this machine, by project: folder, ticked boxes,
   // the change working to it, and anything waiting on a person. A project with
-  // no layout says which three it looked for.
+  // no layout says which it looked for; one whose changes live elsewhere says
+  // where, instead of an empty list.
   import Icon from "../../lib/ui/Icon.svelte";
   import Inline from "../../lib/ui/Inline.svelte";
-  import Pill from "../../lib/ui/Pill.svelte";
-  import Qualifier from "../../lib/Qualifier.svelte";
+  import ChangeState from "../../lib/ChangeState.svelte";
+  import { cursor } from "../../lib/cursor";
   import { specs, watch, key } from "./store.svelte";
 
   let { focus = "", open }: { focus?: string; open: (f: string, pin?: boolean) => void } = $props();
@@ -22,21 +23,41 @@
       }))
       .filter((p) => p.plans.length > 0),
   );
+  /// Projects whose changes are somewhere else: the sentence, not an empty list.
+  const away = $derived(
+    (specs.projects ?? []).filter((p) => p.plans.length === 0 && (p.layouts ?? []).some((l) => l.elsewhere)),
+  );
   /// Projects with no specification layout: one counted line, not a paragraph each.
-  const bare = $derived((specs.projects ?? []).filter((p) => p.plans.length === 0));
+  const bare = $derived((specs.projects ?? []).filter((p) => p.plans.length === 0 && !away.includes(p)));
   const sentence = $derived(bare[0]?.no_layout ?? "");
   const total = $derived((specs.projects ?? []).reduce((n, p) => n + p.plans.length, 0));
+
+  // The registry's list keys, with focus anywhere: `j`/`k` glance, Enter keeps.
+  const flat = $derived(projects.flatMap((p) => (folded[p.project_id] ? [] : p.plans.map((r) => key(p, r)))));
+  $effect(() =>
+    cursor({
+      scope: "plan",
+      size: () => flat.length,
+      at: () => flat.indexOf(focus),
+      go: (i) => {
+        open(flat[i]);
+        queueMicrotask(() => document.querySelector(`[data-spec="${CSS.escape(flat[i])}"]`)?.scrollIntoView({ block: "nearest" }));
+      },
+      open: (i) => open(flat[i], true),
+    }),
+  );
 </script>
 
 <div class="list">
-  <header><span class="t">Specifications</span><span class="n">{total}</span></header>
+  <!-- No number until the specifications have been read: absence is not zero. -->
+  <header><span class="t">Specifications</span>{#if specs.projects !== null}<span class="n">{total}</span>{/if}</header>
   <label class="filter">
     <Icon name="filter" size={13} />
     <input bind:value={filter} placeholder="Filter specifications" aria-label="filter the specifications" />
   </label>
   <div class="rows">
     {#if specs.error}
-      <p class="quiet fail">The specifications could not be read: {specs.error}</p>
+      <p class="quiet fail">Could not read the specifications: <Inline text={specs.error} />. Nothing here is current; <code>devplane doctor</code> tells more.</p>
     {:else if specs.projects === null}
       {#each [0, 1, 2] as i (i)}<div class="skel"></div>{/each}
     {/if}
@@ -50,11 +71,13 @@
       {#if !folded[p.project_id]}
         {#each p.plans as r (r.plan.path)}
           {@const k = key(p, r)}
-          <button class="row" aria-current={k === focus ? "true" : undefined} onclick={() => open(k)} ondblclick={() => open(k, true)}>
-            <span class="title"><Icon name="spec" size={13} /> {name(r.plan.path)}</span>
+          <button class="row" data-spec={k} aria-current={k === focus ? "true" : undefined} onclick={() => open(k)} ondblclick={() => open(k, true)}>
+            <span class="title" title={r.plan.path}><Icon name="spec" size={13} /> {name(r.plan.path)}</span>
+            <!-- The change's state on a line of its own, so it is never clipped. -->
+            {#if r.state}<span class="state" title={[r.title, r.state, r.qualifier?.says].filter(Boolean).join(" · ")}><ChangeState state={r.state} q={r.qualifier} /></span>{/if}
             <span class="meta">
-              {#if r.plan.progress}<span class="boxes" title="boxes ticked in the task file · {r.plan.progress.total} tasks">{r.plan.progress.done} ticked</span>{/if}
-              {#if r.state}<Pill word={r.state} /><Qualifier q={r.qualifier} />{/if}
+              {#if r.plan.progress}<span class="boxes" title="boxes ticked in the task file · {r.plan.progress.total} tasks">{r.plan.progress.total} tasks · {r.plan.progress.done} ticked</span>
+              {:else if r.plan.no_progress}<span class="unread" title={r.plan.no_progress}>no task file · no progress claimed</span>{/if}
               {#if r.plan.open_questions > 0}<span class="wait"><Icon name="question" size={11} /> {r.plan.open_questions}</span>{/if}
               {#if r.drifted}<span class="wait"><Icon name="alert" size={11} /> drifted</span>{/if}
             </span>
@@ -62,6 +85,14 @@
         {/each}
       {/if}
     {/each}
+    {#if !filter.trim()}
+      {#each away as p (p.project_id)}
+        <div class="away">
+          <p class="group"><Icon name="folder" size={13} /> <span>{p.project}</span></p>
+          {#each (p.layouts ?? []).filter((l) => l.elsewhere) as l (l.root)}<p class="why"><Inline text={l.elsewhere ?? ""} /></p>{/each}
+        </div>
+      {/each}
+    {/if}
     {#if bare.length > 0 && !filter.trim()}
       <details class="bare">
         <summary><Icon name="folder" size={13} /> {bare.length} {bare.length === 1 ? "project has" : "projects have"} no specification layout</summary>
@@ -148,6 +179,7 @@
   }
   .row {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 0.2rem;
     width: 100%;
     padding: 0.4rem var(--s-3) 0.4rem 2.2rem;
@@ -175,7 +207,15 @@
     white-space: nowrap;
     text-overflow: ellipsis;
   }
+  .state {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .meta {
+    flex-wrap: wrap;
     display: flex;
     align-items: center;
     gap: var(--s-2);
@@ -199,6 +239,18 @@
   }
   .fail {
     color: var(--fail);
+  }
+  .unread {
+    font-style: italic;
+  }
+  .away .group {
+    margin: 0;
+    cursor: default;
+  }
+  .away .why {
+    margin: 0 var(--s-4) var(--s-2) 2.2rem;
+    font-size: var(--t-xs);
+    color: var(--dim);
   }
   .bare {
     margin: var(--s-3) var(--s-3) 0;

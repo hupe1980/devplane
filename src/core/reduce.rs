@@ -67,6 +67,9 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             // The agent named the conversation: working, and now resumable.
             run.agent_session = Some(agent_session.clone());
             run.state = RunState::Working;
+            // Signed in after all, and a fresh session not yet closed.
+            run.sign_in = None;
+            run.session_closed = None;
         }
 
         Event::AgentProcessSpawned { pid } => {
@@ -167,7 +170,7 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             }
         }
 
-        Event::PermissionModeSeen { mode } => {
+        Event::PermissionModeSeen { mode, .. } => {
             let seen = crate::core::run::PermissionMode::parse(mode);
             // Only a change moves the clock: this arrives on every prompt, and
             // the fact worth carrying is how long the mode has been true.
@@ -177,11 +180,51 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             }
         }
 
+        // Replaced on every statement: de-duplication is the emitter's job,
+        // and the history is the log.
+        Event::ModeStated { statement } => {
+            run.mode_statement = Some(statement.clone());
+            run.mode_statement_at = Some(env.at);
+        }
+
         Event::AgentModeSeen { mode } => {
             // Only a change moves the clock, as for `PermissionModeSeen`.
             if run.agent_mode.as_deref() != Some(mode.as_str()) {
                 run.agent_mode = Some(mode.clone());
                 run.agent_mode_seen = Some(env.at);
+            }
+        }
+
+        // A vendor's report of who decided: recorded, and it moves nothing.
+        // A refusal the vendor's configuration made is counted as a rule's
+        // would be (the only sign of a rule too tight); the person's is not,
+        // and a hook's was counted by the hook.
+        Event::VendorDecided {
+            tool,
+            decision,
+            source,
+            ..
+        } => {
+            let refused = decision == "reject";
+            if refused
+                && source.as_deref() == Some("config")
+                && !echoes_last_refusal(run, env, tool)
+            {
+                run.refusals += 1;
+                run.last_refusal = Some(crate::core::run::Refusal {
+                    tool: tool.clone(),
+                    by: "Claude Code's permission settings".into(),
+                    reason: None,
+                    at: env.at,
+                });
+            }
+            if refused
+                && source.as_deref() != Some("hook")
+                && run.recent_tools.last().is_some_and(|c| c.tool == *tool)
+                && let Some(said) = run.summary.as_mut()
+                && !said.starts_with(REFUSED)
+            {
+                *said = format!("{REFUSED}{said}");
             }
         }
 
@@ -424,9 +467,13 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
                 (Some("error") | Some("failed"), _, _) => RunState::Failed,
                 // The host tearing down (`driven.rs`) is not the work finishing.
                 (Some("interrupted"), _, _) => RunState::Interrupted,
-                // `stopped` is a person ending a driven run.
+                // `stopped` is a person ending a driven run; `claimed`, the
+                // agent ending its own after saying the spec and tests conflict.
                 (
-                    Some("clear" | "resume" | "logout" | "prompt_input_exit" | "other" | "stopped"),
+                    Some(
+                        "clear" | "resume" | "logout" | "prompt_input_exit" | "other" | "stopped"
+                        | "claimed",
+                    ),
                     _,
                     _,
                 ) => RunState::Stopped,
@@ -653,9 +700,45 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             run.blocked_on = None;
         }
 
-        // Kept in the log for review; what the agent claims it edited changes
-        // nothing about where the run is.
-        Event::EditReported { .. } => {}
+        // The diff stays in the log; the run indexes which call reported an
+        // edit to which path, so a decision about the call can find it. The
+        // agent's claim changes nothing about where the run is.
+        Event::EditReported { call_id, path, .. } => {
+            let edit = crate::core::run::ReportedEdit {
+                call_id: call_id.clone(),
+                path: path.clone(),
+            };
+            if !run.edits_reported.contains(&edit) {
+                run.edits_reported.push(edit);
+                let over = run
+                    .edits_reported
+                    .len()
+                    .saturating_sub(crate::core::run::EDITS_KEPT);
+                run.edits_reported.drain(..over);
+            }
+        }
+        Event::SessionClosed { sent } => run.session_closed = Some(*sent),
+        Event::NoticeSeen {
+            severity,
+            title,
+            description,
+        } => {
+            run.notices.push(crate::core::run::Notice {
+                severity: severity.clone(),
+                title: title.clone(),
+                description: description.clone(),
+                at: env.at,
+            });
+            let over = run
+                .notices
+                .len()
+                .saturating_sub(crate::core::run::NOTICES_KEPT);
+            run.notices.drain(..over);
+        }
+        Event::SignInRequired { methods } => run.sign_in = Some(methods.clone()),
+        Event::ToolsNotOffered => run.tools_not_offered = true,
+        // The agent's claim lives on its change; the stop that follows ends the run.
+        Event::StopClaimed { .. } => {}
 
         // Tells subscribers to re-read; not about a run.
         Event::Refresh => {}
@@ -709,8 +792,8 @@ fn last_pending_tool(run: &Run) -> Option<&ToolCall> {
 }
 
 /// Whether a permission decision is about the call the run is waiting on.
-/// Telemetry is batched and arrives late, so an OpenTelemetry decision clears
-/// a block only when it names the pending call by id. A hook's decision about
+/// Telemetry never is: it is batched, arrives late, and is a record of what
+/// another channel already answered. A hook's decision about
 /// a different tool (another subagent) leaves the block alone. The host's and
 /// a feed's decisions answer the block they were raised for.
 fn decides_pending(
@@ -730,7 +813,10 @@ fn decides_pending(
     }
     let same_tool = tool.is_empty() || blocked_tool.is_none_or(|t| t == tool);
     match source {
-        Source::Otel => call_id.is_some() && call_id == pending_id && same_tool,
+        // Telemetry is recorded, never answered from: a pending permission is
+        // cleared by the hook's or the protocol's own answer, so no channel's
+        // late copy can decide what the person is still looking at.
+        Source::Otel => false,
         Source::Hook | Source::CopilotHook | Source::CodexHook => same_tool,
         _ => true,
     }
@@ -768,7 +854,7 @@ fn summarise_tool(tool: &str, input: &serde_json::Value) -> String {
 /// Records that a question left the inbox unanswered. Only for questions not
 /// answerable from here: a driven ask has its own durable `asks` row. Blind
 /// spot: the vendor's auto-continue timer submits, so it looks exactly like an
-/// answer; `devplane modes` covers that half.
+/// answer; `devplane status --modes` covers that half.
 fn abandon_open_question(
     run: &mut crate::core::Run,
     at: jiff::Timestamp,
@@ -885,6 +971,18 @@ pub mod facts {
         /// Live runs delegated to a provider's own daemon (`claude --bg`).
         pub delegated: usize,
         pub unanswered: usize,
+        /// An answer the window gave and has not sent yet. Quitting drops it.
+        #[serde(default)]
+        pub held: Option<HeldSummary>,
+    }
+
+    /// The held answer, as the quit sentence names it.
+    #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct HeldSummary {
+        /// What was asked.
+        pub title: String,
+        /// The answer in words.
+        pub says: String,
     }
 
     impl Quitting {
@@ -893,6 +991,14 @@ pub mod facts {
         #[must_use]
         pub fn says(&self) -> String {
             let mut out = String::new();
+            // First: it is the one thing quitting loses that the person did.
+            if let Some(h) = &self.held {
+                out.push_str(&format!(
+                    "The answer you gave to \u{201c}{}\u{201d} ({}) is still held and will not reach \
+                     the agent: quitting drops it, nothing is recorded, and the question stays open.\n",
+                    h.title, h.says
+                ));
+            }
             if self.stops.is_empty() {
                 out.push_str(
                     "Quitting stops no agent: none of the live sessions is one Devplane started.\n",
@@ -907,19 +1013,24 @@ pub mod facts {
                     out.push_str(&format!("  {}  {}  {}\n", s.run.as_str(), s.agent, s.at));
                 }
             }
-            // Said even when zero: "none" differs from "did not look".
-            out.push_str(&format!(
-                "It leaves {} session{} running in their own terminals untouched",
-                self.leaves,
-                if self.leaves == 1 { "" } else { "s" }
-            ));
-            if self.delegated > 0 {
-                out.push_str(&format!(
-                    ", and {} delegated to a provider's own daemon",
-                    self.delegated
-                ));
+            // What it leaves running, said only when there is something.
+            match (self.leaves, self.delegated) {
+                (0, 0) => {}
+                (0, d) => out.push_str(&format!(
+                    "It leaves {d} session{} delegated to a provider's own daemon untouched.\n",
+                    if d == 1 { "" } else { "s" }
+                )),
+                (n, d) => {
+                    out.push_str(&format!(
+                        "It leaves {n} session{} running in their own terminals untouched",
+                        if n == 1 { "" } else { "s" }
+                    ));
+                    if d > 0 {
+                        out.push_str(&format!(", and {d} delegated to a provider's own daemon"));
+                    }
+                    out.push_str(".\n");
+                }
             }
-            out.push_str(".\n");
             if self.unanswered > 0 {
                 out.push_str(&format!(
                     "{} question{} waiting for you stay{} open: the agent's session is on disk, \
@@ -940,9 +1051,11 @@ pub mod facts {
     pub fn quitting<'a>(
         runs: impl Iterator<Item = &'a Run>,
         asks: &[crate::core::ask::Ask],
+        held: Option<HeldSummary>,
     ) -> Quitting {
         let mut q = Quitting {
             unanswered: asks.iter().filter(|a| a.is_open()).count(),
+            held,
             ..Quitting::default()
         };
         for run in runs.filter(|r| r.state.is_live()) {
@@ -989,6 +1102,7 @@ mod quitting_says {
             leaves: 0,
             delegated: 1,
             unanswered: 3,
+            held: None,
         };
         let s = q.says();
         assert!(
@@ -1000,10 +1114,13 @@ mod quitting_says {
             "{s}"
         );
         assert!(
-            s.contains("It leaves 0 sessions running"),
-            "zero is said: {s}"
+            !s.contains("running in their own terminals"),
+            "no terminal session is left, so none is spoken of: {s}"
         );
-        assert!(s.contains("1 delegated"), "{s}");
+        assert!(
+            s.contains("It leaves 1 session delegated to a provider's own daemon"),
+            "{s}"
+        );
         assert!(s.contains("3 questions waiting for you stay open"), "{s}");
 
         let none = Quitting::default().says();
@@ -1012,6 +1129,26 @@ mod quitting_says {
             !none.contains("question"),
             "no questions, no sentence about them: {none}"
         );
+        assert!(!none.contains("held"), "nothing held, nothing said: {none}");
+    }
+
+    #[test]
+    fn a_held_answer_is_named_first_and_said_to_be_dropped() {
+        let q = Quitting {
+            unanswered: 1,
+            held: Some(super::facts::HeldSummary {
+                title: "Keep /v1/login?".into(),
+                says: "drop it".into(),
+            }),
+            ..Quitting::default()
+        };
+        let s = q.says();
+        assert!(
+            s.starts_with("The answer you gave to \u{201c}Keep /v1/login?\u{201d} (drop it)"),
+            "{s}"
+        );
+        assert!(s.contains("will not reach the agent"), "{s}");
+        assert!(s.contains("quitting drops it"), "{s}");
     }
 }
 
@@ -1200,6 +1337,46 @@ mod tests {
     fn ev(e: Event) -> EventEnvelope {
         let source = e.test_source();
         EventEnvelope::new(crate::core::ids::RunId::new("s1"), source, e)
+    }
+
+    /// Every statement replaces the last and moves its time; replaying the
+    /// log ends on the same statement.
+    #[test]
+    fn a_mode_statement_replaces_the_last_on_every_event() {
+        use crate::core::run::{ModeStatement, Reading, Why};
+        let stated = |why, mode: &str| {
+            ev(Event::ModeStated {
+                statement: ModeStatement {
+                    agent: "Codex".into(),
+                    mode: Some(mode.into()),
+                    name: Some(mode.into()),
+                    reading: Reading::Asks,
+                    decides: None,
+                    why,
+                    detail: None,
+                },
+            })
+        };
+        let log = [
+            stated(Why::AskedForAskFirst, "read-only"),
+            stated(Why::Moved, "agent"),
+            stated(Why::Moved, "agent"),
+        ];
+        let mut r = run();
+        for e in &log {
+            apply(&mut r, e);
+            assert_eq!(
+                r.mode_statement_at,
+                Some(e.at),
+                "the time moves on every event"
+            );
+        }
+        let mut again = run();
+        for e in &log {
+            apply(&mut again, e);
+        }
+        assert_eq!(r.mode_statement, again.mode_statement);
+        assert_eq!(r.mode_statement.unwrap().why, Why::Moved);
     }
 
     /// Hook events carry no tasks, so `sent` stays `None`, not an empty list.
@@ -1744,6 +1921,8 @@ mod tests {
             &mut r,
             &ev(Event::PermissionModeSeen {
                 mode: "auto".into(),
+                at: None,
+                sequence: None,
             }),
         );
         let first = r.permission_mode_seen.expect("stamped on first sight");
@@ -1752,6 +1931,8 @@ mod tests {
         // The same mode again, later: nothing moves.
         let mut again = ev(Event::PermissionModeSeen {
             mode: "auto".into(),
+            at: None,
+            sequence: None,
         });
         again.at = first + jiff::SignedDuration::from_secs(600);
         apply(&mut r, &again);
@@ -1764,6 +1945,8 @@ mod tests {
         // A different mode does.
         let mut switched = ev(Event::PermissionModeSeen {
             mode: "default".into(),
+            at: None,
+            sequence: None,
         });
         switched.at = first + jiff::SignedDuration::from_secs(1200);
         apply(&mut r, &switched);
@@ -1780,6 +1963,8 @@ mod tests {
             &mut r,
             &ev(Event::PermissionModeSeen {
                 mode: "somethingNew".into(),
+                at: None,
+                sequence: None,
             }),
         );
         assert_eq!(
@@ -2393,9 +2578,25 @@ mod tests {
         assert_eq!(r.state, RunState::Working);
     }
 
-    /// A telemetry decision naming the pending call by id is the answer.
+    fn reported(source: Option<&str>, decision: &str, call_id: Option<&str>) -> Event {
+        Event::VendorDecided {
+            vendor: "claude-code".into(),
+            tool: "Bash".into(),
+            decision: decision.into(),
+            source: source.map(str::to_string),
+            call_id: call_id.map(str::to_string),
+            sequence: None,
+            at: None,
+            mode_in_force: None,
+            session: crate::core::decision::SessionKind::Interactive,
+            matched: None,
+        }
+    }
+
+    /// Telemetry is a record, never an answer: even a report naming the
+    /// pending call by id, in either shape, leaves the run waiting.
     #[test]
-    fn a_telemetry_decision_about_the_pending_call_clears_it() {
+    fn a_telemetry_decision_never_clears_a_pending_permission() {
         let mut r = run();
         apply(
             &mut r,
@@ -2410,14 +2611,33 @@ mod tests {
         blocked_on_bash(&mut r);
         apply(
             &mut r,
-            &otel(decided("Bash", "accept", "person", Some("toolu_0"))),
-        );
-        assert!(r.state.needs_human(), "another call's id");
-        apply(
-            &mut r,
             &otel(decided("Bash", "accept", "person", Some("toolu_1"))),
         );
+        assert!(r.state.needs_human(), "the pending call's own id");
+        for source in [Some("user_temporary"), Some("config"), Some("hook"), None] {
+            apply(&mut r, &otel(reported(source, "accept", Some("toolu_1"))));
+            assert!(r.state.needs_human(), "{source:?}");
+        }
+        let blocked = r.blocked_on.clone();
+        assert!(blocked.is_some());
+        // The hook's own answer still moves it on.
+        apply(&mut r, &ev(decided("Bash", "allow", "policy:Bash", None)));
         assert_eq!(r.state, RunState::Working);
+    }
+
+    /// A refusal the vendor's configuration made counts as a rule's would; the
+    /// person's does not, and a hook's was counted by the hook.
+    #[test]
+    fn a_reported_refusal_is_counted_only_when_configuration_made_it() {
+        let mut r = run();
+        apply(&mut r, &otel(reported(Some("user_reject"), "reject", None)));
+        apply(&mut r, &otel(reported(Some("hook"), "reject", None)));
+        apply(&mut r, &otel(reported(None, "reject", None)));
+        assert_eq!(r.refusals, 0);
+        apply(&mut r, &otel(reported(Some("config"), "accept", None)));
+        assert_eq!(r.refusals, 0);
+        apply(&mut r, &otel(reported(Some("config"), "reject", None)));
+        assert_eq!(r.refusals, 1);
     }
 
     /// The gate's denial, then Claude Code's telemetry copy of it: one refusal,
@@ -2732,6 +2952,7 @@ mod currency_tests {
         CommitStamp {
             commit: Some("c0ffee".into()),
             tree: tree.map(str::to_string),
+            tree_unknown: None,
             branch: Some("main".into()),
             clean,
             changed_files: if clean { 0 } else { 1 },
@@ -2925,7 +3146,7 @@ mod quitting_tests {
             run(RunMode::Observed, RunState::Working, "/code/cli"),
             run(RunMode::Background, RunState::Working, "/code/bg"),
         ];
-        let q = quitting(runs.iter(), &[]);
+        let q = quitting(runs.iter(), &[], None);
         assert_eq!(q.stops.len(), 1, "only the driven run is ours to end");
         assert_eq!(q.stops[0].at, "/code/api");
         assert_eq!(q.leaves, 2);
@@ -2939,7 +3160,7 @@ mod quitting_tests {
             run(RunMode::Driven, RunState::Completed, "/code/api"),
             run(RunMode::Observed, RunState::Interrupted, "/code/web"),
         ];
-        assert_eq!(quitting(runs.iter(), &[]), Quitting::default());
+        assert_eq!(quitting(runs.iter(), &[], None), Quitting::default());
     }
 
     /// Names the worktree, not the checkout.
@@ -2947,7 +3168,7 @@ mod quitting_tests {
     fn an_agent_in_a_worktree_is_named_by_where_it_is_working() {
         let mut r = run(RunMode::Driven, RunState::Working, "/code/api");
         r.worktree = Some(std::path::PathBuf::from("/code/api/.claude/worktrees/fix"));
-        let q = quitting([r].iter(), &[]);
+        let q = quitting([r].iter(), &[], None);
         assert_eq!(q.stops[0].at, "/code/api/.claude/worktrees/fix");
     }
 
@@ -2960,7 +3181,7 @@ mod quitting_tests {
         answered
             .answer(
                 serde_json::json!({}),
-                "board",
+                crate::core::ask::AnswerPath::Window,
                 "2026-09-24T09:01:00Z".parse().expect("a timestamp"),
             )
             .expect("first answer");
@@ -2969,14 +3190,14 @@ mod quitting_tests {
             ask("a2", Kind::Permission),
             answered,
         ];
-        let q = quitting(runs.iter(), &asks);
+        let q = quitting(runs.iter(), &asks, None);
         assert_eq!(
             q.unanswered, 2,
             "one question and one permission still open"
         );
         assert_eq!(q.stops.len(), 1);
         assert_eq!(
-            quitting(runs.iter(), &[]).unanswered,
+            quitting(runs.iter(), &[], None).unanswered,
             0,
             "a blocked run without an ask row is not a question that survives"
         );
@@ -2987,8 +3208,8 @@ mod quitting_tests {
     fn the_agents_are_listed_in_a_stable_order() {
         let a = run(RunMode::Driven, RunState::Working, "/a");
         let b = run(RunMode::Driven, RunState::Working, "/b");
-        let one = quitting([a.clone(), b.clone()].iter(), &[]);
-        let other = quitting([b, a].iter(), &[]);
+        let one = quitting([a.clone(), b.clone()].iter(), &[], None);
+        let other = quitting([b, a].iter(), &[], None);
         assert_eq!(one, other);
     }
 }

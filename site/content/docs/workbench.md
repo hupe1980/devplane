@@ -1,21 +1,20 @@
 +++
 title = "The workbench"
-description = "A tour of Devplane's interface: the regions, a change's six views, the review, the palette and the keys that matter."
+description = "A tour of Devplane's interface: the regions, a change's six views, the review, the inbox, the palette and the keys that matter."
 weight = 3
 [extra]
 group = "start"
 +++
 
-The workbench is one page served by the host on loopback, laid out like an editor: a title bar, an
-activity bar, a sidebar list, tabs, a bottom panel and a status bar. Nothing is fetched from the
-internet and nothing needs an account.
+One page served by the host on loopback, laid out like an editor. Nothing is fetched from the
+internet; no account.
 
 ```sh
-devplane open     # in your browser
-devplane app      # in its own window (--features app)
+devplane up           # in your browser
+devplane up --window  # in its own window (the desktop app, or --features app)
 ```
 
-Press `?` anywhere to list the keys bound on the current surface.
+`?` lists the keys bound where you are.
 
 ![A change open in the workbench: the changes by project in the sidebar, the change as a document with its lifecycle, six views and the evidence cards](../../workbench.png)
 
@@ -24,126 +23,138 @@ Press `?` anywhere to list the keys bound on the current surface.
 | Region | What it holds |
 |---|---|
 | **Title bar** | where you are, the find box (`⌘K` / `Ctrl+K`), **New change**, sidebar and panel toggles |
-| **Activity bar** | one icon per surface, each with a count |
-| **Sidebar** | the current surface's list: changes by project, inbox items, sessions |
+| **Activity bar** | one icon per surface, each with a count (none at zero) |
+| **Sidebar** | the current surface's list |
 | **Editor** | tabs of what you opened |
 | **Bottom panel** | **Activity** and **Sight** (`⌘J`) |
 | **Status bar** | the host connection, sessions working, projects, what needs you, the theme |
 
-![What needs you: the ranked list beside the item in full](../../inbox.png)
-
-### The activity bar
-
-| Surface | Go-to key | What it lists |
+| Surface | Key | What it lists |
 |---|---|---|
 | **Inbox** | `g i` | what needs a person, most urgent first, across every project |
 | **Changes** | `g c` | every change, grouped by project, with its state |
 | **Sessions** | `g b` | every agent session on the machine, watched or driven |
 | **Specifications** | `g s` | each project's spec folders, task counts and open questions |
 | **Ledger** | `g l` | every decision, and on whose authority it was made |
-| **Forge** | | open GitHub issues and pull requests across registered projects |
-| **Reports** | `g r` | findings one project filed about another |
-| **Setup** | | this machine's channels, and each repository's `devplane.toml` read back |
+| **Forge** | `g f` | open GitHub issues and pull requests across your projects |
+| **Setup** | `g ,` | this machine's channels, and each repository's `devplane.toml` read back |
 
-A zero count shows nothing; a count is always a number, never a colour alone.
+A click opens a **preview tab** (italic) that the next click replaces; double-click or `Enter` keeps
+it. Open tabs stay in this browser tab only. The address names what is showing, so a link or reload
+reopens it.
 
-### Tabs
+## First run
 
-A click on a list row opens a **preview tab** (title in italics) that the next click replaces.
-Double-click or `Enter` pins it. Tabs are kept per browser tab and sent nowhere. The address always
-names what is showing, so a link opens the same view.
+With nothing set up, the workbench opens on Setup's checklist: sessions already running, update
+checks, connect an agent, trust a repository, declare a check, the spec layout, and a first change.
+Each step reads what is true on this machine, so closing the window loses nothing. Any step can be
+skipped and brought back. A step that writes configuration shows the exact diff and writes only on
+**Confirm**. Trusting a repository needs the desktop window; a browser tab gives you the
+`devplane project trust` command instead.
+
+A project with no gates says so wherever gates are shown — *no gates declared* — and offers
+**Declare a check** instead of **Run gates**.
 
 ## A change
 
-Open a change from **Changes**, the palette, or a `devplane://change/<id>` link (in the app). The
-header shows the title, state, project, branch, spec folder and the gate standing in one sentence,
-for example *`check` exited zero against the working tree as it stands*. Beside the state, when the
-change's own diff weakened a check, the header reads **verified · 1 check weakened** — the same words
-in the Changes list, the palette, the Specifications page and the inbox. The toolbar holds **Review**,
-**Run gates**, **Offer as pull request** (only when verified), **Finish**, **Archive**, and **Editor** /
-**Terminal** to open the worktree. While a weakened row is unseen, Review is the primary action, and
-pressing Offer is refused with each unseen row named and a button that opens it.
+Open it from **Changes**, the palette, or a `devplane://change/<id>` link.
+
+- **Header**: title, state, and the actions that apply; the rest under **More**. Below it, the gate
+  standing as a sentence (*`check` exited zero against the working tree as it stands*).
+- **Actions**: **Review**, **Run gates**, **Offer as pull request** (verified only); **More** holds
+  **Finish**, **Archive**, **Editor** and **Terminal**.
+- **A weakened check** leads the header — **1 check weakened · verified** — and hides the green
+  sentence until read. While a weakened row is unseen, **Review** is the primary action and the offer
+  is refused, with a button to each row. Files nobody opened are named beside the offer; they never
+  refuse it.
+- `Alt+1` … `Alt+6` (`⌥1` … `⌥6`) switch the six views:
 
 | View | What it shows |
 |---|---|
-| **Overview** | cards for gates, tasks, ledger and agent; the facts; the history; reports it filed |
-| **Tasks** | ticked and seen-by-a-passing-check counts, tasks ticked but sent to nobody, requirements and the tasks citing them, spec drift with **Tell the run** / **Accept what it saw** |
+| **Overview** | cards for gates, tasks, ledger and agent; the facts; the history |
+| **Tasks** | ticked and seen-by-a-passing-check counts, requirements and the tasks citing them, spec drift with **Tell the run** / **Accept what it saw** |
 | **Review** | the diff, below |
-| **Gates** | every gate run with its commands and exit codes, and the certificate with **Copy as markdown** |
+| **Gates** | every gate run with its commands and exit codes, **Run base checks**, the certificate with **Copy as markdown** |
 | **Ledger** | this change's decisions, filterable by authority |
-| **Agent** | the latest run's conversation, a composer to prompt it, **Stop…**, and the files it wrote and commands it ran |
+| **Agent** | the latest run's conversation, a composer to prompt it, **Stop…**, the files it wrote and commands it ran |
 
-Only *verified* is green. See [Verified done](@/docs/verified-done.md).
+What the states and standing mean: [Verified done](@/docs/verified-done.md).
 
 ## The review
 
 ![The review: a skipped test listed first under checks weakened or changed, the file tree beside the diff](../../review.png)
 
-A file tree beside a diff against the merge base, uncommitted and untracked files included.
+Every hunk of every file in one column against the merge base (uncommitted and untracked files
+included), with the file tree beside it. Each file's header stays on screen while its hunks scroll:
+path, lines, role, test coverage, what it was asked for, and facts with the command to check each.
 
-- **Checks weakened or changed** comes first when there is anything under it: an added skip marker, a
-  removed assertion, a deleted test, a lint suppression, an edit to the gates, CI or a checker's
-  configuration ([the full list](@/docs/verified-done.md#review-before-you-merge)). Each row says what
-  it matched and whether you have read it; **I have read this** (or marking a hunk seen in that file)
-  records it, and an offer waits for every one.
-- Then the files in the order `[review] roles` declares (shared, logic, security, integration,
-  wiring, tests), each with whether a declared test covers it. With no roles declared, files are in
-  path order and the view says so.
-- **By risk** / **By intent** switches to grouping by the run that wrote each file and the tasks it
-  was sent. Files no run was asked for sit under their own heading.
-- Formatting-only hunks are collapsed and counted.
+- **Checks weakened or changed** come first ([the kinds](@/docs/verified-done.md#review-before-you-merge)).
+  The line that made a row carries ⚠ in the gutter. A row is read when its hunks are marked seen.
+- Then files in `[review] roles` order (path order without roles, and the view says so). **By
+  intent** groups them by the run that wrote them; files nobody asked for get their own heading.
+- Formatting-only hunks are collapsed and counted. The tree counts unread hunks per file.
 
 | Key | Does |
 |---|---|
-| `j` / `k` | next / previous hunk |
+| `j` / `k` | next / previous hunk, across files |
 | `n` / `p` | next / previous file |
 | `s` | mark the hunk seen |
-| `f` | request a fix: a prompt to the change's latest run, quoting the hunk |
-| `x` | expand this file's collapsed formatting-only hunks |
+| `f` | start a comment on the hunk |
+| `⌘Enter` / `Ctrl+Enter` | send the pending review |
+| `x` | expand this file's formatting-only hunks |
 | `v` | unified or side by side |
 | `1` / `2` | by risk / by intent |
 
-*Seen* on a hunk is a mark in this browser only, keyed by the hunk's content, so a hunk the agent
-rewrites is unseen again; it is sent nowhere and decides nothing. Reading a weakened-check row is the
-one mark the host keeps, because an offer waits for it. The same pane is a change's Review view and
-`#review/<id>`. On the command line: `devplane change review
-<id> [--by intent]`.
+- **Seen** is kept by the host, keyed by the hunk's content: a hunk the agent rewrites is unread
+  again. The CLI, the inbox and the offer read the same marks. Scrolling marks nothing.
+- **Comments**: press a line number (or `f`). Comments wait in a pending review and survive a reload.
+  **Send N comments** sends them as one turn to the change's agent, each with its path, line and the
+  tree it was written against, and says whether the agent reads it now, after its turn, or was resumed
+  for it. After the agent's next turn each sent comment says whether its hunk changed.
+- `devplane://review/<id>` opens this view; the CLI is `devplane change review <id> [--by intent]`.
+
+## The inbox
+
+![What needs you: the ranked list beside the item in full](../../inbox.png)
+
+Each key is printed on the control it presses; one that does not apply says why. The same keys work
+in the desktop app's answer window.
+
+| Key | Does |
+|---|---|
+| `1`–`9` | choose that option (on a form, for the first unanswered question) |
+| `t` · `⌘Enter` / `Ctrl+Enter` | type an answer · send it |
+| `a` · `d` | allow once · deny, for a permission Devplane holds |
+| `w` | a dialog the vendor owns: open its session, or copy its resume command |
+| `s` | snooze until the session or change next reports activity (an hour for a pull request or issue) |
+| `o` · `r` | open what the item is about · open the change's review |
+| `z` | take back an answer before it is sent, or bring a snoozed item back |
+
+- **An answer is held for 5 seconds** before it reaches the agent, with a countdown; `z` takes it back
+  with nothing sent or recorded. Answering another item sends the held one at once. Quitting the host
+  cancels it, and the question is waiting again at the next start. `devplane inbox answer` sends at
+  once.
+- Snoozed items leave the list and are counted at its foot, with **list them** and **bring back**.
+- The inbox badge, the status bar's *need you* and the tray count are one number.
 
 ## Sessions
 
-Every session on the machine, watched or driven, in one grid. The state counts above it are its
-filters; group by project or by state; select a row for its detail.
+Every session, watched or driven, in one grid; state counts are filters, grouped by project or state.
+What each state means: [Watching sessions](@/docs/observe.md#what-each-state-means).
 
 ![Every session in one grid, grouped by project](../../sessions.png)
 
-## Starting a change
+## New change, the palette, the bottom panel
 
-**New change** (title bar, or `Alt+N`) opens a form: one or more projects, an optional specification,
-a title (also the branch name), the first prompt, the agent, and whether to use an isolated worktree.
-Before anything is created it shows what would happen in each project, including every refusal: an
-untrusted repository, a dirty checkout, a `devplane.toml` that will not load. It is the same preflight
-`devplane change start` runs.
-
-## The palette
-
-`⌘K` (or `Ctrl+K`) finds changes, surfaces (*Go to …*), actions and projects by name. Start with `>`
-to list only actions. Any other text can also be searched across every session's tool calls,
-questions and errors, as `devplane search` does.
-
-## The bottom panel
-
-**Activity** is every session, newest event first, one line each: time, project, agent (and whether
-Devplane drives it), state, what it is doing, context used. Click a line to open the session.
-
-**Sight** is the limit of what this machine can see:
-
-- **Watched end to end**: vendors whose sessions Devplane has proved it can follow.
-- **Read, not proved against a live session**: channels that are wired but unverified.
-- **Seen only when Devplane starts them**: agents it can drive but not watch.
-- **Projects whose configuration cannot be read**, when there are any.
-
-An empty Sessions list does not mean nothing is running; Sight says what is not watched. See
-[Watching sessions](@/docs/observe.md).
+- **New change** (`Alt+N`): projects, optional spec, title (also the branch), first prompt, agent, and
+  worktree or in place. It shows each project's preflight and every refusal before creating anything.
+- **The palette** (`⌘K` / `Ctrl+K`) finds changes, surfaces, actions and projects; `>` lists only
+  actions; other text also searches every session's tool calls, questions and errors. Over an inbox
+  item or a change, its own actions come first.
+- **Activity**: every session's events, newest first.
+- **Sight**: what this machine can and cannot see — vendors watched end to end, wired but unproved,
+  only seen when Devplane starts them, and projects whose configuration cannot be read. An empty
+  Sessions list is not proof that nothing runs.
 
 ## Keys
 
@@ -151,22 +162,32 @@ An empty Sessions list does not mean nothing is running; Sight says what is not 
 |---|---|
 | `⌘K` / `Ctrl+K` | command palette |
 | `?` | the keys bound here |
-| `Esc` | close the palette or help, or go back to the list |
+| `Esc` | close the palette, help or new-change form |
 | `Alt+N` | new change |
 | `⌘B` / `Ctrl+B` | show or hide the sidebar |
 | `⌘J` / `Ctrl+J` | show or hide the bottom panel |
 | `Alt+W` · `Alt+]` · `Alt+[` | close tab · next tab · previous tab |
-| `j` `k` / `↓` `↑` | move through a list |
-| `Enter` | open |
+| `j` `k` / `↓` `↑` · `Enter` | move through a list · open |
 | `g g` · `G` | first · last |
 | `r` | review, on a change |
 
-No key fires while you type in a field, except `Esc`.
+No key fires while you type in a field, except `Esc` and the `⌘`/`Ctrl` chords.
 
 ## The window
 
-`devplane app` hosts in-process and adds a notification when an agent asks or gives up, a count in
-the menu bar, and one global shortcut (`⌘⇧Space` by default; `[app] shortcut` in
-`~/.devplane/app.toml`) that shows the topmost thing that needs you over whatever you are doing.
-Answer it, press `Esc`, and focus goes back. Closing the window keeps hosting; quitting from the tray
-says what it stops first. Nothing starts at login. See [Install](@/docs/install.md#the-window).
+`devplane up --window` adds desktop notifications when an agent asks or gives up, a tray count, and a
+global shortcut (`⌘⇧Space`; `[app] shortcut`) that shows the top item over whatever you are doing.
+Install: [The window](@/docs/install.md#the-window).
+
+A permission or question can be [answered from its notification](@/docs/permissions.md#answering-from-the-notification):
+
+| | macOS (installed app) | Windows (installed app) | Linux |
+|---|---|---|---|
+| Allow / Deny on a permission | yes | yes | where the notification service reports actions |
+| A question's options | up to 4 | up to 5 | up to 3 |
+| A typed reply | yes | yes | no; a click opens the answer window |
+| Withdrawn when answered elsewhere | yes | yes | yes |
+
+A build run from source, a Windows build run from `target/`, or a desktop without a notification
+service gets a plain notification with no actions. `devplane doctor` says which you have. `devplane
+up` without a window notifies through the system notifier, plainly.

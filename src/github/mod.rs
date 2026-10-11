@@ -7,6 +7,7 @@ pub mod auth;
 pub mod client;
 pub mod query;
 pub mod remote;
+pub mod reviews;
 
 pub use auth::{Keyring, Memory, Pending, Poll, Secret, TokenStore, Viewer};
 pub use client::{Client, GitHubHost};
@@ -31,6 +32,10 @@ pub struct PullRequest {
     pub checks: Vec<Check>,
     pub author: Option<Author>,
     pub updated_at: Option<String>,
+    /// The head commit (`headRefOid`), when GitHub said it.
+    pub head_oid: Option<String>,
+    /// The base branch's name (`baseRefName`), when GitHub said it.
+    pub base_ref: Option<String>,
 }
 
 /// A GitHub user, as GraphQL names one.
@@ -143,7 +148,7 @@ impl PullRequest {
     ///
     /// `review_requested` is passed in, not derived from `reviewRequests`: that
     /// list names teams, and only GitHub knows which the person belongs to (see
-    /// [`review_requested_of_me`]).
+    /// [`asks`]).
     pub fn to_forge(
         &self,
         me: Option<&str>,
@@ -215,7 +220,7 @@ impl Issue {
 /// Why GitHub could not be read or written, as the state a surface says.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum Error {
-    #[error("not signed in to GitHub ({0}) — run `devplane login github`, or sign in from Setup")]
+    #[error("not signed in to GitHub ({0}) — run `devplane auth login`, or sign in from Setup")]
     NotSignedIn(String),
     #[error("GitHub sign-in expired ({0}) — GitHub no longer accepts the token; sign in again")]
     Expired(String),
@@ -251,7 +256,7 @@ pub enum Error {
 }
 
 /// One host's sign-in, as every surface shows it. Never the token.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum SignIn {
     SignedOut,
@@ -275,7 +280,7 @@ pub enum SignIn {
 }
 
 /// A host and its sign-in.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HostView {
     pub host: String,
     #[serde(flatten)]
@@ -805,6 +810,45 @@ pub async fn pr_for_branch(
     .await
 }
 
+/// Reads who approved `pr`: its reviews and its base branch's review
+/// requirement, from the host the repository's remote names, with the
+/// signed-in token. Read-only. `now` is the time the reading is stamped with.
+pub async fn approvals(
+    hub: &GitHub,
+    dir: &Path,
+    pr: &PullRequest,
+    now: jiff::Timestamp,
+) -> Result<crate::core::approvals::Reading, Error> {
+    let repo = remote::of_dir(dir).await?;
+    let (Some(head), Some(base)) = (pr.head_oid.clone(), pr.base_ref.clone()) else {
+        return Err(Error::Api {
+            status: 200,
+            message: "GitHub did not say the pull request's head commit or base branch".into(),
+        });
+    };
+    let host = repo.host.clone();
+    let after_merge = pr.status() == PrStatus::Merged;
+    let on = repo.host.clone();
+    hub.call(&on, |c| async move {
+        reviews::read(
+            &c,
+            &reviews::Target {
+                host: &host,
+                owner: &repo.owner,
+                repo: &repo.name,
+                number: pr.number,
+                url: &pr.url,
+                head: &head,
+                base: &base,
+                after_merge,
+            },
+            now,
+        )
+        .await
+    })
+    .await
+}
+
 /// What [`create_pr`] came to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Offered {
@@ -868,30 +912,6 @@ pub async fn create_pr(
     }
 }
 
-/// Opens an issue on `owner/name` at `host` and returns its address. Called
-/// only from `reports::open`.
-pub async fn create_issue(
-    hub: &GitHub,
-    host: &str,
-    slug: &str,
-    title: &str,
-    body: &str,
-) -> Result<String, Error> {
-    let path = format!("/repos/{slug}/issues");
-    let payload = serde_json::json!({"title": title, "body": body});
-    hub.call(host, |c| async move {
-        let a = c.rest(reqwest::Method::POST, &path, Some(payload)).await?;
-        a.body["html_url"]
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| Error::Api {
-                status: 201,
-                message: "GitHub opened the issue but did not say where".into(),
-            })
-    })
-    .await
-}
-
 /// One issue by number, and whether it is open; `None` when there is none.
 /// Asked by number, so an issue older than any list is still found.
 pub async fn issue(hub: &GitHub, dir: &Path, number: u64) -> Result<Option<(Issue, bool)>, Error> {
@@ -948,6 +968,8 @@ mod tests {
                 login: "hupe1980".into(),
             }),
             updated_at: Some("2026-09-15T10:00:00Z".into()),
+            head_oid: None,
+            base_ref: None,
         }
     }
 

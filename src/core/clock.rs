@@ -17,10 +17,7 @@ pub const KEY: &str = "askUserQuestionTimeout";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(
-    feature = "typescript",
-    ts(rename = "ClockSource", export, export_to = "wire/")
-)]
+#[cfg_attr(feature = "typescript", ts(rename = "ClockSource"))]
 pub enum Source {
     /// The person's own `~/.claude/settings.json`.
     User,
@@ -48,7 +45,6 @@ impl Source {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub enum After {
     /// The dialog closes the instant it opens.
     Immediately,
@@ -80,7 +76,6 @@ impl After {
 /// What can answer a question on this machine without the person.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub struct QuestionClock {
     pub after: After,
     pub source: Source,
@@ -143,7 +138,7 @@ impl QuestionClock {
     }
 }
 
-/// Reads `CLAUDE_AFK_TIMEOUT_MS` in the vendor's spelling, so `devplane modes`
+/// Reads `CLAUDE_AFK_TIMEOUT_MS` in the vendor's spelling, so `devplane status --modes`
 /// and `/config` agree. A non-number is ignored rather than guessed.
 pub fn from_millis(raw: &str) -> Option<After> {
     let ms: u64 = raw.trim().parse().ok()?;
@@ -167,7 +162,6 @@ pub fn from_millis(raw: &str) -> Option<After> {
 /// the board and `--json` render words, not ingredients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub struct ClockLine {
     /// The duration as a person would say it, or `immediately`.
     pub after: String,

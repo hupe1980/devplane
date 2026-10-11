@@ -5,6 +5,7 @@
 use crate::core::event::Source;
 use crate::core::ids::RunId;
 use crate::core::run::RunMode;
+use crate::firstrun as first;
 use crate::host::Shared;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -20,7 +21,7 @@ use std::time::Instant;
 
 pub fn router(state: Shared) -> Router {
     Router::new()
-        // Receivers. The `/devplane/` marker lets `connect` recognise its own
+        // Receivers. The `/devplane/` marker lets `agent connect` recognise its own
         // entries when disconnecting.
         .route("/devplane/otel/v1/logs", post(otel_logs))
         // Claude Code exports log records; GenAI-convention agents (Copilot,
@@ -33,14 +34,16 @@ pub fn router(state: Shared) -> Router {
         .route("/api/board", get(board))
         .route("/api/inbox", get(inbox))
         .route("/api/runs/{id}", get(run_detail))
-        .route("/api/runs/{id}/rewind-gap", get(run_rewind_gap))
         .route("/api/runs/{id}/messages", get(run_messages))
         .route("/api/runs/{id}/snooze", post(snooze))
         .route("/api/runs/{id}/prompt", post(prompt_run))
+        // The stop tool's one write: an agent says its spec and tests conflict.
+        .route("/api/runs/{id}/claim", post(claim_run))
         // One answer route addressed by the ask, not the run: the row knows its
         // kind, the caller says what the person chose.
         .route("/api/asks", get(asks_index))
         .route("/api/asks/{id}/answer", post(answer_ask))
+        .route("/api/asks/{id}/undo", post(undo_answer))
         .route("/api/runs/{id}/stop", get(stop_preview).post(stop_run))
         .route("/api/agents", get(agents))
         .route("/api/changes", get(list_change).post(start_change))
@@ -49,26 +52,43 @@ pub fn router(state: Shared) -> Router {
         .route("/api/changes/{id}/drift/accept", post(accept_drift))
         .route("/api/changes/{id}/drift/tell", post(tell_drift))
         .route("/api/changes/{id}/verify", post(verify_change))
+        .route("/api/changes/{id}/base-checks", post(base_checks_change))
         .route("/api/changes/{id}/finish", post(finish_change))
         .route("/api/changes/{id}/retry", post(retry_change))
         .route("/api/changes/{id}/snooze", post(snooze_change))
         .route("/api/changes/{id}/review", get(change_review))
         .route("/api/changes/{id}/review/seen", post(mark_review_seen))
+        .route(
+            "/api/changes/{id}/comments",
+            get(list_comments).post(create_comment),
+        )
+        .route("/api/changes/{id}/comments/send", post(send_comments))
+        .route(
+            "/api/changes/{id}/comments/{cid}",
+            axum::routing::delete(delete_comment),
+        )
         .route("/api/changes/{id}/certificate", get(change_certificate))
         .route("/api/changes/{id}/open", post(open_change))
         .route("/api/changes/{id}/resume", post(resume_change))
+        .route("/api/changes/{id}/login", post(login_change))
+        .route("/api/changes/{id}/claim/read", post(read_claim))
         .route("/api/changes/adopt", post(adopt_change))
+        .route("/api/changes/draft", post(draft_change))
+        .route("/api/changes/{id}/draft/accept", post(accept_draft))
+        .route("/api/changes/{id}/draft/reject", post(reject_draft))
+        .route("/api/changes/{id}/clarify", post(clarify_change))
+        .route(
+            "/api/projects/{id}/config/open-questions",
+            post(accept_open_questions),
+        )
         .route("/api/changes/{id}/archive", post(archive_change))
         .route("/api/changes/{id}/offer", post(offer_change))
-        .route("/api/reports", get(list_reports).post(file_report))
-        .route("/api/reports/{id}", get(report_detail))
-        .route("/api/reports/{id}/start", post(start_from_report))
-        .route("/api/reports/{id}/resolve", post(resolve_report))
-        // The one route that writes to a forge; only a person's act calls it.
-        .route("/api/reports/{id}/open", post(open_report))
         .route("/api/projects", get(projects))
         .route("/api/specs", get(specs))
         .route("/api/projects/trust", post(trust_project))
+        .route("/api/grants", get(list_grants).post(add_grant))
+        .route("/api/grants/revoke", post(revoke_grant))
+        .route("/api/projects/reload", post(reload_projects))
         .route("/api/projects/{id}/snooze", post(snooze_project))
         .route("/api/issues", post(list_issues))
         .route("/api/forge", get(forge))
@@ -78,24 +98,62 @@ pub fn router(state: Shared) -> Router {
         .route("/api/github/logout", post(github_logout))
         .route("/api/github/refresh", post(github_refresh))
         .route("/api/decisions", get(decisions))
+        .route("/api/decisions/unattributed", get(unattributed))
         .route("/api/explain", get(explain))
         .route("/api/search", get(search))
         .route("/api/diagnostics", get(diagnostics))
         .route("/api/setup", get(setup))
-        .route("/api/attention", get(attention))
         .route("/api/modes", get(modes))
         .route("/api/quitting", get(quitting))
         .route("/api/quit", post(quit))
+        // Update checks: the window's, off until the person says (`crate::update`).
+        .route("/api/app/update", get(crate::update::state))
+        .route("/api/app/updates", post(crate::update::preference))
+        .route("/api/app/update/install", post(crate::update::install))
+        .route("/api/app/update/dismiss", post(crate::update::dismiss))
         .route("/api/stream", get(stream))
+        // The first run from the window: the checklist, declaring a check,
+        // scanning before trust, connecting an agent (`crate::firstrun`).
+        .route("/api/first-run", get(first::first_run))
+        .route("/api/projects/scan", get(first::scan))
+        .route(
+            "/api/projects/{id}/gates/candidates",
+            get(first::gate_candidates),
+        )
+        .route("/api/projects/{id}/gates", post(first::declare_gates))
+        .route("/api/connect/{agent}", post(first::connect_agent))
+        .route("/api/disconnect/{agent}", post(first::disconnect_agent))
         // Open, and names the version: a client refuses a host of another
         // version, since a stale host 404s routes the client expects.
-        .route(
-            "/healthz",
-            get(|| async { concat!("ok ", env!("CARGO_PKG_VERSION")) }),
-        )
+        .route("/healthz", get(healthz))
         .route("/", get(asset))
         .route("/{file}", get(asset))
         .with_state(state)
+}
+
+#[derive(Deserialize)]
+struct HealthQuery {
+    nonce: Option<String>,
+}
+
+/// `ok <version>`, and with a client's `nonce` the proof that this process
+/// holds the token ([`crate::config::host_proof`]), which a client checks
+/// before it sends the token to whatever answers on the port.
+async fn healthz(State(state): State<Shared>, Query(q): Query<HealthQuery>) -> String {
+    let ok = concat!("ok ", env!("CARGO_PKG_VERSION"));
+    // Before the port is bound there is nothing to prove, so no proof.
+    match (
+        q.nonce.filter(|n| (16..=128).contains(&n.len())),
+        state.port.get(),
+    ) {
+        (Some(n), Some(port)) => {
+            format!(
+                "{ok} {}",
+                crate::config::host_proof(&state.token, *port, &n)
+            )
+        }
+        _ => ok.to_string(),
+    }
 }
 
 /// A status and a body, for a request that named something unresolvable.
@@ -161,7 +219,7 @@ macro_rules! run_id {
 /// Checks the bearer token. Loopback is not access control; the token, in a
 /// user-only file, is. Only ever from the header: a token in a URL ends up in
 /// logs and process lists.
-fn authorised(state: &Shared, headers: &HeaderMap) -> bool {
+pub(crate) fn authorised(state: &Shared, headers: &HeaderMap) -> bool {
     let from_header = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -190,6 +248,58 @@ fn authorised_to_ingest(state: &Shared, headers: &HeaderMap) -> bool {
             .and_then(|v| v.to_str().ok())
             .map(|v| v.strip_prefix("Bearer ").unwrap_or(v))
             .is_some_and(|t| constant_time_eq(t.as_bytes(), state.ingest_token.as_bytes()))
+}
+
+/// Where an authorised answer came from, as the host can tell it: `window`
+/// only when the request carries the window's proof for this very ask
+/// ([`crate::config::ask_proof`]), which only the app's own webviews can make;
+/// every other holder of the control token — the CLI, a script, a browser tab
+/// on `devplane up`, which is handed no key — is `cli`. The `Origin` header
+/// and the body are not read: any token holder can send either.
+///
+/// This narrows the hole and does not close it: an agent that can drive the
+/// desktop (scripting, accessibility) can press the window's buttons, and a
+/// process running as the person can read the key out of the app's memory.
+///
+/// No input yields [`AnswerPath::Notification`](crate::core::ask::AnswerPath):
+/// that path exists only in the app's own process.
+fn path_of(state: &Shared, headers: &HeaderMap, ask_id: &str) -> crate::core::ask::AnswerPath {
+    if window_proved(state, headers, ASK_PROOF, |key| {
+        crate::config::ask_proof(key, ask_id)
+    }) {
+        crate::core::ask::AnswerPath::Window
+    } else {
+        crate::core::ask::AnswerPath::Cli
+    }
+}
+
+/// The header carrying the window's proof for an answer.
+const ASK_PROOF: &str = "x-devplane-ask-proof";
+/// The header carrying the window's proof for trusting a repository.
+const TRUST_PROOF: &str = "x-devplane-trust-proof";
+/// The header carrying the window's proof for writing a grant.
+const GRANT_PROOF: &str = "x-devplane-grant-proof";
+/// The header carrying the window's proof for revoking a grant.
+const REVOKE_PROOF: &str = "x-devplane-revoke-proof";
+
+/// Whether `header` holds the proof `make` computes from the window key.
+/// False when the host holds no key (the CLI host), whatever the request says.
+fn window_proved(
+    state: &Shared,
+    headers: &HeaderMap,
+    header: &str,
+    make: impl FnOnce(&str) -> String,
+) -> bool {
+    let Some(key) = state.window_key.get() else {
+        return false;
+    };
+    let Some(sent) = headers.get(header).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    constant_time_eq(
+        sent.trim().to_ascii_lowercase().as_bytes(),
+        make(key).as_bytes(),
+    )
 }
 
 macro_rules! guard {
@@ -350,15 +460,33 @@ async fn ingest_otel(
     };
     for rec in records {
         let run = RunId::new(rec.session_id.clone());
+        // A report of who decided is filled with what its attribution needs
+        // before it is kept; the row it establishes, if any, is written after.
+        let (event, row) = match rec.event {
+            e @ crate::core::event::Event::VendorDecided { .. } => {
+                let facts = {
+                    let w = state.world.lock().await;
+                    let r = w.run(&run);
+                    crate::record::ReportedRun {
+                        cwd: r.map(|r| r.cwd.clone()).filter(|c| c.is_absolute()),
+                        project: r.and_then(|r| r.project_id.clone()),
+                        entrypoint: rec
+                            .entrypoint
+                            .clone()
+                            .or_else(|| r.and_then(|r| r.entrypoint.clone())),
+                        driven: r.is_some_and(|r| r.mode == RunMode::Driven),
+                    }
+                };
+                crate::record::vendor_report(&state.store, &run, &facts, e).await
+            }
+            e => (e, None),
+        };
         state
-            .ingest(
-                run.clone(),
-                Source::Otel,
-                rec.event,
-                None,
-                RunMode::Observed,
-            )
+            .ingest(run.clone(), Source::Otel, event, None, RunMode::Observed)
             .await;
+        if let Some(d) = row {
+            crate::record::append_vendor_row(&state.store, &d).await;
+        }
         if let Some(entry) = rec.entrypoint {
             let mut w = state.world.lock().await;
             w.set_entrypoint(&run, &entry, rec.repo_url.as_deref());
@@ -404,7 +532,17 @@ async fn inbox(
 ) -> impl IntoResponse {
     guard!(state, headers);
     let snap = state.snapshot().await;
-    Json(crate::view::inbox(&snap, &state.store, &state.policy, &q).await).into_response()
+    let held = state.hold.held();
+    let mut view = crate::view::inbox(
+        &snap,
+        &state.store,
+        &state.policy,
+        &q,
+        held.as_ref().map(|h| h.ask.as_str()),
+    )
+    .await;
+    view.hold(held, state.hold.landed());
+    Json(view).into_response()
 }
 
 /// One row of the cross-project issue or pull-request list. `needs_you` is
@@ -652,7 +790,7 @@ async fn github_logout(
     }
 }
 
-/// Says a sign-in changed outside this host — `devplane login github
+/// Says a sign-in changed outside this host — `devplane auth login
 /// --with-token` stores the token in its own process — so the copy this host
 /// holds is dropped and the forge is read at once.
 async fn github_refresh(
@@ -681,7 +819,16 @@ async fn snooze_project(
     Query(q): Query<SnoozeQuery>,
 ) -> impl IntoResponse {
     guard!(state, headers);
-    let until = snooze_until(q.minutes);
+    let how = match q.how() {
+        // A forge item has no session to report activity: only minutes.
+        Ok(crate::core::attention::SnoozeFor::Activity) => {
+            return bad_snooze(
+                "a pull request or an issue has no session; snooze it for minutes".into(),
+            );
+        }
+        Ok(h) => h,
+        Err(why) => return bad_snooze(why),
+    };
     let project = crate::core::ProjectId::new(id);
     let dismissed: Vec<crate::core::AttentionKind> = {
         let mut f = state.forge.lock().await;
@@ -704,11 +851,16 @@ async fn snooze_project(
         .map(|i| i.kind)
         .collect();
         let entry = f.snoozed.entry(project.clone()).or_default();
-        match until {
-            Some(t) => entry.hide(kinds.clone(), t),
-            None => entry.clear(),
+        match crate::core::attention::snooze(
+            entry,
+            kinds,
+            q.kind.as_deref(),
+            how.clone(),
+            Default::default(),
+        ) {
+            Ok(kinds) => kinds,
+            Err(refused) => return never_snoozed(refused),
         }
-        kinds
     };
     for kind in &dismissed {
         let id = format!("gh:{}:{}", project.as_str(), kind.as_str());
@@ -720,7 +872,8 @@ async fn snooze_project(
             .ok();
     }
     state.notify_changed();
-    Json(json!({"snoozed_until": until.map(|t| t.to_string()), "kinds": dismissed})).into_response()
+    Json(json!({"snoozed_until": SnoozeQuery::says_until(&how), "kinds": dismissed}))
+        .into_response()
 }
 
 async fn run_detail(
@@ -748,7 +901,7 @@ fn default_limit() -> i64 {
 
 /// What this machine's rules say about one call, without running it.
 /// Reached only by the MCP server (`src/mcp.rs`), which composes routes with
-/// `format!` — removing this is not a compile error. `devplane explain`
+/// `format!` — removing this is not a compile error. `devplane config explain`
 /// computes the same verdict in process.
 #[derive(serde::Deserialize)]
 struct ExplainQuery {
@@ -823,31 +976,6 @@ async fn explain(
     .into_response()
 }
 
-/// Files a shell call in this run named for writing — the class Claude Code's
-/// checkpointing does not cover. "Named for writing" rather than "changed":
-/// the gate saw the call before the tool ran.
-async fn run_rewind_gap(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    let id = run_id!(state, id);
-    // Every decision: a limit would silently answer about part of the run.
-    match state.store.decisions(Some(id.as_str()), i64::MAX).await {
-        Ok(rows) => Json(json!({
-            "run": id.to_string(),
-            "files": crate::core::decision::files_a_shell_call_named_for_writing(&rows),
-        }))
-        .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
-}
-
 /// What a driven agent said, oldest first. Empty for a watched session: its
 /// channels carry no prompt or response text, so `focus` is the way to it.
 async fn run_messages(
@@ -900,6 +1028,117 @@ async fn prompt_run(
     }
 }
 
+/// What the stop tool sends: the agent's reason and paths, plus what the host
+/// gave its server — the change it was started for and the session's key.
+/// There is no origin field: the run is the path, and the host resolves the
+/// rest from the run it drives.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClaimBody {
+    reason: String,
+    #[serde(default)]
+    paths: Vec<String>,
+    #[serde(default)]
+    change: Option<String>,
+    #[serde(default)]
+    key: String,
+}
+
+/// Records a stop claim, then stops the run once the answer is on its way.
+/// Every refusal is a sentence, and nothing is written for any of them.
+async fn claim_run(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ClaimBody>,
+) -> impl IntoResponse {
+    use crate::core::claim::ClaimRefusal as R;
+    guard!(state, headers);
+    // Never a prefix: a claim names its own run exactly.
+    let run = RunId::new(id);
+    let draft = crate::core::claim::ClaimDraft {
+        reason: body.reason,
+        paths: body.paths,
+    };
+    match crate::change::record_claim(&state, &run, draft, body.change, &body.key).await {
+        Ok(claim) => {
+            let stopper = state.clone();
+            let stopped = run.clone();
+            tokio::spawn(async move {
+                // After the answer has reached the agent, so it reads that it
+                // was recorded before its turn is cancelled.
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                crate::driven::stop_claimed(&stopper, &stopped).await;
+            });
+            Json(json!({
+                "recorded": true,
+                "claim": claim.id,
+                "change": claim.origin.change(),
+                "run": run,
+                "says": format!(
+                    "Recorded: {} — change {}, run {run}. Your person reads this before deciding \
+                     anything about the change; it is your claim, not a failure, and it does not \
+                     change whether the checks pass. Devplane is stopping this run now; do nothing \
+                     further. Your person answers by resuming it.",
+                    crate::core::claim::SAYS,
+                    claim.origin.change(),
+                ),
+            }))
+            .into_response()
+        }
+        Err(refusal) => {
+            let status = match &refusal {
+                R::NotDriven(_) => StatusCode::NOT_FOUND,
+                R::BadKey => StatusCode::FORBIDDEN,
+                R::EmptyReason | R::TooLarge { .. } | R::PathEscapes(_) | R::UnknownArgument(_) => {
+                    StatusCode::UNPROCESSABLE_ENTITY
+                }
+                R::NoRun
+                | R::NoHost
+                | R::NoChange
+                | R::WrongChange(_)
+                | R::Stopping
+                | R::AlreadyOpen { .. } => StatusCode::CONFLICT,
+            };
+            (
+                status,
+                Json(json!({"recorded": false, "refused": refusal.name(), "says": refusal.says()})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// A person marks a change's open stop claim read: it leaves what asks for
+/// attention and stays on the change. No decision row.
+async fn read_claim(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    let open = state.changes.lock().await.get(&id).and_then(|c| {
+        c.open_claim()
+            .map(|o| (o.id.clone(), o.origin.run().clone()))
+    });
+    match open {
+        Some((claim, run)) => {
+            crate::change::close_claims(&state, &id, crate::core::claim::ClosedBy::Read).await;
+            Json(json!({
+                "closed": claim,
+                "says": format!("marked read — it stays on the change under run {run}"),
+            }))
+            .into_response()
+        }
+        None => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "this change has no open claim", "says": "this change has no open claim"})),
+        )
+            .into_response(),
+    }
+}
+
 /// What a person chose, for either kind of ask. The route validates it
 /// against the row. Unknown fields are refused, so a body in which nobody
 /// said anything is a 422 rather than a decision.
@@ -920,13 +1159,19 @@ struct AnswerBody {
     /// Which question, when the agent asked several at once.
     #[serde(default)]
     field: Option<String>,
-    /// Which surface this came from.
-    #[serde(default)]
-    from: Option<String>,
+    /// Ignored: where an answer came from is what the host can prove
+    /// ([`path_of`]), never what a body claims.
+    #[serde(default, rename = "from")]
+    _from: Option<String>,
     /// Every question's answer at once, for a form that asked several; a row
     /// is answered only once.
     #[serde(default)]
     answers: Vec<crate::driven::FieldAnswer>,
+    /// The window's answers are held for a few seconds so a slip can be taken
+    /// back before it reaches the agent ([`crate::hold`]). Without it the
+    /// answer is sent at once, as the command line's always is.
+    #[serde(default)]
+    hold: bool,
 }
 
 async fn asks_index(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
@@ -973,19 +1218,38 @@ async fn answer_ask(
         }
     };
 
-    let from = body.from.unwrap_or_else(|| "api".to_string());
-    match crate::driven::answer_ask(&state, &id, answer, &from).await {
-        Ok(a) => {
-            acted_on(
-                &state,
-                a.run.as_str(),
-                &[
-                    crate::core::AttentionKind::Permission,
-                    crate::core::AttentionKind::Question,
-                ],
-                crate::core::attention::Resolution::Acted,
+    // Proved now, from this request, and kept with a held answer: the path
+    // recorded at commit is the one this request proved.
+    let from = path_of(&state, &headers, &id);
+    if body.hold {
+        // Refused now, not five seconds from now when nobody is looking.
+        if !ask.is_open() {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "that question is no longer waiting — it was answered or withdrawn"})),
             )
-            .await;
+                .into_response();
+        }
+        if let Err(e) = crate::driven::check_answer(&ask, &answer) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+        let (held, committed) = crate::hold::hold(&state, &ask, answer, from).await;
+        // The held item leaves the count: the tray reads it again.
+        state.notify_changed();
+        return (
+            StatusCode::ACCEPTED,
+            Json(json!({"held": held, "committed": committed})),
+        )
+            .into_response();
+    }
+
+    match crate::driven::answer_ask(&state, &id, answer, from).await {
+        Ok(a) => {
+            acted_on_ask(&state, a.run.as_str()).await;
             Json(crate::view::render_ask(&a)).into_response()
         }
         Err(e) => (
@@ -994,6 +1258,49 @@ async fn answer_ask(
         )
             .into_response(),
     }
+}
+
+/// Takes back the answer the window is holding for this ask, before it
+/// reaches the agent: nothing was recorded or delivered, and the ask is open
+/// again. An answer the window held is taken back only with the window's proof
+/// for this ask.
+async fn undo_answer(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let window = path_of(&state, &headers, &id) == crate::core::ask::AnswerPath::Window;
+    match state.hold.withdraw(&id, window) {
+        Ok(()) => {
+            // The item is back in the list and the count.
+            state.notify_changed();
+            Json(json!({
+            "withdrawn": id,
+            "says": "taken back — nothing reached the agent, and the question is waiting again",
+            }))
+            .into_response()
+        }
+        Err(refused) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": refused.says(), "says": refused.says()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Records that an answered ask's inbox item was acted on.
+pub(crate) async fn acted_on_ask(state: &Shared, run: &str) {
+    acted_on(
+        state,
+        run,
+        &[
+            crate::core::AttentionKind::Permission,
+            crate::core::AttentionKind::Question,
+        ],
+        crate::core::attention::Resolution::Acted,
+    )
+    .await;
 }
 
 /// What stopping a run leaves behind, as the sentence a surface shows before
@@ -1142,7 +1449,15 @@ fn preflight_json(findings: &[crate::core::preflight::Finding]) -> serde_json::V
             "refusal": f.refusal.map(|r| r.as_str()),
             "says": f.says,
             // What the first run in a fresh tree costs, as sentences.
-            "notes": f.notes.iter().map(crate::core::preflight::Note::says).collect::<Vec<_>>(),
+            "notes": f.notes.iter()
+                .filter(|n| !matches!(n, crate::core::preflight::Note::NoCheck { .. }))
+                .map(crate::core::preflight::Note::says)
+                .collect::<Vec<_>>(),
+            // No `check`, said apart from the costs: the window offers
+            // *Declare a check* beside it.
+            "no_check": f.notes.iter()
+                .find(|n| matches!(n, crate::core::preflight::Note::NoCheck { .. }))
+                .map(crate::core::preflight::Note::says),
         })).collect::<Vec<_>>(),
         "refused": findings.iter().filter(|f| !f.accepted()).count(),
     })
@@ -1231,7 +1546,6 @@ async fn start_change(
             worktree: body.worktree,
             spec,
             tasks: body.tasks.clone(),
-            from_report: None,
         };
         match crate::change::start(&state, req).await {
             Ok(id) => {
@@ -1269,6 +1583,8 @@ async fn change_detail(
 ) -> impl IntoResponse {
     guard!(state, headers);
     let id = change_id!(state, id);
+    // One change is read now, not from the last tick: it states *verified*.
+    crate::change::refresh_tree(&state, &id).await;
     let snap = state.snapshot().await;
     match crate::view::change_one(&snap, &state.store, &id).await {
         Some(v) => Json(v).into_response(),
@@ -1361,16 +1677,74 @@ async fn verify_change(
     State(state): State<Shared>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    body: Option<Json<serde_json::Value>>,
 ) -> impl IntoResponse {
     guard!(state, headers);
     let id = change_id!(state, id);
+    // `{"base_checks": true}`: after a passing `check`, the pair too, waited
+    // for. The reply's `passed` is still `check`'s alone.
+    let with_base = body
+        .as_ref()
+        .and_then(|b| b.get("base_checks"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
     match crate::change::verify(&state, &id).await {
-        Ok(report) => Json(json!({
-            "passed": report.passed(),
-            "summary": report.summary(),
-            "report": report,
-        }))
-        .into_response(),
+        Ok(report) => {
+            let mut reply = json!({
+                "passed": report.passed(),
+                "summary": report.summary(),
+                "report": report,
+            });
+            if with_base && report.passed() {
+                let absent = crate::base_checks::ensure(&state, &id).await;
+                reply["base_checks"] = base_checks_of(&state, &id).await;
+                if let Ok(Some(a)) = absent {
+                    reply["base_checks_refused"] = json!(a.says());
+                }
+            }
+            Json(reply).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// A change's base checks as its view composes them.
+async fn base_checks_of(state: &Shared, id: &crate::core::ChangeId) -> serde_json::Value {
+    let change = state.changes.lock().await.get(id).cloned();
+    let config = crate::change::governing_config(state, id)
+        .await
+        .ok()
+        .map(|(_, c)| c);
+    change
+        .and_then(|c| crate::base_checks::view(&c, config.as_ref()))
+        .map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null))
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// Starts base checks for a change's current tree: 202 when started or
+/// already running, 200 when a current result exists, 409 with the sentence
+/// when none may run.
+async fn base_checks_change(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    match crate::base_checks::start(&state, &id).await {
+        Ok(crate::base_checks::Started::Running(_)) => {
+            (StatusCode::ACCEPTED, Json(json!({"started": true}))).into_response()
+        }
+        Ok(crate::base_checks::Started::Current) => Json(json!({"current": true})).into_response(),
+        Ok(crate::base_checks::Started::Refused(a)) => (
+            StatusCode::CONFLICT,
+            Json(json!({"refused": a, "says": a.says()})),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": e.to_string()})),
@@ -1429,9 +1803,36 @@ async fn resume_change(
     State(state): State<Shared>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    body: Option<Json<ResumeBody>>,
 ) -> impl IntoResponse {
     guard!(state, headers);
     let id = change_id!(state, id);
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    // Another agent than the one that last drove it: a new run in the same
+    // worktree, told only the person's words. The same agent resumes below.
+    if let Some(agent) = body.agent.as_deref() {
+        let prompt = body.prompt.as_deref().unwrap_or_default();
+        match crate::change::resume_with_agent(&state, &id, agent, prompt).await {
+            Ok(Some(switched)) => {
+                acted_on(
+                    &state,
+                    id.as_str(),
+                    &[crate::core::AttentionKind::Interrupted],
+                    crate::core::attention::Resolution::Acted,
+                )
+                .await;
+                return Json(json!({"ok": true, "switched": switched})).into_response();
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let status = match e.to_string().contains("still running") {
+                    true => StatusCode::CONFLICT,
+                    false => StatusCode::BAD_REQUEST,
+                };
+                return (status, Json(json!({"error": e.to_string()}))).into_response();
+            }
+        }
+    }
     match crate::change::resume(&state, &id).await {
         Ok(()) => {
             acted_on(
@@ -1448,6 +1849,40 @@ async fn resume_change(
             Json(json!({"error": e.to_string()})),
         )
             .into_response(),
+    }
+}
+
+/// What a resume may name: another agent to continue with, and the person's
+/// words for it. Both absent resumes the change's own session.
+#[derive(Deserialize, Default)]
+struct ResumeBody {
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    prompt: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LoginBody {
+    method: String,
+    /// The person ran the agent's own terminal login; start it again.
+    #[serde(default)]
+    after_terminal: bool,
+}
+
+/// Starts a change's agent again with the sign-in method the person chose.
+/// Never carries a credential.
+async fn login_change(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<LoginBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    match crate::change::login(&state, &id, &body.method, body.after_terminal).await {
+        Ok(run) => Json(json!({"ok": true, "run": run})).into_response(),
+        Err(e) => (StatusCode::CONFLICT, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }
 
@@ -1532,13 +1967,13 @@ async fn change_review(
     }
 }
 
-/// Marks a weakened row seen: a person read it. `matched` narrows the mark to
-/// one row; without it every current row at `path` is marked.
+/// Marks a unit of a change's review seen: a person read it. `digest` names
+/// the hunk; without it every current unit at `path` is marked.
 #[derive(Deserialize)]
 struct SeenBody {
     path: String,
     #[serde(default)]
-    matched: Option<String>,
+    digest: Option<String>,
 }
 
 async fn mark_review_seen(
@@ -1550,29 +1985,117 @@ async fn mark_review_seen(
     guard!(state, headers);
     let id = change_id!(state, id);
     let snap = state.snapshot().await;
-    match crate::view::mark_seen(
-        &snap,
-        &state.store,
-        &id,
-        &body.path,
-        body.matched.as_deref(),
-    )
-    .await
+    match crate::view::mark_seen(&snap, &state.store, &id, &body.path, body.digest.as_deref())
+        .await
     {
-        Ok(seen) => Json(json!({ "seen": seen })).into_response(),
+        Ok(marked) => {
+            state.notify_changed();
+            Json(marked).into_response()
+        }
         Err(crate::view::SeenRefusal::NoSuchChange) => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": format!("no change `{id}`")})),
         )
             .into_response(),
-        Err(crate::view::SeenRefusal::NoSuchRow(rows)) => (
+        Err(crate::view::SeenRefusal::NoSuchUnit(digests)) => (
             StatusCode::CONFLICT,
             Json(json!({
-                "error": format!("`{}` has no weakened row to mark seen", body.path),
-                "rows": rows,
+                "error": match &body.digest {
+                    Some(_) => format!("`{}` has no hunk with that content now — it changed", body.path),
+                    None => format!("`{}` has nothing in this change to mark seen", body.path),
+                },
+                "digests": digests,
             })),
         )
             .into_response(),
+    }
+}
+
+/// A change's review comments, oldest first, with how many are unsent.
+async fn list_comments(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    match state.store.comments(id.as_str()).await {
+        Ok(all) => {
+            let unsent = all.iter().filter(|c| c.sent_at.is_none()).count();
+            Json(json!({ "comments": all, "unsent": unsent })).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{e:#}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// Keeps a comment on a line the diff shows; sends nothing.
+async fn create_comment(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<crate::comments::NewComment>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    match crate::comments::create(&state, &id, body).await {
+        Ok(c) => (StatusCode::CREATED, Json(json!({ "comment": c }))).into_response(),
+        Err(crate::comments::Refused::NoSuchChange) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("no change `{id}`")})),
+        )
+            .into_response(),
+        Err(crate::comments::Refused::NotThere(why)) => {
+            (StatusCode::CONFLICT, Json(json!({ "error": why }))).into_response()
+        }
+    }
+}
+
+/// Deletes an unsent comment; a sent one stays.
+async fn delete_comment(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path((id, cid)): Path<(String, String)>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    match crate::comments::delete(&state, &id, &cid).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": format!("{e:#}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// Sends every unsent comment as one prompt, to the change's live run, a
+/// resumed session or a run started on it — or says why nothing was sent.
+async fn send_comments(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    match crate::comments::send(&state, &id).await {
+        Ok(Some(sent)) => Json(sent).into_response(),
+        Ok(None) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "nothing to send", "says": "nothing to send"})),
+        )
+            .into_response(),
+        Err(e) => {
+            let says = format!("{e:#}");
+            (
+                StatusCode::CONFLICT,
+                Json(json!({"error": says, "says": says})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -1583,20 +2106,32 @@ async fn snooze_change(
     Query(q): Query<SnoozeQuery>,
 ) -> impl IntoResponse {
     guard!(state, headers);
-    let until = snooze_until(q.minutes);
+    let how = match q.how() {
+        Ok(h) => h,
+        Err(why) => return bad_snooze(why),
+    };
     let id = change_id!(state, id);
     // A drift is derived from the runs, so it is asked before the row is held.
     let drifting = crate::change::has_drift(&state, &id).await;
+    // The change's activity is its runs' too, so they are read first.
+    let last_events: std::collections::BTreeMap<crate::core::RunId, jiff::Timestamp> = {
+        let w = state.world.lock().await;
+        w.runs().map(|r| (r.id.clone(), r.last_event_at)).collect()
+    };
 
     let saved = {
         let mut changes = state.changes.lock().await;
         match changes.get_mut(&id) {
             Some(w) => {
+                let mark = crate::core::attention::ActivityMark::of_change(w, |r| {
+                    last_events.get(r).copied()
+                });
                 // The kinds on screen now, never what turns up later.
                 let mut kinds: Vec<_> = crate::core::attention::items_for_change(
                     w,
                     false,
                     false,
+                    &mark,
                     jiff::Timestamp::now(),
                 )
                 .into_iter()
@@ -1605,11 +2140,16 @@ async fn snooze_change(
                 if drifting {
                     kinds.push(crate::core::AttentionKind::SpecDrifted);
                 }
-                match until {
-                    Some(t) => w.snoozed.hide(kinds.clone(), t),
-                    None => w.snoozed.clear(),
+                match crate::core::attention::snooze(
+                    &mut w.snoozed,
+                    kinds,
+                    q.kind.as_deref(),
+                    how.clone(),
+                    mark,
+                ) {
+                    Ok(kinds) => Some((w.clone(), kinds)),
+                    Err(refused) => return never_snoozed(refused),
                 }
-                Some((w.clone(), kinds))
             }
             None => None,
         }
@@ -1634,7 +2174,8 @@ async fn snooze_change(
         tracing::warn!(error = %e, "could not persist a change snooze");
     }
     state.notify_changed();
-    Json(json!({"ok": true, "until": until.map(|t| t.to_string())})).into_response()
+    Json(json!({"ok": true, "until": SnoozeQuery::says_until(&how), "kinds": dismissed}))
+        .into_response()
 }
 
 /// Finishes a change: a person accepts it, and the basis is recorded. Nothing
@@ -1754,210 +2295,6 @@ async fn archive_change(
     }
 }
 
-/// Files a report. No provenance field is read: `run` is resolved against
-/// this host's record, and a person's report says `as_person`. An unknown run
-/// is a 400 naming it.
-async fn file_report(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Json(body): Json<crate::reports::FileRequest>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    match crate::reports::file_and_deliver(&state, body).await {
-        Ok(filed) => (StatusCode::CREATED, Json(filed_json(filed))).into_response(),
-        Err(refusal) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": refusal.says()})),
-        )
-            .into_response(),
-    }
-}
-
-/// What filing answers, on the host and with no host alike.
-pub fn filed_json(filed: crate::reports::Filed) -> serde_json::Value {
-    let routed = match &filed.report.target {
-        crate::core::report::Target::Project { .. } => "inbox",
-        crate::core::report::Target::GitHub { .. } => "drafted",
-        crate::core::report::Target::Source => "kept",
-    };
-    json!({
-        "report": crate::view::ReportView::of(filed.report, jiff::Timestamp::now()),
-        "routed": routed,
-        "says": filed.says,
-        "delivered": filed.delivered,
-    })
-}
-
-async fn list_reports(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Query(q): Query<crate::view::ReportQuery>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    let snap = state.snapshot().await;
-    match crate::view::reports(&snap, &state.store, &q).await {
-        Ok(v) => Json(v).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
-}
-
-async fn report_detail(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    let snap = state.snapshot().await;
-    match crate::view::report(&snap, &state.store, &id).await {
-        Ok(Some(v)) => Json(v).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": format!("no report `{id}`")})),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
-}
-
-#[derive(Deserialize, Default)]
-struct StartFromReportBody {
-    #[serde(default)]
-    agent: Option<String>,
-}
-
-/// Starts a change in the target from a report. The person's act, and the
-/// row it answers is recorded as acted on.
-async fn start_from_report(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    body: Option<Json<StartFromReportBody>>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    let agent = body.and_then(|Json(b)| b.agent);
-    match crate::reports::start(&state, &id, agent).await {
-        Ok(change) => {
-            report_acted_on(&state, &id).await;
-            Json(json!({"change_id": change})).into_response()
-        }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("{e:#}")})),
-        )
-            .into_response(),
-    }
-}
-
-#[derive(Deserialize)]
-struct ResolveBody {
-    #[serde(rename = "as")]
-    how: String,
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-/// Answers a report by hand: rejected, deferred, fixed or — a draft —
-/// discarded. The answer is recorded on the change that filed it.
-async fn resolve_report(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(body): Json<ResolveBody>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    let answer = match crate::reports::Answer::parse(&body.how, body.reason) {
-        Ok(a) => a,
-        Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": why}))).into_response(),
-    };
-    match crate::reports::resolve(&state, &id, answer).await {
-        Ok(r) => {
-            report_acted_on(&state, r.id.as_str()).await;
-            Json(crate::view::ReportView::of(r, jiff::Timestamp::now())).into_response()
-        }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("{e:#}")})),
-        )
-            .into_response(),
-    }
-}
-
-/// Opens a GitHub draft as the signed-in person. `409` unless it is a draft.
-async fn open_report(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    match state.store.report(&id).await {
-        Ok(Some(r)) if r.state == crate::core::report::State::Drafted => {}
-        Ok(Some(r)) => {
-            return (
-                StatusCode::CONFLICT,
-                Json(
-                    json!({"error": format!("report {} is {}, not a draft", r.id, r.state_says())}),
-                ),
-            )
-                .into_response();
-        }
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("no report `{id}`")})),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e.to_string()})),
-            )
-                .into_response();
-        }
-    }
-    match crate::reports::open(&state, &id).await {
-        Ok(r) => {
-            report_acted_on(&state, r.id.as_str()).await;
-            let url = match &r.state {
-                crate::core::report::State::Opened { url } => url.clone(),
-                _ => String::new(),
-            };
-            Json(json!({"url": url})).into_response()
-        }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({"error": format!("{e:#}")})),
-        )
-            .into_response(),
-    }
-}
-
-/// A report's row was answered with one of its own actions.
-async fn report_acted_on(state: &Shared, id: &str) {
-    let id = match state.store.report(id).await {
-        Ok(Some(r)) => r.id,
-        _ => return,
-    };
-    acted_on(
-        state,
-        id.as_str(),
-        &[
-            crate::core::AttentionKind::ReportFiled,
-            crate::core::AttentionKind::ReportWaiting,
-        ],
-        crate::core::attention::Resolution::Acted,
-    )
-    .await;
-}
-
 /// Offers a change: pushes and opens the pull request when the person's
 /// configuration allows it, else hands back the commands that would.
 async fn offer_change(
@@ -2010,6 +2347,8 @@ async fn change_certificate(
 ) -> impl IntoResponse {
     guard!(state, headers);
     let id = change_id!(state, id);
+    // Read now, not from the last tick: the certificate states *verified*.
+    crate::change::refresh_tree(&state, &id).await;
     let snap = state.snapshot().await;
     match crate::view::change_certificate(&snap, &state.store, &id).await {
         Some(v) => Json(v).into_response(),
@@ -2024,18 +2363,231 @@ async fn change_certificate(
 /// Marks a project as one an agent may be started in: an explicit act,
 /// because a headless agent runs the repository's own hooks and MCP servers.
 #[derive(Deserialize)]
+struct GrantBody {
+    /// The project's canonical root, as the offer named it.
+    root: String,
+    rule: String,
+}
+
+/// The person's grants, with what each decided and its reversals as counts.
+async fn list_grants(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    let (grants, error) = state.policy.grants();
+    let rows = crate::view::grant_rows(&state.store, &grants, jiff::Timestamp::now()).await;
+    let widening: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.widens && !r.lapsed)
+        .map(|r| r.rule.as_str())
+        .collect();
+    Json(json!({
+        "grants": rows,
+        "error": error,
+        "widening": widening,
+        "reversals_counted": crate::view::REVERSALS_COUNTED,
+    }))
+    .into_response()
+}
+
+/// The project a canonical root is, if the world knows it.
+async fn project_at(state: &Shared, root: &std::path::Path) -> Option<crate::core::ProjectId> {
+    let w = state.world.lock().await;
+    w.projects()
+        .find(|p| p.root.canonicalize().ok().as_deref() == Some(root) || p.root == root)
+        .map(|p| p.id.clone())
+}
+
+/// Writes a grant the window offered, on the person's confirm. The control
+/// token is not enough — an agent can read it — so the request must carry the
+/// window's proof for this root and this rule, and the ledger must offer this
+/// rule now: a grant is only ever written after the person's repeated answers.
+async fn add_grant(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<GrantBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let line = format!(
+        "[projects.{}]\nallow = [{}]",
+        crate::core::grant::toml_string(&body.root),
+        crate::core::grant::toml_string(&body.rule)
+    );
+    if !window_proved(&state, &headers, GRANT_PROOF, |key| {
+        crate::config::grant_proof(key, &body.root, &body.rule)
+    }) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": format!(
+                    "adding a grant is a person's decision, and this request cannot show it came \
+                     from the Devplane window. Add it to {} yourself:\n\n{line}",
+                    crate::core::grant::FILE
+                )
+            })),
+        )
+            .into_response();
+    }
+    let root = std::path::PathBuf::from(&body.root);
+    let project = project_at(&state, &root).await;
+    let Some(offer) = crate::view::grant_offered_now(
+        &state.store,
+        &state.policy,
+        &root,
+        project.as_ref(),
+        &body.rule,
+    )
+    .await
+    else {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!(
+                    "`{}` is not offered for {} now: a grant is written only after you answered \
+                     the same call the same way, from the window, as often as your {} says",
+                    body.rule,
+                    body.root,
+                    crate::core::grant::FILE
+                )
+            })),
+        )
+            .into_response();
+    };
+    let written = crate::grant_file::add(&state.home, &body.root, &body.rule);
+    state.policy.forget_grants();
+    if let Err(e) = written {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": format!("{e:#}") })),
+        )
+            .into_response();
+    }
+    let name = crate::core::grant::name_of(&body.rule, &root);
+    let d = crate::core::Decision::new(
+        crate::core::Authority::Person,
+        "policy:grant",
+        name.clone(),
+        "granted",
+    )
+    .because(format!(
+        "added to {} from the window, after {} answers",
+        crate::core::grant::FILE,
+        offer.allowed
+    ))
+    .in_project(project);
+    state.record(d).await;
+    state.notify_changed();
+    Json(json!({ "granted": name, "file": crate::core::grant::FILE })).into_response()
+}
+
+/// Revokes a grant from the window, and lists every decision it made.
+async fn revoke_grant(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<GrantBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    if !window_proved(&state, &headers, REVOKE_PROOF, |key| {
+        crate::config::revoke_proof(key, &body.root, &body.rule)
+    }) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": format!(
+                    "revoking a grant is a person's decision, and this request cannot show it came \
+                     from the Devplane window. In a terminal of your own:\n\n  devplane config \
+                     revoke '{}' --dir {}",
+                    body.rule, body.root
+                )
+            })),
+        )
+            .into_response();
+    }
+    let removed = crate::grant_file::remove(&state.home, &body.root, &body.rule);
+    state.policy.forget_grants();
+    match removed {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": format!(
+                        "{} grants no `{}` for {}",
+                        crate::core::grant::FILE, body.rule, body.root
+                    )
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": format!("{e:#}") })),
+            )
+                .into_response();
+        }
+    }
+    let root = std::path::PathBuf::from(&body.root);
+    let name = crate::core::grant::name_of(&body.rule, &root);
+    let decided = state
+        .store
+        .decisions_by_grant(&name)
+        .await
+        .unwrap_or_default();
+    let project = project_at(&state, &root).await;
+    let d = crate::core::Decision::new(
+        crate::core::Authority::Person,
+        "policy:revoke",
+        name.clone(),
+        "revoked",
+    )
+    .because(format!(
+        "removed from {} from the window; it had decided {} {}",
+        crate::core::grant::FILE,
+        decided.len(),
+        if decided.len() == 1 { "call" } else { "calls" }
+    ))
+    .in_project(project);
+    state.record(d).await;
+    state.notify_changed();
+    Json(json!({ "revoked": name, "decided": decided })).into_response()
+}
+
+#[derive(Deserialize)]
 struct TrustBody {
     /// The repository root, in the body because a filesystem path is not one
     /// URL segment.
     path: String,
 }
 
+/// Trusting from the window. The control token is not enough: it sits in a
+/// file an agent's tools can read, and trust lets a headless agent run the
+/// repository's own code. So the route also wants the window's proof for this
+/// path ([`crate::config::trust_proof`]); a host with no window refuses every
+/// request, and a person trusts with `devplane project trust` in a terminal of
+/// their own, which writes `trusted.toml` and has the host re-read it
+/// ([`reload_projects`]). This narrows the hole and does not close it: an
+/// agent that can drive the desktop can press the window's button.
 async fn trust_project(
     State(state): State<Shared>,
     headers: HeaderMap,
     Json(body): Json<TrustBody>,
 ) -> impl IntoResponse {
     guard!(state, headers);
+    if !window_proved(&state, &headers, TRUST_PROOF, |key| {
+        crate::config::trust_proof(key, &body.path)
+    }) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": format!(
+                    "trusting a repository is a person's decision, and this request cannot show \
+                     it came from the Devplane window. In a terminal of your own:\n\n  \
+                     devplane project trust {}",
+                    body.path
+                )
+            })),
+        )
+            .into_response();
+    }
     let Ok(root) = std::path::PathBuf::from(&body.path).canonicalize() else {
         return (
             StatusCode::BAD_REQUEST,
@@ -2054,8 +2606,14 @@ async fn trust_project(
     match project {
         Some(p) => {
             // Checked, and rolled back on failure, so `{"trusted": true}`
-            // stays true after a restart.
-            if let Err(e) = state.store.save_project(&p).await {
+            // stays true after a restart. The project row is history; the
+            // trust is the person's file.
+            let saved = match state.store.save_project(&p).await {
+                Ok(()) => crate::trust::add(&state.home, [p.root.clone()]).map(|_| ()),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = saved {
+                let e = format!("{e:#}");
                 tracing::error!(project = %p.id.as_str(), error = %e, "could not record trust");
                 state
                     .store
@@ -2093,6 +2651,41 @@ async fn trust_project(
         )
             .into_response(),
     }
+}
+
+/// Re-reads the projects the store records and the repositories
+/// `trusted.toml` names, so trust a person wrote with `devplane project
+/// trust` while this host runs takes effect at once rather than at the next
+/// start. Grants nothing the file does not already say, and takes nothing
+/// back: a project's trust only ever merges in.
+async fn reload_projects(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    let projects = match state.store.load_projects().await {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("could not read the projects: {e}")})),
+            )
+                .into_response();
+        }
+    };
+    let trusted = match crate::trust::Trusted::read(&state.home) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("could not read the trusted repositories: {e:#}")})),
+            )
+                .into_response();
+        }
+    };
+    let mut w = state.world.lock().await;
+    let mut ids = std::collections::BTreeSet::new();
+    for p in projects.into_iter().chain(trusted.projects()) {
+        ids.insert(w.upsert_project(p));
+    }
+    Json(json!({"projects": ids.len()})).into_response()
 }
 
 /// Issues a repository is offering as work.
@@ -2157,36 +2750,10 @@ async fn projects(State(state): State<Shared>, headers: HeaderMap) -> impl IntoR
     Json(crate::view::projects(&snap)).into_response()
 }
 
-#[derive(Deserialize)]
-struct AttentionQuery {
-    /// How far back to look. A week by default.
-    #[serde(default = "default_attention_days")]
-    days: i64,
-}
-fn default_attention_days() -> i64 {
-    7
-}
-
 async fn modes(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     guard!(state, headers);
     let snap = state.snapshot().await;
     Json(crate::view::modes(&snap)).into_response()
-}
-
-async fn attention(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Query(q): Query<AttentionQuery>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    match crate::view::attention(&state.store, q.days).await {
-        Ok(v) => Json(v).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
 }
 
 #[derive(Deserialize)]
@@ -2201,6 +2768,58 @@ struct SnoozeQuery {
     /// Minutes to stay quiet. Zero un-snoozes, which is the only way back.
     #[serde(default = "default_snooze")]
     minutes: i64,
+    /// `activity`: stay quiet until the subject next does something, rather
+    /// than for `minutes`.
+    #[serde(default)]
+    until: Option<String>,
+    /// One kind on the subject rather than every kind on screen.
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+impl SnoozeQuery {
+    /// What the request asks for, or why it cannot be read.
+    fn how(&self) -> Result<crate::core::attention::SnoozeFor, String> {
+        use crate::core::attention::SnoozeFor;
+        match self.until.as_deref() {
+            Some("activity") => Ok(SnoozeFor::Activity),
+            Some(other) => Err(format!("`until` takes `activity`, not `{other}`")),
+            None => Ok(match snooze_until(self.minutes) {
+                Some(t) => SnoozeFor::At(t),
+                None => SnoozeFor::Back,
+            }),
+        }
+    }
+
+    /// The `until` a response names: a moment, `activity`, or nothing.
+    fn says_until(how: &crate::core::attention::SnoozeFor) -> Option<String> {
+        use crate::core::attention::SnoozeFor;
+        match how {
+            SnoozeFor::At(t) => Some(t.to_string()),
+            SnoozeFor::Activity => Some("activity".to_string()),
+            SnoozeFor::Back => None,
+        }
+    }
+}
+
+/// A snooze request that cannot be read.
+fn bad_snooze(why: String) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"error": why, "says": why})),
+    )
+        .into_response()
+}
+
+/// A snooze refused because a question or a permission is among the kinds:
+/// those wait for an answer, and nothing was hidden.
+fn never_snoozed(n: crate::core::attention::NeverSnoozed) -> axum::response::Response {
+    let kinds: Vec<&str> = n.0.iter().map(|k| k.as_str()).collect();
+    (
+        StatusCode::CONFLICT,
+        Json(json!({"error": n.says(), "says": n.says(), "kinds": kinds})),
+    )
+        .into_response()
 }
 fn default_snooze() -> i64 {
     60
@@ -2216,13 +2835,13 @@ async fn snooze(
     Query(q): Query<SnoozeQuery>,
 ) -> impl IntoResponse {
     guard!(state, headers);
-    let until = snooze_until(q.minutes);
+    let how = match q.how() {
+        Ok(h) => h,
+        Err(why) => return bad_snooze(why),
+    };
 
     let run_id = run_id!(state, id);
     let now = jiff::Timestamp::now();
-    // Named before the snooze hides them: a dismissal is the clearest signal
-    // that a kind is too loud.
-    let mut dismissed: Vec<crate::core::AttentionKind> = Vec::new();
     let saved = {
         let mut w = state.world.lock().await;
         // The run's own project threshold, the one its inbox row was
@@ -2231,22 +2850,17 @@ async fn snooze(
             .run(&run_id)
             .and_then(|r| state.policy.stall_seconds(r.working_dir()))
             .unwrap_or(w.attention.stall_seconds);
-        if until.is_some()
-            && let Some(r) = w.run(&run_id)
-        {
-            let cfg = w.attention;
-            dismissed = crate::core::attention::run_items_at(r, &cfg, stall, now)
-                .items
-                .into_iter()
-                .map(|i| i.kind)
-                .collect();
-        }
-        if !w.snooze(&run_id, until, now, stall) {
-            None
-        } else {
-            w.run(&run_id).cloned()
+        match w.snooze(&run_id, q.kind.as_deref(), how.clone(), now, stall) {
+            None => None,
+            Some(Err(refused)) => return never_snoozed(refused),
+            Some(Ok(dismissed)) => w.run(&run_id).cloned().map(|r| (r, dismissed)),
         }
     };
+    let Some((run, dismissed)) = saved else {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "no such run"}))).into_response();
+    };
+    // Named once hidden: a dismissal is the clearest signal that a kind is
+    // too loud.
     acted_on(
         &state,
         run_id.as_str(),
@@ -2254,16 +2868,13 @@ async fn snooze(
         crate::core::attention::Resolution::Dismissed,
     )
     .await;
-
-    let Some(run) = saved else {
-        return (StatusCode::NOT_FOUND, Json(json!({"error": "no such run"}))).into_response();
-    };
     // Persisted, so a snooze survives a restart.
     if let Err(e) = state.store.save_run(&run).await {
         tracing::warn!(error = %e, "could not persist snooze");
     }
     state.notify_changed();
-    Json(json!({"snoozed_until": until.map(|t| t.to_string())})).into_response()
+    Json(json!({"snoozed_until": SnoozeQuery::says_until(&how), "kinds": dismissed}))
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -2319,23 +2930,56 @@ async fn decisions(
     }
 }
 
+#[derive(Deserialize)]
+struct UnattributedQuery {
+    #[serde(default)]
+    about: Option<String>,
+    #[serde(default = "default_limit")]
+    limit: i64,
+}
+
+/// The calls a vendor reported deciding that no authority can be named for,
+/// each with its reason: listed beside the decisions, never as one.
+async fn unattributed(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<UnattributedQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    match crate::view::unattributed(&state.store, q.about.as_deref(), q.limit).await {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 /// What quitting would end, and what it would leave running — read before
 /// the stop, never folded into it.
 async fn quitting(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     guard!(state, headers);
     let snap = state.snapshot().await;
-    let q = crate::core::reduce::facts::quitting(snap.world.runs(), &snap.open_asks);
+    let q = crate::core::reduce::facts::quitting(
+        snap.world.runs(),
+        &snap.open_asks,
+        state.hold.summary(),
+    );
     // The window prints `says` verbatim, so both readers share one sentence.
     let mut v = serde_json::to_value(&q).unwrap_or_else(|_| json!({}));
     v["says"] = json!(q.says());
     Json(v).into_response()
 }
 
-/// Asks the host to stop (`devplane quit`). A request rather than a signal
+/// Asks the host to stop (`devplane down`). A request rather than a signal
 /// to the recorded pid, which may since belong to another process; it reaches
 /// the same graceful path as ctrl-c on every platform.
 async fn quit(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     guard!(state, headers);
+    // Dropped before the reply: a held answer must not be sent in the moment
+    // between the request and the stop.
+    state.hold.drop_on_stop();
     // Answer first: the reply has to leave before the server stops serving.
     let st = state.clone();
     tokio::spawn(async move {
@@ -2352,131 +2996,128 @@ async fn setup(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResp
 }
 
 async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    use crate::view::{
+        AutoModeView, Diagnostics, DiagnosticsForge, DiagnosticsGate, DiagnosticsModes,
+        LeakedAgent, OpenCodeHealth, SkippedProject, UnreadableConfig, UnreadableRow, Unwritten,
+    };
     guard!(state, headers);
     let channels = state.store.channel_health().await.unwrap_or_default();
+    // Not configured is not unhealthy, and the two must not render the same.
     let opencode = match std::env::var(crate::observe::opencode::ENV_SERVER) {
-        Ok(url) => {
+        Ok(server) => {
             let h = state.opencode.lock().await.clone();
-            json!({"server": url, "says": h.says(), "live": matches!(
-                h, crate::observe::opencode::Health::Live { .. }
-            )})
+            Some(OpenCodeHealth {
+                server,
+                says: h.says(),
+                live: matches!(h, crate::observe::opencode::Health::Live { .. }),
+            })
         }
-        // Not configured is not unhealthy, and the two must not render the same.
-        Err(_) => serde_json::Value::Null,
+        Err(_) => None,
     };
     // A `devplane.toml` that will not load keeps cached rules, but a host
-    // restarted against it has none — so that repository's `never_auto` list
-    // is gone, and this says so.
-    let broken: Vec<_> = state
+    // restarted against it has none — so that repository's `deny` list is
+    // gone, and this says so.
+    let unreadable_configs = state
         .policy
         .broken()
         .into_iter()
-        .map(|(root, error)| json!({"project": root.display().to_string(), "error": error}))
+        .map(|(root, error)| UnreadableConfig {
+            project: root.display().to_string(),
+            error,
+        })
         .collect();
     // Rows this build cannot decode are absent from the board. A lost Change
     // row orphans a worktree, so they are counted here.
-    let unreadable_rows: Vec<_> = state
+    let unreadable_rows = state
         .store
         .unreadable()
         .await
         .unwrap_or_default()
         .into_iter()
-        .map(|(row, error)| json!({"row": row, "error": error}))
+        .map(|(row, error)| UnreadableRow { row, error })
         .collect();
     // Before the lock: it shells out.
-    let auto_mode = crate::observe::automode::effective().await;
+    let auto_mode = match crate::observe::automode::effective().await {
+        Ok(cfg) => AutoModeView::Read {
+            configured: !cfg.is_empty(),
+            environment: cfg.environment.len(),
+            allow: cfg.allow.len(),
+            soft_deny: cfg.soft_deny.len(),
+            hard_deny: cfg.hard_deny.len(),
+        },
+        Err(unavailable) => AutoModeView::Unavailable { unavailable },
+    };
+    // Whether the inbox is worth reading: what each kind raised in the last
+    // week and what became of it. Measures the tool, not the person.
+    let attention = crate::view::attention(&state.store, 7).await.ok();
     let forge = {
         let f = state.forge.lock().await;
-        json!({
-            "viewer": f.viewer,
-            "error": f.error,
-            // Per GitHub host: signed in as whom, and when GitHub last
-            // answered. Never the token.
-            "github": state.github.views(),
-            "last_poll_at": f.last_poll_at.map(|t| t.to_string()),
-            "projects": f.projects.len(),
-            "skipped": f.skip.len(),
-            // Which ones, and why: the reason (usually "no GitHub remote")
-            // is what a person can act on.
-            "skipped_projects": f
+        DiagnosticsForge {
+            viewer: f.viewer.clone(),
+            error: f.error.clone(),
+            github: state.github.views(),
+            last_poll_at: f.last_poll_at.map(|t| t.to_string()),
+            projects: f.projects.len(),
+            skipped: f.skip.len(),
+            // The reason (usually "no GitHub remote") is what a person can act on.
+            skipped_projects: f
                 .skip
                 .iter()
-                .map(|(id, (why, at))| json!({
-                    "project": id.to_string(),
-                    "reason": why,
-                    "at": at.to_string(),
-                }))
-                .collect::<Vec<_>>(),
-        })
+                .map(|(id, (why, at))| SkippedProject {
+                    project: id.to_string(),
+                    reason: why.to_string(),
+                    at: at.to_string(),
+                })
+                .collect(),
+        }
     };
-    let w = state.world.lock().await;
-    // How many live sessions report their version; "nothing reports a
-    // version" is a real diagnostic.
-    let reporting = w
-        .runs()
-        .filter(|r| r.state.is_live() && r.claude_version.is_some())
-        .count();
-    let (lost_events, lost_decisions, last_loss) = state.unwritten.counts();
-    // Agents a previous host abandoned, read once at startup.
-    let leaked: Vec<_> = state
+    let leaked_agents = state
         .leaked_agents
         .lock()
         .await
         .iter()
-        .map(|(pid, command, worktree)| {
-            json!({
-                "pid": pid,
-                "command": command,
-                "worktree": worktree,
-            })
+        .map(|(pid, command, worktree)| LeakedAgent {
+            pid: *pid,
+            command: command.clone(),
+            worktree: worktree.clone(),
         })
         .collect();
-    Json(json!({
-        "version": env!("CARGO_PKG_VERSION"),
-        "gate": {
-            "syntax_modelled_on": crate::core::policy::SYNTAX_MODELLED_ON,
-            "sessions_reporting_a_version": reporting,
+    let (lost_events, lost_decisions, last_loss) = state.unwritten.counts();
+    let decision_sources = crate::view::decision_sources(&state.store).await.ok();
+    let w = state.world.lock().await;
+    let live = || w.runs().filter(|r| r.state.is_live());
+    Json(Diagnostics {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        decision_sources,
+        gate: DiagnosticsGate {
+            syntax_modelled_on: crate::core::policy::SYNTAX_MODELLED_ON.to_string(),
+            // "Nothing reports a version" is a real diagnostic.
+            sessions_reporting_a_version: live().filter(|r| r.claude_version.is_some()).count(),
         },
-        // Live sessions whose environment Devplane could read — only the
-        // `SessionStart` hook can, so this is the question-clock coverage.
-        "modes": {
-            "clock_read": w.runs().filter(|r| r.state.is_live() && r.question_clock_read.is_some()).count(),
-            "clock_unread": w.runs().filter(|r| r.state.is_live() && r.question_clock_read.is_none()).count(),
+        modes: DiagnosticsModes {
+            clock_read: live().filter(|r| r.question_clock_read.is_some()).count(),
+            clock_unread: live().filter(|r| r.question_clock_read.is_none()).count(),
         },
-        "leaked_agents": leaked,
-        "pid": std::process::id(),
-        "started_at": state.started_at.to_string(),
-        "uptime_seconds": (jiff::Timestamp::now() - state.started_at).get_seconds(),
-        "summary": w.summary(jiff::Timestamp::now()),
-        "channels": channels,
-        // The OpenCode subscription. The feed does not replay, so a dead
-        // subscription looks like a quiet machine. Absent where not asked for.
-        "opencode": opencode,
-        "forge": forge,
-        "stall_seconds": w.attention.stall_seconds,
-        "unreadable_configs": broken,
-        "unreadable_rows": unreadable_rows,
-        // How much of the store never arrived. A failed write is logged and
-        // dropped (losing history beats stalling a blocked hook); this is
-        // where that loss becomes visible.
-        "unwritten": {
-            "events": lost_events,
-            "decisions": lost_decisions,
-            "last_reason": last_loss,
+        leaked_agents,
+        attention,
+        pid: std::process::id(),
+        started_at: state.started_at.to_string(),
+        uptime_seconds: (jiff::Timestamp::now() - state.started_at).get_seconds(),
+        summary: w.summary(jiff::Timestamp::now()),
+        channels,
+        opencode,
+        forge,
+        stall_seconds: w.attention.stall_seconds,
+        unreadable_configs,
+        unreadable_rows,
+        unwritten: Unwritten {
+            events: lost_events,
+            decisions: lost_decisions,
+            last_reason: last_loss,
         },
-        // The other gate: in auto mode a classifier configured elsewhere
-        // decides. Read back, never written.
-        "auto_mode": match auto_mode {
-            Ok(cfg) => json!({
-                "configured": !cfg.is_empty(),
-                "environment": cfg.environment.len(),
-                "allow": cfg.allow.len(),
-                "soft_deny": cfg.soft_deny.len(),
-                "hard_deny": cfg.hard_deny.len(),
-            }),
-            Err(why) => json!({"unavailable": why}),
-        },
-    }))
+        auto_mode,
+        notifications: state.notifications.get().map(|line| line()),
+    })
     .into_response()
 }
 
@@ -2562,5 +3203,266 @@ mod snooze_tests {
         assert!(super::snooze_until(i64::MAX).is_some());
         assert!(super::snooze_until(0).is_none());
         assert!(super::snooze_until(-5).is_none());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Drafting a specification by the project's own methodology
+// ---------------------------------------------------------------------------
+
+/// A draft request: the change's name, the agent, the methodology where the
+/// project has two, and the person's words, sent verbatim.
+#[derive(Deserialize)]
+struct DraftBody {
+    /// A registered project's id or name, or its root.
+    project: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    methodology: Option<String>,
+    #[serde(default)]
+    intent: String,
+    /// Draft again into this change, whose last draft was rejected.
+    #[serde(default)]
+    change: Option<String>,
+    /// Say what would be sent, and create nothing.
+    #[serde(default)]
+    preview: bool,
+}
+
+/// A refusal as every draft route says it: the cause, its sentence, and the
+/// sentence again under `error`, which every client reads.
+fn draft_refused(status: StatusCode, r: &crate::draft::Refused) -> axum::response::Response {
+    (
+        status,
+        Json(json!({"refused": r.cause, "says": r.says, "error": r.says})),
+    )
+        .into_response()
+}
+
+/// The root a request names: a registered project's id, name or root, else
+/// the path as given.
+async fn project_root_of(state: &Shared, named: &str) -> std::path::PathBuf {
+    let w = state.world.lock().await;
+    let path = std::path::Path::new(named);
+    let canonical = path.canonicalize().ok();
+    w.projects()
+        .find(|p| {
+            p.id.as_str() == named
+                || p.name == named
+                || canonical.as_deref() == Some(p.root.as_path())
+        })
+        .map(|p| p.root.clone())
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+/// Starts a draft, or with `preview` says what it would send. Every refusal
+/// comes before anything is made.
+async fn draft_change(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<DraftBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let methodology = match body.methodology.as_deref().filter(|m| !m.trim().is_empty()) {
+        None => None,
+        Some(m) => match crate::core::draft::Methodology::parse(m) {
+            Some(m) => Some(m),
+            None => {
+                return draft_refused(
+                    StatusCode::CONFLICT,
+                    &crate::draft::Refused {
+                        cause: "methodology",
+                        says: format!(
+                            "`{m}` is not a methodology drafting dispatches: speckit or openspec"
+                        ),
+                    },
+                );
+            }
+        },
+    };
+    let change = match body.change.as_deref() {
+        Some(c) => Some(change_id!(state, c.to_string())),
+        None => None,
+    };
+    let req = crate::draft::DraftRequest {
+        project: project_root_of(&state, &body.project).await,
+        name: body.name,
+        agent: body.agent,
+        methodology,
+        intent: body.intent,
+        change,
+    };
+    let status_of = |r: &crate::draft::Refused| match r.cause {
+        "empty_intent" | "no_name" => StatusCode::BAD_REQUEST,
+        _ => StatusCode::CONFLICT,
+    };
+    if body.preview {
+        return match crate::draft::preview(&req) {
+            Ok(p) => Json(json!(p)).into_response(),
+            Err(r) => {
+                // The methodologies on offer, so a surface can ask for one.
+                let offered = req
+                    .project
+                    .canonicalize()
+                    .map(|root| crate::draft::offered(&root))
+                    .unwrap_or_default();
+                let mut out = json!({"refused": r.cause, "says": r.says, "error": r.says});
+                out["offered"] = json!(offered);
+                (status_of(&r), Json(out)).into_response()
+            }
+        };
+    }
+    match crate::draft::start(&state, req).await {
+        Ok(started) => {
+            let c = state.changes.lock().await.get(&started.change).cloned();
+            Json(json!({
+                "change": started.change,
+                "change_id": started.change,
+                "run": started.run,
+                "sent": started.sent,
+                "folder": started.folder,
+                "says": started.says,
+                "worktree": c.as_ref().and_then(|c| c.worktree.clone()),
+                "branch": c.as_ref().and_then(|c| c.branch.clone()),
+            }))
+            .into_response()
+        }
+        Err(r) => draft_refused(status_of(&r), &r),
+    }
+}
+
+/// The person accepts the drafted folder as the change's specification.
+async fn accept_draft(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    match crate::draft::accept(&state, &id).await {
+        Ok(spec) => Json(json!({
+            "spec": spec,
+            "says": format!("accepted — {spec} is the specification this change answers; recorded as yours"),
+        }))
+        .into_response(),
+        Err(r) => draft_refused(StatusCode::CONFLICT, &r),
+    }
+}
+
+/// The person rejects the draft: the worktree is put back.
+async fn reject_draft(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    match crate::draft::reject(&state, &id).await {
+        Ok(removed) => Json(json!({
+            "removed": removed,
+            "says": "rejected — the worktree is back where it was at dispatch; the record is kept",
+        }))
+        .into_response(),
+        Err(r) => draft_refused(StatusCode::CONFLICT, &r),
+    }
+}
+
+/// One marker line answered: the diff, and the write only on `confirm`.
+#[derive(Deserialize)]
+struct ClarifyBody {
+    path: String,
+    line: u32,
+    text: String,
+    answer: String,
+    #[serde(default)]
+    confirm: bool,
+}
+
+async fn clarify_change(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ClarifyBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    match crate::draft::clarify(
+        &state,
+        &id,
+        &body.path,
+        body.line,
+        &body.text,
+        &body.answer,
+        body.confirm,
+    )
+    .await
+    {
+        Ok(a) => Json(json!({
+            "diff": a.diff,
+            "written": a.written,
+            "says": match a.written {
+                true => "written — your words replaced the marker, and the answer is recorded as yours",
+                false => "this is the whole edit; nothing is written until you confirm",
+            },
+        }))
+        .into_response(),
+        Err((status, r)) => draft_refused(
+            StatusCode::from_u16(status).unwrap_or(StatusCode::CONFLICT),
+            &r,
+        ),
+    }
+}
+
+/// Accepting the offered `[spec] open_questions`: written exactly as offered.
+#[derive(Deserialize)]
+struct OpenQuestionsBody {
+    #[serde(default)]
+    accept: bool,
+    /// The fingerprint of `devplane.toml` the offer was computed from.
+    #[serde(default)]
+    base: String,
+}
+
+async fn accept_open_questions(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<OpenQuestionsBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    if !body.accept {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "nothing is written unless `accept` is true"})),
+        )
+            .into_response();
+    }
+    let root = {
+        let w = state.world.lock().await;
+        w.projects()
+            .find(|p| p.id.as_str() == id)
+            .map(|p| p.root.clone())
+    };
+    let Some(root) = root else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no such project"})),
+        )
+            .into_response();
+    };
+    match crate::draft::accept_open_questions(&state, &root, &body.base).await {
+        Ok(diff) => Json(json!({
+            "written": true,
+            "diff": diff,
+            "says": "written — devplane.toml now declares Spec Kit's marker; recorded as yours",
+        }))
+        .into_response(),
+        Err((status, r)) => draft_refused(
+            StatusCode::from_u16(status).unwrap_or(StatusCode::CONFLICT),
+            &r,
+        ),
     }
 }

@@ -2,11 +2,14 @@
   // What was decided about this change, and on whose authority (person, rule,
   // timer, nobody, devplane). The default hides nothing; each chip narrows by
   // authority and shows what it would leave.
+  import Inline from "../../lib/ui/Inline.svelte";
   import { resource } from "../../lib/resource.svelte";
   import Failed from "../../lib/Failed.svelte";
   import Grid, { type Column } from "../../lib/ui/Grid.svelte";
   import Pill from "../../lib/ui/Pill.svelte";
+  import Skeleton from "../../lib/Skeleton.svelte";
   import { ago } from "./types";
+  import Edits, { type Edit } from "../why/Edits.svelte";
 
   type Decision = {
     id: string;
@@ -16,6 +19,9 @@
     subject: string;
     outcome: string;
     reason?: string | null;
+    /// A driven call's reported edits; absent for anything else.
+    edits?: Edit[];
+    no_edit?: string | null;
   };
   let { id }: { id: string } = $props();
 
@@ -42,14 +48,21 @@
     { key: "reason", label: "Why" },
   ];
   const pick = $derived(shown.find((r) => r.id === selected) ?? null);
+  /// Authorities with nothing recorded fold behind one counted chip.
+  let allChips = $state(false);
+  const zero = $derived(counts.filter(([, n]) => n === 0));
+  const chips = $derived(allChips || !rows ? counts : counts.filter(([a, n]) => n > 0 || only === a));
 </script>
 
 <div class="ledger">
   <div class="chips" role="group" aria-label="by authority">
     <button class:on={only === null} onclick={() => (only = null)}>everything <span>{rows ? rows.length : ""}</span></button>
-    {#each counts as [a, n] (a)}
+    {#each chips as [a, n] (a)}
       <button class:on={only === a} disabled={n === 0} onclick={() => (only = only === a ? null : a)}>{a} <span>{rows ? n : ""}</span></button>
     {/each}
+    {#if rows && !allChips && zero.length > 0}
+      <button title="authorities with nothing recorded: {zero.map(([a]) => a).join(', ')}" onclick={() => (allChips = true)}>+{zero.length}</button>
+    {/if}
   </div>
   {#if rows && rows.length >= LIMIT}
     <p class="quiet">The newest {LIMIT} are shown; <code>devplane audit {key}</code> has every one.</p>
@@ -67,14 +80,15 @@
           {:else if c.key === "subject"}{r.subject}
           {:else}<span class="why">{r.reason ?? ""}</span>{/if}
         {/snippet}
-        {#snippet empty()}<p class="quiet">{rows === null ? "Reading…" : only ? `Nothing about this change was decided by ${only}.` : "Nothing has been decided about this change."}</p>{/snippet}
+        {#snippet empty()}{#if rows === null}<Skeleton />{:else}<p class="quiet">{only ? `Nothing about this change was decided by ${only}.` : "Nothing has been decided about this change."}</p>{/if}{/snippet}
       </Grid>
     </div>
     {#if pick}
       <aside class="detail">
         <b>{pick.action}</b> · {pick.outcome} · by {pick.authority} · {new Date(pick.at).toLocaleString()}
         <pre>{pick.subject}</pre>
-        {#if pick.reason}<p>{pick.reason}</p>{/if}
+        {#if pick.reason}<p><Inline text={pick.reason} /></p>{/if}
+        <Edits edits={pick.edits} none={pick.no_edit} />
       </aside>
     {/if}
   {/if}

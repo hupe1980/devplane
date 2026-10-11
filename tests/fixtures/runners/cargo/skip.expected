@@ -1,0 +1,8 @@
+runner cargo_test
+ran 6
+lines 4
+passed 6
+failed 0
+ignored 1
+measured 0
+filtered out 2

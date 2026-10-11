@@ -1,0 +1,6 @@
+runner gotestsum
+ran 6
+lines 1
+tests 7
+skipped 1
+failures 1

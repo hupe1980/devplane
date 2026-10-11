@@ -10,23 +10,23 @@ default:
 
 # The board in a browser. Starts the host if one is not already running.
 open: build
-    ./target/debug/devplane open
+    ./target/debug/devplane up
 
 # The host serving ui/dist from disk: rebuild the bundle, reload. No cargo rebuild.
 ui: build
     cd ui && npm run build
-    DEVPLANE_UI=$PWD/ui/dist ./target/debug/devplane serve
+    DEVPLANE_UI=$PWD/ui/dist ./target/debug/devplane up --no-browser
 
 # The host in the foreground.
 serve: build
-    ./target/debug/devplane serve
+    ./target/debug/devplane up --no-browser
 
 # Linux needs libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev.
 # The desktop window: the host plus a tray item, notifications and a shortcut.
 app:
-    cargo run --features app -- app
+    cargo run --features app -- up --window
 
-# Any subcommand: `just vp explain 'rm -rf /'`
+# Any subcommand: `just vp config explain 'rm -rf /'`
 vp *ARGS: build
     ./target/debug/devplane {{ARGS}}
 
@@ -34,7 +34,7 @@ vp *ARGS: build
 
 # `just --list` shows only the last comment line before a recipe.
 # Everything CI runs, cheapest failure first — for this host.
-check: fmt-check clippy build test
+check: fmt-check clippy build test wire-check
 
 build:
     cargo build --all-targets --locked
@@ -54,7 +54,7 @@ test: build
 
 # ── The checks that keep the claims honest ───────────────────────────────────
 
-# Recompute the dependency figures the notes assert.
+# How many package versions the default and app builds compile. A report, never a gate.
 deps:
     bash scripts/deps-count.sh
 
@@ -70,19 +70,29 @@ reference:
 concepts:
     bash scripts/concepts-check.sh
 
+# The built-in adapter pins against the live ACP registry: current or behind.
+# Needs the network, so it is not in `verify`. `just pins --write` refreshes
+# tests/fixtures/acp/registry.json. Exit 1 when a pin is behind, 2 when unreachable.
+pins *ARGS:
+    bash scripts/pins-check.sh {{ARGS}}
+
 # Vendor changelog rows touching hooks and permission modes. Needs `just reference`.
 # A report, not a check: exits 0 whatever it prints.
 channels:
     bash scripts/changelog-rows.sh --channels
 
-# concepts, claims, and the tests that read the notes — or `skipped: notes absent`.
+# concepts and claims — or `skipped: notes absent`.
 notes:
     @if [ -d concepts ]; then bash scripts/concepts-check.sh; else echo "skipped: notes absent (concepts/ is gitignored and not in this checkout)"; fi
     @if [ -d concepts/reference ]; then bash scripts/verify-claims.sh; else echo "skipped: notes absent (concepts/reference/ is gitignored; \`just reference\` fetches it)"; fi
-    cargo test --locked --test documentation -- --ignored
 
 # Everything that runs on a clean clone: check, the dependency count, the site build and link check.
 verify: check deps site-build site-check
+
+# Needs a browser (`npx playwright-core install chromium`), so it is not in `verify`.
+# The UX bars, each against its own budget: `just bars`, or `just bars --bar 3`.
+bars *ARGS: build
+    cd ui && npm run bars -- {{ARGS}}
 
 # ── The two pictures ─────────────────────────────────────────────────────────
 
@@ -121,10 +131,19 @@ clean:
     cargo clean
     rm -r site/public 2>/dev/null || true
 
-# tests/ui_bundle.rs fails when the checked-in TypeScript differs from this output.
 # Regenerate the interface's wire types from the Rust shapes.
 wire:
     TS_RS_EXPORT_DIR=ui/src cargo test --features typescript --quiet export_bindings
+
+# The checked-in wire types equal what Rust generates: none missing, none drifted,
+# none stale. CI runs the same diff; `just wire` fixes a failure. Kept out of
+# `cargo test` because it compiles the crate a second time.
+wire-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    TS_RS_EXPORT_DIR="$tmp" cargo test --locked --features typescript --quiet export_bindings >/dev/null
+    diff -r ui/src/wire "$tmp/wire" || { echo "wire types drifted from the Rust shapes; run: just wire" >&2; exit 1; }
 
 # Build the interface (needs node).
 ui-build:

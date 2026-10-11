@@ -1,0 +1,19 @@
+=== RUN   TestOne
+--- PASS: TestOne (0.00s)
+=== RUN   TestSub
+=== RUN   TestSub/x
+=== RUN   TestSub/y
+--- PASS: TestSub (0.00s)
+    --- PASS: TestSub/x (0.00s)
+    --- PASS: TestSub/y (0.00s)
+=== RUN   TestSkip
+    a_test.go:5: later
+--- SKIP: TestSkip (0.00s)
+=== RUN   TestFails
+--- PASS: TestFails (0.00s)
+PASS
+ok  	example.com/gop/a	0.519s
+=== RUN   TestB
+--- PASS: TestB (0.00s)
+PASS
+ok  	example.com/gop/b	0.272s

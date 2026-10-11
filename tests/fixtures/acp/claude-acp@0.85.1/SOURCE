@@ -1,0 +1,12 @@
+Recorded 2026-10-02 by scripts/record-acp.sh claude, on Darwin 25.6.0.
+Adapter: npx -y @agentclientprotocol/claude-agent-acp@0.85.1 (the registry's version 0.85.1 for claude-acp).
+Ask-first start: nothing set (the adapter starts in its ask-first mode on its own).
+Prompt: Run the shell command `touch devplane-replay-marker` and then stop.
+Client capabilities declared: {"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false,"elicitation":{"form":{}}}
+Every permission the adapter asked was answered with its reject option.
+Rewrites: the scratch directory and the home directory became /work; every
+session id became s-1; sign-in method details and token-shaped values were
+dropped. Nothing else was changed.
+Later-input update observed: yes
+unconfigured.jsonl is a second session opened with nothing configured and no
+prompt, to observe where the adapter starts on its own.

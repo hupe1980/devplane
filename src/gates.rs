@@ -14,20 +14,109 @@ use tokio::io::AsyncReadExt;
 /// How much of a command's output is kept; a failing suite's summary is at the end.
 const OUTPUT_TAIL_BYTES: usize = 8 * 1024;
 
+/// What a gate runs with, beyond its commands: one argument, so what a
+/// gate is given is read in one place.
+#[derive(Debug, Clone, Default)]
+pub struct GateInput {
+    /// Set on each command over the host's environment (a shared cache
+    /// variable from `core::caches`); empty in a person's own checkout.
+    pub env: Vec<(String, PathBuf)>,
+    /// JUnit files the commands write, relative to `dir`; read after the last
+    /// command when this run wrote them. Empty for every gate but `check`.
+    pub junit: Vec<String>,
+}
+
+impl GateInput {
+    /// Only the environment.
+    pub fn env(env: Vec<(String, PathBuf)>) -> Self {
+        GateInput {
+            env,
+            ..GateInput::default()
+        }
+    }
+}
+
+/// Held while a gate runs in a project that declares `[gates] serial = true`:
+/// an exclusive lock on a file named for the repository, so every gate of that
+/// repository — in any worktree, and from any Devplane process on this
+/// machine — waits for the one before it. Released on drop, and by the
+/// operating system if the process dies.
+#[derive(Debug)]
+pub struct Exclusive(#[allow(dead_code)] std::fs::File);
+
+/// Waits until no other gate of `dir`'s repository runs, when `serial` says
+/// gates there share something (a database, a port) and must not overlap.
+/// `None` when they may run at once, or when no lock could be taken — which
+/// is logged, and the gate runs rather than never running.
+///
+/// The lock lives in the system's temporary directory, named for the
+/// repository's shared git directory (or `dir` itself outside one): nothing is
+/// written into the repository or into Devplane's home. Never nest two: a
+/// second lock in the same process waits on the first.
+pub async fn exclusive(dir: &Path, serial: bool) -> Option<Exclusive> {
+    if !serial {
+        return None;
+    }
+    let key = match crate::git::common_dir(dir).await {
+        Some(c) => c,
+        None => dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()),
+    };
+    let at = std::env::temp_dir().join(format!(
+        "devplane-gates-{}.lock",
+        crate::core::hash::hex(key.to_string_lossy().as_bytes())
+    ));
+    let taken = tokio::task::spawn_blocking(move || -> std::io::Result<std::fs::File> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&at)?;
+        file.lock()?;
+        Ok(file)
+    })
+    .await;
+    match taken {
+        Ok(Ok(f)) => Some(Exclusive(f)),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "could not serialise this gate; it runs anyway");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not serialise this gate; it runs anyway");
+            None
+        }
+    }
+}
+
+/// [`run`], in turn with the repository's other gates when `serial` says so
+/// ([`exclusive`]). The wait is not counted against the gate's timeout: a
+/// gate's time is the time its commands ran.
+pub async fn run_in_turn(
+    serial: bool,
+    gate: &str,
+    commands: &[String],
+    dir: &Path,
+    timeout: Duration,
+    attempt: u32,
+    input: &GateInput,
+) -> GateReport {
+    let _turn = exclusive(dir, serial).await;
+    run(gate, commands, dir, timeout, attempt, input).await
+}
+
 /// Runs a gate's commands in order, stopping at the first failure (a later
 /// command would usually fail for the same reason and bury the cause).
-///
-/// `env` (e.g. a shared cache variable from `core::caches`) is set on each
-/// command over the host's environment; empty in a person's own checkout.
 pub async fn run(
     gate: &str,
     commands: &[String],
     dir: &Path,
     timeout: Duration,
     attempt: u32,
-    env: &[(String, PathBuf)],
+    input: &GateInput,
 ) -> GateReport {
+    let env = input.env.as_slice();
     let started = Instant::now();
+    let started_at = std::time::SystemTime::now();
     let deadline = Instant::now() + timeout;
     let mut results = Vec::new();
     // Stamped before and after: a pass describes the tree only if it did not
@@ -40,6 +129,7 @@ pub async fn run(
         // it and report a timeout for a command that never ran.
         if remaining.is_zero() {
             results.push(CommandResult {
+                tests: Default::default(),
                 command: command.clone(),
                 outcome: Outcome::NeverStarted {
                     reason: format!(
@@ -64,7 +154,13 @@ pub async fn run(
     }
 
     let after = commit_stamp(dir).await;
+    let mut junit = Vec::new();
+    for path in &input.junit {
+        junit.push(read_junit(dir, path, started_at).await);
+    }
     GateReport {
+        junit,
+        base_commit: None,
         // Stamped by the caller, which knows the change and its project root.
         spec: None,
         commit: settled(before, after),
@@ -78,24 +174,42 @@ pub async fn run(
 
 /// The stamp a report keeps: the post-run one, with its digest only if the
 /// pre-run digest matches. A command that writes into the tree (a formatter,
-/// a generated file) or a concurrent edit leaves no digest, and a report
-/// without one can never make a change verified.
-fn settled(before: Option<CommitStamp>, after: Option<CommitStamp>) -> Option<CommitStamp> {
-    let mut after = after?;
-    let same = matches!(
-        (before.as_ref().and_then(|b| b.tree.as_ref()), after.tree.as_ref()),
-        (Some(a), Some(b)) if a == b
-    );
-    if !same {
-        after.tree = None;
-    }
-    Some(after)
+/// a generated file, a coverage report nothing ignores) or a concurrent edit
+/// leaves no digest, and a report without one can never make a change
+/// verified — so the stamp says which paths moved, and the change's state
+/// says it.
+fn settled(before: Option<Stamped>, after: Option<Stamped>) -> Option<CommitStamp> {
+    let (mut stamp, after) = after?;
+    let before = before.map(|(s, d)| (s.tree_unknown, d));
+    let why = match (before, after) {
+        (Some((_, Some(b))), Some(a)) if b.tree == a.tree => return Some(stamp),
+        (Some((_, Some(b))), Some(a)) => {
+            let moved = b.moved(&a);
+            let named: Vec<&str> = moved.iter().take(5).map(String::as_str).collect();
+            let more = match moved.len().saturating_sub(named.len()) {
+                0 => String::new(),
+                n => format!(" and {n} more"),
+            };
+            format!("`check` moved the tree: {}{more}", named.join(", "))
+        }
+        (Some((Some(why), None)), _) => why,
+        _ => stamp
+            .tree_unknown
+            .clone()
+            .unwrap_or_else(|| "the tree could not be read before and after the run".into()),
+    };
+    stamp.tree = None;
+    stamp.tree_unknown = Some(why);
+    Some(stamp)
 }
+
+/// A stamp with the digest it was made from.
+type Stamped = (CommitStamp, Option<crate::git::Digest>);
 
 /// What the tree was when this gate ran; `None` outside a repository, which a
 /// certificate states explicitly.
-async fn commit_stamp(dir: &Path) -> Option<CommitStamp> {
-    crate::git::commit_stamp(dir).await
+async fn commit_stamp(dir: &Path) -> Option<Stamped> {
+    crate::git::stamp(dir).await
 }
 
 /// The report for a gate whose worktree is gone (removed by hand).
@@ -105,6 +219,8 @@ async fn commit_stamp(dir: &Path) -> Option<CommitStamp> {
 pub fn absent_worktree(gate: &str, commands: &[String], dir: &Path, attempt: u32) -> GateReport {
     let reason = format!("the worktree {} is gone, so nothing ran", dir.display());
     GateReport {
+        junit: Vec::new(),
+        base_commit: None,
         gate: gate.to_string(),
         at: jiff::Timestamp::now(),
         duration_ms: 0,
@@ -193,8 +309,8 @@ async fn run_one(
     let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
     let drains = async {
         tokio::join!(
-            drain(stdout, captured.clone()),
-            drain(stderr, captured.clone())
+            drain(stdout, 0, captured.clone()),
+            drain(stderr, 1, captured.clone())
         )
     };
     tokio::pin!(drains);
@@ -242,18 +358,31 @@ async fn run_one(
     // count and digest cover the whole output, not the tail; the digest binds
     // the record to this run but does not reproduce, since the two pipes
     // interleave nondeterministically.
-    let (buf, output_bytes, output_digest) = captured
+    let (buf, output_bytes, output_digest, scanned) = captured
         .lock()
-        .map(|c| {
+        .map(|mut c| {
+            let scanned = std::mem::take(&mut c.scanners);
             (
                 String::from_utf8_lossy(&c.tail).into_owned(),
                 c.bytes,
                 c.digest.hex(),
+                scanned,
             )
         })
-        .unwrap_or_else(|_| (String::new(), 0, crate::core::hash::hex(b"")));
+        .unwrap_or_else(|_| {
+            (
+                String::new(),
+                0,
+                crate::core::hash::hex(b""),
+                Default::default(),
+            )
+        });
+    let [out, err] = scanned;
+    let tests =
+        crate::core::testcount::CommandCount::of(command, &outcome, out.finish(), err.finish());
 
     CommandResult {
+        tests,
         command: command.to_string(),
         outcome,
         duration_ms: started.elapsed().as_millis() as u64,
@@ -271,6 +400,9 @@ struct Captured {
     tail: Vec<u8>,
     bytes: u64,
     digest: crate::core::hash::Stream,
+    /// One per pipe, stdout then stderr, fed every byte before the tail is
+    /// trimmed: a line is never assembled across the two.
+    scanners: [crate::core::testcount::Scanner; 2],
 }
 
 /// Reads one pipe into the shared buffer until it closes.
@@ -278,7 +410,7 @@ struct Captured {
 /// Bounded as it arrives, so a runaway command cannot fill memory before the
 /// timeout; in bytes, so the bound never cuts a character. Count and digest
 /// see every byte first.
-async fn drain<R>(pipe: Option<R>, into: std::sync::Arc<std::sync::Mutex<Captured>>)
+async fn drain<R>(pipe: Option<R>, which: usize, into: std::sync::Arc<std::sync::Mutex<Captured>>)
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -291,12 +423,60 @@ where
         let Ok(mut c) = into.lock() else { return };
         c.bytes += n as u64;
         c.digest.update(&chunk[..n]);
+        c.scanners[which].feed(&chunk[..n]);
         c.tail.extend_from_slice(&chunk[..n]);
         if c.tail.len() > 4 * OUTPUT_TAIL_BYTES {
             let keep = c.tail.len() - 2 * OUTPUT_TAIL_BYTES;
             c.tail.drain(..keep);
         }
     }
+}
+
+/// Reads one declared JUnit path after a run: only a file this run wrote
+/// (modified at or after it started), inside the checkout, up to
+/// [`MAX_BYTES`](crate::core::testcount::junit::MAX_BYTES). Whether git
+/// ignores it is recorded; one it does not is reported, since writing it
+/// moves the tree `check` is judged against.
+async fn read_junit(
+    dir: &Path,
+    path: &str,
+    started: std::time::SystemTime,
+) -> crate::core::testcount::junit::JunitFile {
+    use crate::core::testcount::junit::{JunitFile, JunitRead, MAX_BYTES, parse};
+    let at = dir.join(path);
+    let ignored = crate::git::is_ignored(dir, path).await;
+    let read = 'read: {
+        let (Ok(real_dir), Ok(real)) = (dir.canonicalize(), at.canonicalize()) else {
+            break 'read JunitRead::NotWritten { path: path.into() };
+        };
+        if !real.starts_with(&real_dir) || std::path::Path::new(path).is_absolute() {
+            break 'read JunitRead::Outside { path: path.into() };
+        }
+        let Ok(meta) = std::fs::metadata(&real) else {
+            break 'read JunitRead::NotWritten { path: path.into() };
+        };
+        // Coarse file-system clocks round down; a second's slack.
+        let floor = started
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or(started);
+        if meta.modified().map(|m| m < floor).unwrap_or(true) {
+            break 'read JunitRead::NotWritten { path: path.into() };
+        }
+        if meta.len() > MAX_BYTES {
+            break 'read JunitRead::TooLarge {
+                path: path.into(),
+                bytes: meta.len(),
+            };
+        }
+        match std::fs::read(&real) {
+            Ok(bytes) => parse(path, &String::from_utf8_lossy(&bytes)),
+            Err(e) => JunitRead::Unparseable {
+                path: path.into(),
+                why: e.to_string(),
+            },
+        }
+    };
+    JunitFile { read, ignored }
 }
 
 /// A gate command's process group, killed once: explicitly when the command
@@ -378,6 +558,104 @@ mod tests {
         std::env::temp_dir()
     }
 
+    /// A repository and a second worktree of it, as two changes have.
+    fn two_worktrees(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let base =
+            std::env::temp_dir().join(format!("dp-serial-{tag}-{}", uuid::Uuid::new_v4().simple()));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("f"), "x").unwrap();
+        git(&repo, &["add", "f"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "init",
+            ],
+        );
+        let other = base.join("other");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "two",
+                &other.to_string_lossy(),
+            ],
+        );
+        (repo, other)
+    }
+
+    /// Two changes' gates, started together in two worktrees of one
+    /// repository, each writing `begin` then `end` to one shared log: with
+    /// `serial` the log never shows two runs open at once; without it, it
+    /// does.
+    async fn interleaved(serial: bool) -> bool {
+        let (a, b) = two_worktrees(if serial { "on" } else { "off" });
+        let log = a.parent().unwrap().join("log");
+        let command = format!(
+            "echo begin >> '{l}'; sleep 0.4; echo end >> '{l}'",
+            l = log.display()
+        );
+        let gate = |dir: std::path::PathBuf| {
+            let command = command.clone();
+            async move {
+                run_in_turn(
+                    serial,
+                    "check",
+                    &[command],
+                    &dir,
+                    Duration::from_secs(20),
+                    1,
+                    &GateInput::default(),
+                )
+                .await
+            }
+        };
+        let (one, two) = tokio::join!(gate(a.clone()), gate(b));
+        assert!(one.passed() && two.passed(), "{one:?}\n{two:?}");
+        let lines: Vec<String> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        std::fs::remove_dir_all(a.parent().unwrap()).ok();
+        lines != ["begin", "end", "begin", "end"]
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn serial_gates_of_one_repository_never_overlap() {
+        assert!(!interleaved(true).await, "two serial gates overlapped");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn gates_that_are_not_serial_run_at_once() {
+        assert!(interleaved(false).await, "two gates waited for each other");
+    }
+
+    #[tokio::test]
+    async fn a_gate_that_is_not_serial_takes_no_lock() {
+        assert!(exclusive(&dir(), false).await.is_none());
+        assert!(exclusive(&dir(), true).await.is_some());
+    }
+
     #[tokio::test]
     async fn a_passing_gate_passes() {
         let report = run(
@@ -386,7 +664,7 @@ mod tests {
             &dir(),
             Duration::from_secs(10),
             1,
-            &[],
+            &GateInput::default(),
         )
         .await;
         assert!(report.passed());
@@ -395,9 +673,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_program_that_is_not_installed_reads_as_not_on_path() {
+        let report = run(
+            "check",
+            &["nonexistent-tool-devplane --x".into()],
+            &dir(),
+            Duration::from_secs(10),
+            1,
+            &GateInput::default(),
+        )
+        .await;
+        assert!(!report.passed());
+        let c = &report.commands[0];
+        assert_eq!(
+            c.outcome,
+            crate::core::change::Outcome::Exited { code: 127 }
+        );
+        assert_eq!(
+            c.not_on_path().as_deref(),
+            Some("`nonexistent-tool-devplane` is not on PATH")
+        );
+        assert_eq!(
+            report.summary(),
+            "check could not run: `nonexistent-tool-devplane` is not on PATH"
+        );
+    }
+
+    #[tokio::test]
     async fn an_empty_gate_is_not_a_pass() {
         // An empty Definition of Done proves nothing.
-        let report = run("check", &[], &dir(), Duration::from_secs(10), 1, &[]).await;
+        let report = run(
+            "check",
+            &[],
+            &dir(),
+            Duration::from_secs(10),
+            1,
+            &GateInput::default(),
+        )
+        .await;
         assert!(!report.passed());
     }
 
@@ -409,7 +722,7 @@ mod tests {
             &dir(),
             Duration::from_secs(10),
             1,
-            &[],
+            &GateInput::default(),
         )
         .await;
         assert!(!report.passed());
@@ -424,7 +737,7 @@ mod tests {
             &dir(),
             Duration::from_secs(10),
             1,
-            &[],
+            &GateInput::default(),
         )
         .await;
         assert!(!report.passed());
@@ -447,7 +760,7 @@ mod tests {
             &dir(),
             Duration::from_secs(20),
             1,
-            &[],
+            &GateInput::default(),
         )
         .await;
         assert!(!report.commands[0].timed_out(), "the gate deadlocked");
@@ -467,7 +780,7 @@ mod tests {
             &dir(),
             Duration::from_secs(20),
             1,
-            &[],
+            &GateInput::default(),
         )
         .await;
         let c = &report.commands[0];
@@ -516,25 +829,41 @@ mod tests {
             &root,
             Duration::from_secs(10),
             1,
-            &[],
+            &GateInput::default(),
         )
         .await;
         assert!(still.commit.as_ref().unwrap().tree.is_some());
         let moved = run(
             "check",
-            &["echo generated > out.txt".into()],
+            &["echo generated > out.txt && echo x > coverage.xml".into()],
             &root,
             Duration::from_secs(10),
             1,
-            &[],
+            &GateInput::default(),
         )
         .await;
         assert!(moved.passed());
-        let stamp = moved.commit.expect("still stamped");
+        let stamp = moved.commit.clone().expect("still stamped");
         assert!(
             stamp.tree.is_none(),
             "a pass over a moving tree kept a digest"
         );
+        // It says which paths moved, and the change's state says it too.
+        assert_eq!(
+            stamp.tree_unknown.as_deref(),
+            Some("`check` moved the tree: coverage.xml, out.txt")
+        );
+        let mut change = crate::core::change::Change::new(
+            crate::core::ids::ProjectId::new("p"),
+            "t".into(),
+            "p".into(),
+        );
+        change.gates.push(moved);
+        let checks = vec!["echo generated > out.txt && echo x > coverage.xml".to_string()];
+        let says = change
+            .verdict(crate::core::change::Declared::Checks(&checks), Some(&stamp))
+            .says();
+        assert!(says.contains("coverage.xml, out.txt"), "{says}");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -548,7 +877,7 @@ mod tests {
             &dir(),
             Duration::from_secs(10),
             1,
-            &[],
+            &GateInput::default(),
         )
         .await;
         let out = &report.commands[0].output_tail;
@@ -564,7 +893,7 @@ mod tests {
             &dir(),
             Duration::from_millis(300),
             1,
-            &[],
+            &GateInput::default(),
         )
         .await;
         assert!(report.commands[0].timed_out());
@@ -580,7 +909,7 @@ mod tests {
             &dir(),
             Duration::from_millis(200),
             1,
-            &[],
+            &GateInput::default(),
         )
         .await;
         assert_eq!(report.commands.len(), 1, "the gate stops at the timeout");
@@ -596,7 +925,7 @@ mod tests {
             &dir(),
             Duration::from_millis(400),
             1,
-            &[],
+            &GateInput::default(),
         )
         .await;
         assert!(report.commands[0].timed_out());
@@ -617,7 +946,7 @@ mod tests {
             &dir(),
             Duration::from_secs(10),
             1,
-            &[],
+            &GateInput::default(),
         )
         .await;
         let out = &report.commands[0].output_tail;
@@ -637,7 +966,7 @@ mod tests {
             &dir(),
             Duration::from_secs(5),
             1,
-            &[],
+            &GateInput::default(),
         )
         .await;
         assert!(!report.passed());
@@ -652,7 +981,10 @@ mod tests {
             &dir(),
             Duration::from_secs(10),
             1,
-            &[("CARGO_TARGET_DIR".into(), PathBuf::from("/shared/cargo"))],
+            &GateInput::env(vec![(
+                "CARGO_TARGET_DIR".into(),
+                PathBuf::from("/shared/cargo"),
+            )]),
         )
         .await;
         assert!(report.passed());
@@ -662,6 +994,49 @@ mod tests {
                 .contains("seen=/shared/cargo"),
             "{}",
             report.commands[0].output_tail
+        );
+    }
+
+    /// Summaries that scrolled out of the kept tail are still counted.
+    #[tokio::test]
+    async fn noise_between_two_summaries_still_sums_both() {
+        let report = run(
+            "check",
+            &["echo 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'; \
+               yes noise | head -c 40960; echo; \
+               echo 'test result: ok. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'"
+                .into()],
+            &dir(),
+            Duration::from_secs(20),
+            1,
+            &GateInput::default(),
+        )
+        .await;
+        let c = &report.commands[0];
+        assert!(
+            !c.output_tail.contains("2 passed"),
+            "the first summary left the tail"
+        );
+        let t = c.tests.tallies();
+        assert_eq!(t.len(), 1, "{:?}", c.tests);
+        assert_eq!((t[0].ran, t[0].lines), (6, 2));
+    }
+
+    /// A summary printed before a timeout is not the command's count.
+    #[tokio::test]
+    async fn a_command_that_timed_out_after_a_summary_carries_no_count() {
+        let report = run(
+            "check",
+            &["echo '=== 3 passed in 0.01s ==='; sleep 30".into()],
+            &dir(),
+            Duration::from_millis(400),
+            1,
+            &GateInput::default(),
+        )
+        .await;
+        assert_eq!(
+            report.commands[0].tests,
+            crate::core::testcount::CommandCount::NoExit
         );
     }
 

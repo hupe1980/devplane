@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="5" failures="1" errors="0" time="0.003722208">
+    <testsuite name="a.test.js" timestamp="2026-09-27T05:45:20.201Z" hostname="host" tests="5" failures="1" errors="0" skipped="2" time="0.003722208">
+        <testcase classname="a.test.js" name="one" time="0.000800417">
+        </testcase>
+        <testcase classname="a.test.js" name="two" time="0.000085584">
+        </testcase>
+        <testcase classname="a.test.js" name="fails when asked" time="0.002143166">
+            <failure message="expected &apos;1&apos; to be undefined" type="AssertionError">
+AssertionError: expected &apos;1&apos; to be undefined
+
+- Expected:
+undefined
+
++ Received:
+&quot;1&quot;
+
+ ❯ a.test.js:4:57
+            </failure>
+        </testcase>
+        <testcase classname="a.test.js" name="skipped" time="0">
+            <skipped/>
+        </testcase>
+        <testcase classname="a.test.js" name="later" time="0">
+            <skipped/>
+        </testcase>
+    </testsuite>
+</testsuites>

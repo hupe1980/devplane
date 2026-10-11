@@ -139,7 +139,7 @@ pub fn load_or_create_token() -> Result<String> {
 pub const INGEST_TOKEN_FILE: &str = "telemetry-token";
 
 /// Writes the telemetry-only token for `control` at `p`, owner-only, when it
-/// is missing or differs. Best effort: `connect` writes it where it is needed.
+/// is missing or differs. Best effort: `agent connect` writes it where it is needed.
 fn write_ingest_token(p: &std::path::Path, control: &str) {
     let want = ingest_token(control);
     if std::fs::read_to_string(p).is_ok_and(|t| t.trim() == want) {
@@ -216,6 +216,68 @@ pub fn ingest_token(control: &str) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// What the host answers a client's challenge with: HMAC-SHA256 keyed by the
+/// control token over the port it listens on and the client's nonce, hex.
+/// Only the process that holds the token can say it, so a client proves the
+/// port before it sends the token there; the proof is worth nothing for any
+/// other nonce, and a process relaying it from another port names the wrong one.
+pub fn host_proof(token: &str, port: u16, nonce: &str) -> String {
+    hmac_sha256(token, &format!("{port} {nonce}"))
+}
+
+/// A fresh key for the window: minted by the app at start, held in its memory
+/// and handed to its own webviews, never written anywhere — not `host.json`,
+/// not the log, not a vendor's settings. A restart voids every proof made
+/// with the last one.
+pub fn window_key() -> String {
+    generate_token()
+}
+
+/// What the window sends with an answer to ask `ask_id`: HMAC-SHA256 keyed by
+/// the window key over `ask <id>`, hex. Worth nothing for any other ask.
+pub fn ask_proof(window_key: &str, ask_id: &str) -> String {
+    hmac_sha256(window_key, &format!("ask {ask_id}"))
+}
+
+/// What the window sends to trust the repository at `path`, exactly as the
+/// request names it: HMAC-SHA256 keyed by the window key over `trust <path>`.
+pub fn trust_proof(window_key: &str, path: &str) -> String {
+    hmac_sha256(window_key, &format!("trust {path}"))
+}
+
+/// What the window sends to write a grant: HMAC-SHA256 keyed by the window
+/// key over `grant <root> <rule>`, so it is worth nothing for another rule or
+/// another project.
+pub fn grant_proof(window_key: &str, root: &str, rule: &str) -> String {
+    hmac_sha256(window_key, &format!("grant {root} {rule}"))
+}
+
+/// What the window sends to revoke a grant: over `revoke <root> <rule>`.
+pub fn revoke_proof(window_key: &str, root: &str, rule: &str) -> String {
+    hmac_sha256(window_key, &format!("revoke {root} {rule}"))
+}
+
+fn hmac_sha256(token: &str, message: &str) -> String {
+    use sha2::{Digest, Sha256};
+    const BLOCK: usize = 64;
+    let mut key = [0u8; BLOCK];
+    if token.len() > BLOCK {
+        key[..32].copy_from_slice(&Sha256::digest(token.as_bytes()));
+    } else {
+        key[..token.len()].copy_from_slice(token.as_bytes());
+    }
+    let pad = |byte: u8| key.map(|k| k ^ byte);
+    let inner = Sha256::new()
+        .chain_update(pad(0x36))
+        .chain_update(message.as_bytes())
+        .finalize();
+    let outer = Sha256::new()
+        .chain_update(pad(0x5c))
+        .chain_update(inner)
+        .finalize();
+    outer.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// 244 random bits from the OS RNG, hex-encoded: two v4 UUIDs (122 random
 /// bits each), which require a cryptographic source, without adding `rand`.
 fn generate_token() -> String {
@@ -238,16 +300,159 @@ pub struct AppConfig {
     /// The port the in-process host binds: the CLI host's default unless set;
     /// `0` picks one, and then agent telemetry does not reach it.
     pub port: u16,
+    /// May the app check for updates: `"on"`, `"off"`, or absent — *not
+    /// asked*, which makes no request. Only the window's process reads it; the
+    /// command line never checks.
+    pub updates: Option<UpdatePref>,
+}
+
+/// The person's answer to *may Devplane check for updates*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdatePref {
+    On,
+    Off,
+}
+
+impl UpdatePref {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UpdatePref::On => "on",
+            UpdatePref::Off => "off",
+        }
+    }
+}
+
+/// A change to `app.toml` setting the update preference, computed and shown
+/// before anything is written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PrefChange {
+    pub path: String,
+    /// `-` and `+` lines; empty when the file already says so.
+    pub diff: String,
+    /// Whether confirming writes anything.
+    pub writes: bool,
+    #[serde(skip)]
+    after: String,
+}
+
+/// `text` with `updates = "<pref>"` inside `[app]`: the line replaced where
+/// it exists, inserted under `[app]` where it does not, and `[app]` appended
+/// where the file has none. Every other byte is kept.
+pub fn with_update_pref(text: &str, pref: UpdatePref) -> String {
+    let line = format!("updates = \"{}\"", pref.as_str());
+    let lines: Vec<&str> = text.lines().collect();
+    let is_header = |l: &str| l.trim_start().starts_with('[');
+    let is_updates = |l: &str| {
+        l.trim_start()
+            .strip_prefix("updates")
+            .is_some_and(|rest| rest.trim_start().starts_with('='))
+    };
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 2);
+    let mut in_app = false;
+    let mut done = false;
+    let mut app_header_at = None;
+    for l in &lines {
+        if is_header(l) {
+            in_app = l.trim() == "[app]";
+            if in_app {
+                app_header_at = Some(out.len());
+            }
+        } else if in_app && !done && is_updates(l) {
+            out.push(line.clone());
+            done = true;
+            continue;
+        }
+        out.push((*l).to_string());
+    }
+    if !done {
+        match app_header_at {
+            Some(i) => out.insert(i + 1, line),
+            None => {
+                if out.last().is_some_and(|l| !l.trim().is_empty()) {
+                    out.push(String::new());
+                }
+                out.push("[app]".into());
+                out.push(line);
+            }
+        }
+    }
+    let mut joined = out.join("\n");
+    joined.push('\n');
+    joined
+}
+
+/// What setting the update preference would change in `path`, without
+/// writing. A file that does not parse is refused rather than edited.
+pub fn preview_update_pref(path: &std::path::Path, pref: UpdatePref) -> Result<PrefChange> {
+    let before = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    if !before.trim().is_empty() {
+        toml::from_str::<AppFile>(&before).with_context(|| {
+            format!(
+                "{} does not parse, so it is not edited; fix it first",
+                path.display()
+            )
+        })?;
+    }
+    let after = with_update_pref(&before, pref);
+    let removed: Vec<&str> = before
+        .lines()
+        .filter(|l| !after.lines().any(|a| a == *l))
+        .collect();
+    let added: Vec<&str> = after
+        .lines()
+        .filter(|l| !before.lines().any(|b| b == *l))
+        .collect();
+    let mut diff = String::new();
+    for l in &removed {
+        diff.push_str(&format!("-{l}\n"));
+    }
+    for l in &added {
+        diff.push_str(&format!("+{l}\n"));
+    }
+    Ok(PrefChange {
+        path: path.display().to_string(),
+        writes: before != after,
+        diff,
+        after,
+    })
+}
+
+/// Writes the change [`preview_update_pref`] showed, if the file still reads
+/// as it did then; otherwise nothing is written and the caller shows it again.
+pub fn write_update_pref(
+    path: &std::path::Path,
+    pref: UpdatePref,
+    shown: &PrefChange,
+) -> Result<bool> {
+    let now = preview_update_pref(path, pref)?;
+    if now != *shown {
+        return Ok(false);
+    }
+    if now.writes {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        let tmp = path.with_extension(format!("toml.devplane-{}.tmp", std::process::id()));
+        std::fs::write(&tmp, &now.after).with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(true)
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             shortcut: "CmdOrCtrl+Shift+Space".into(),
-            // The port `connect` writes into the vendor's telemetry settings,
+            // The port `agent connect` writes into the vendor's telemetry settings,
             // so an agent's telemetry reaches the window's host too. `0`
             // (pick one) left every exporter pointing at nothing.
             port: DEFAULT_PORT,
+            updates: None,
         }
     }
 }
@@ -485,8 +690,8 @@ impl crate::core::GlobalConfig {
                 ));
             }
         };
-        toml::from_str(&text)
-            .map_err(|e| crate::core::ConfigError::Parse(path.display().to_string(), e.to_string()))
+        Self::parse(&text)
+            .map_err(|e| crate::core::ConfigError::Parse(path.display().to_string(), e))
     }
 }
 
@@ -514,6 +719,32 @@ impl crate::core::ProjectConfig {
 mod tests {
     use super::*;
 
+    /// RFC 4231's test case 2, and a key longer than a block (Python's `hmac`).
+    #[test]
+    fn the_host_proof_is_hmac_sha256() {
+        assert_eq!(
+            hmac_sha256("Jefe", "what do ya want for nothing?"),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        assert_eq!(
+            hmac_sha256(&"k".repeat(100), "nonce"),
+            "638c2bedd5e2404a0f89677ca47de73c0699f030eb81befb19127be3167d4cb5"
+        );
+    }
+
+    /// Each proof names what it is for, so one is worth nothing for another
+    /// ask, another path, or the other kind of request.
+    #[test]
+    fn a_window_proof_is_bound_to_its_ask_or_path() {
+        let key = window_key();
+        assert_eq!(key.len(), 64);
+        assert_ne!(key, window_key(), "minted fresh each time");
+        assert_eq!(ask_proof(&key, "a"), hmac_sha256(&key, "ask a"));
+        assert_ne!(ask_proof(&key, "a"), ask_proof(&key, "b"));
+        assert_ne!(ask_proof(&key, "a"), ask_proof(&window_key(), "a"));
+        assert_ne!(ask_proof(&key, "/r"), trust_proof(&key, "/r"));
+    }
+
     /// No file is the ordinary state and means the defaults; a file that will
     /// not parse is said by path rather than silently replaced by them.
     #[test]
@@ -529,7 +760,7 @@ mod tests {
         let (cfg, problems) = app_config_from(&path);
         assert_eq!(cfg, AppConfig::default());
         assert_eq!(cfg.shortcut, "CmdOrCtrl+Shift+Space");
-        // The port `connect` writes into the telemetry settings.
+        // The port `agent connect` writes into the telemetry settings.
         assert_eq!(cfg.port, DEFAULT_PORT);
         assert!(problems.is_empty());
 
@@ -560,6 +791,85 @@ mod tests {
             1,
             "an unknown key is a problem: {problems:?}"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The update preference reads as on, off, or not asked, and setting it
+    /// changes that one line and no other byte of the person's file.
+    #[test]
+    fn the_update_preference_is_one_line_and_nothing_else_moves() {
+        let dir = std::env::temp_dir().join(format!(
+            "dp-app-upd-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.toml");
+
+        assert_eq!(
+            app_config_from(&path).0.updates,
+            None,
+            "absent is not asked"
+        );
+        std::fs::write(&path, "[app]\nupdates = \"on\"\n").unwrap();
+        assert_eq!(app_config_from(&path).0.updates, Some(UpdatePref::On));
+        std::fs::write(&path, "[app]\nupdates = \"off\"\n").unwrap();
+        assert_eq!(app_config_from(&path).0.updates, Some(UpdatePref::Off));
+        std::fs::write(&path, "[app]\nupdates = \"sometimes\"\n").unwrap();
+        assert_eq!(
+            app_config_from(&path).1.len(),
+            1,
+            "an unknown value is a problem"
+        );
+
+        // Inserted under [app]; comments, other keys and [github] untouched.
+        let before = "# mine\n[app]\nshortcut = \"Alt+Space\" # my key\nport = 47000\n\n[github]\nhost = \"ghe.corp\"\n";
+        std::fs::write(&path, before).unwrap();
+        let shown = preview_update_pref(&path, UpdatePref::On).unwrap();
+        assert_eq!(shown.diff, "+updates = \"on\"\n");
+        assert!(shown.writes);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "a preview writes nothing"
+        );
+        assert!(write_update_pref(&path, UpdatePref::On, &shown).unwrap());
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            after,
+            "# mine\n[app]\nupdates = \"on\"\nshortcut = \"Alt+Space\" # my key\nport = 47000\n\n[github]\nhost = \"ghe.corp\"\n"
+        );
+        let (cfg, problems) = app_config_from(&path);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!((cfg.updates, cfg.port), (Some(UpdatePref::On), 47000));
+
+        // Replaced in place.
+        let shown = preview_update_pref(&path, UpdatePref::Off).unwrap();
+        assert_eq!(shown.diff, "-updates = \"on\"\n+updates = \"off\"\n");
+        assert!(write_update_pref(&path, UpdatePref::Off, &shown).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            after.replace("updates = \"on\"", "updates = \"off\"")
+        );
+
+        // A file changed since the preview is not written over.
+        let shown = preview_update_pref(&path, UpdatePref::On).unwrap();
+        std::fs::write(&path, "[app]\nport = 1\n").unwrap();
+        assert!(!write_update_pref(&path, UpdatePref::On, &shown).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[app]\nport = 1\n");
+
+        // No file, or no [app]: the section is added.
+        assert_eq!(
+            with_update_pref("", UpdatePref::On),
+            "[app]\nupdates = \"on\"\n"
+        );
+        assert_eq!(
+            with_update_pref("[github]\nhost = \"x\"\n", UpdatePref::Off),
+            "[github]\nhost = \"x\"\n\n[app]\nupdates = \"off\"\n"
+        );
+        // A file that does not parse is not edited.
+        std::fs::write(&path, "[app\n").unwrap();
+        assert!(preview_update_pref(&path, UpdatePref::On).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 

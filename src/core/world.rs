@@ -2,7 +2,9 @@
 //! Surfaces read this rather than reconstructing state from events; the
 //! reducer is pure and this struct is the only thing that mutates.
 
-use crate::core::attention::{AttentionConfig, AttentionItem, Derived, run_items_at};
+use crate::core::attention::{
+    AttentionConfig, AttentionItem, AttentionKind, Derived, run_items_at,
+};
 use crate::core::event::{Event, EventEnvelope};
 use crate::core::ids::{ProjectId, RunId, SessionId};
 use crate::core::project::Project;
@@ -51,7 +53,7 @@ impl Default for Health<'_> {
     }
 }
 
-/// Everything `devplane modes` and `/api/modes` say: which projects decide
+/// Everything `devplane status --modes` and `/api/modes` say: which projects decide
 /// without you, and what can answer in your name. One type for writer and
 /// reader, so a renamed field is a compile error.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -66,7 +68,7 @@ pub struct Modes {
     /// What can answer a question in your name on this machine, if anything.
     pub question_clock: Option<crate::core::clock::ClockLine>,
     /// Live sessions whose environment was read; one started before
-    /// `devplane connect` has no reading.
+    /// `devplane agent connect` has no reading.
     pub clock_read: usize,
     pub clock_unread: usize,
 }
@@ -100,6 +102,9 @@ pub struct SessionMode {
     /// from it.
     pub agent_mode: Option<String>,
     pub agent_mode_seen: Option<String>,
+    /// What a driven change says about that mode, in a sentence.
+    #[serde(default)]
+    pub mode_statement: Option<String>,
     /// A clock this session's environment put on its questions
     /// (`CLAUDE_AFK_TIMEOUT_MS` overrides the settings files).
     pub question_clock: Option<crate::core::clock::ClockLine>,
@@ -292,12 +297,16 @@ impl World {
                     .iter()
                     .find(|(p, _)| *p == w.project_id)
                     .map(|(_, c)| c.as_slice());
+                let mark = crate::core::attention::ActivityMark::of_change(w, |r| {
+                    self.runs.get(r).map(|r| r.last_event_at)
+                });
                 crate::core::attention::change_items_in(
                     w,
                     can_drive,
                     can_resume,
                     repo.as_deref(),
                     checks,
+                    &mark,
                     now,
                 )
             })
@@ -324,8 +333,9 @@ impl World {
         });
         let mut all = Derived {
             items: from_runs.items,
-            snoozed: from_runs.snoozed + from_change.snoozed,
+            snoozed: from_runs.snoozed,
         };
+        all.snoozed.extend(from_change.snoozed);
         all.items.extend(from_change.items);
         all.items.extend(gate);
         all.items.extend(configs);
@@ -361,12 +371,16 @@ impl World {
                         mode: r.permission_mode.as_ref().map(|m| m.as_str().to_string()),
                         label: r.permission_mode.as_ref().map(|m| m.label().to_string()),
                         // `None` is *we do not know*, not *nobody is asked*.
-                        asks_a_person: r.permission_mode.as_ref().and_then(|m| m.asks_a_person()),
+                        asks_a_person: match &r.mode_statement {
+                            Some(m) => m.asks_a_person(),
+                            None => r.permission_mode.as_ref().and_then(|m| m.asks_a_person()),
+                        },
                         // "Seen", never "since": nothing announces a mode
                         // change, so this is when Devplane first heard it.
                         seen: r.permission_mode_seen.map(|t| t.to_string()),
                         agent_mode: r.agent_mode.clone(),
                         agent_mode_seen: r.agent_mode_seen.map(|t| t.to_string()),
+                        mode_statement: r.mode_statement.as_ref().map(|m| m.sentence()),
                         question_clock: r.question_clock.as_ref().map(Into::into),
                         clock_read: r.question_clock_read.is_some(),
                     })
@@ -527,30 +541,33 @@ impl World {
         }
     }
 
-    /// Hides the run's *current* inbox item kinds until `until`, or shows
-    /// everything when `None`. A kind that appears later is shown
-    /// ([`Snoozed`](crate::core::attention::Snoozed)).
+    /// Hides the run's *current* inbox item kinds (or the one named) until
+    /// a moment or its next activity, or brings them back. A kind that
+    /// appears later is shown ([`Snoozed`](crate::core::attention::Snoozed)).
+    /// `None` when there is no such run.
     pub fn snooze(
         &mut self,
         run: &RunId,
-        until: Option<jiff::Timestamp>,
+        kind: Option<&str>,
+        how: crate::core::attention::SnoozeFor,
         now: jiff::Timestamp,
         stall_seconds: i64,
-    ) -> bool {
-        let Some(existing) = self.runs.get(run) else {
-            return false;
-        };
+    ) -> Option<Result<Vec<AttentionKind>, crate::core::attention::NeverSnoozed>> {
+        let existing = self.runs.get(run)?;
         let kinds: Vec<_> = run_items_at(existing, &self.attention, stall_seconds, now)
             .items
             .into_iter()
             .map(|i| i.kind)
             .collect();
+        let mark = crate::core::attention::ActivityMark::of_run(existing);
         let r = self.runs.get_mut(run).expect("checked above");
-        match until {
-            Some(t) => r.snoozed.hide(kinds, t),
-            None => r.snoozed.clear(),
-        }
-        true
+        Some(crate::core::attention::snooze(
+            &mut r.snoozed,
+            kinds,
+            kind,
+            how,
+            mark,
+        ))
     }
 
     /// Loads persisted runs. The caller must [`reconcile`](Self::reconcile)
@@ -1360,7 +1377,7 @@ mod tests {
         let detail = item.detail.as_deref().unwrap_or_default();
         assert!(detail.contains("line 12"), "{detail}");
         assert!(
-            detail.contains("devplane check /repos/payments-api"),
+            detail.contains("devplane config check /repos/payments-api"),
             "{detail}"
         );
         // Nothing to click: committed rules are not rewritten from the inbox.
@@ -1509,7 +1526,14 @@ mod tests {
         }
         let say = |w: &mut World, id: &str, mode: &str| {
             w.apply(
-                env(id, Event::PermissionModeSeen { mode: mode.into() }),
+                env(
+                    id,
+                    Event::PermissionModeSeen {
+                        mode: mode.into(),
+                        at: None,
+                        sequence: None,
+                    },
+                ),
                 RunHint::default(),
             );
         };
@@ -1557,6 +1581,8 @@ mod tests {
                 "gone",
                 Event::PermissionModeSeen {
                     mode: "auto".into(),
+                    at: None,
+                    sequence: None,
                 },
             ),
             RunHint::default(),

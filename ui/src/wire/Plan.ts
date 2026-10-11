@@ -26,6 +26,12 @@ files: number,
  */
 progress: Progress | null, 
 /**
+ * Why there is no count when the reason is the layout, not an absent box:
+ * *this layout keeps no task file…* (GSD), or an OpenSpec schema whose task
+ * file Devplane does not read. A surface renders it where a count would be.
+ */
+no_progress: string | null, 
+/**
  * Which bound this reading hit, if any; `None` means all of it was read.
  */
 truncated: string | null, 

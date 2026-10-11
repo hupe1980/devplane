@@ -3,6 +3,7 @@
   // are both summary and filter. A selected row offers raising its window or
   // attaching a terminal. An empty grid says what Devplane cannot see, never
   // calm.
+  import Inline from "../../lib/ui/Inline.svelte";
   import { copyText } from "../../lib/resource.svelte";
   import Grid, { type Column } from "../../lib/ui/Grid.svelte";
   import Pill from "../../lib/ui/Pill.svelte";
@@ -10,6 +11,11 @@
   import Empty from "../../lib/ui/Empty.svelte";
   import Props from "../../lib/ui/Props.svelte";
   import Skeleton from "../../lib/Skeleton.svelte";
+  import { cursor } from "../../lib/cursor";
+  import { spell } from "../../lib/keys";
+  import { offerCommands } from "../../lib/offered.svelte";
+  import { go } from "../../lib/route";
+  import { surfaces } from "../../lib/surfaces";
 
   type Run = {
     id: string;
@@ -108,7 +114,7 @@
   /// What this board cannot see, said beside an empty one.
   const blind = $derived(
     [
-      watching?.driven_only?.length ? `${watching.driven_only.join(", ")} appear only when Devplane starts them.` : "",
+      watching?.driven_only?.length ? `${watching.driven_only.join(", ")} ${watching.driven_only.length === 1 ? "appears only when Devplane starts it" : "appear only when Devplane starts them"}.` : "",
       watching?.unproved?.length ? `${watching.unproved.join(", ")} ${watching.unproved.length === 1 ? "is" : "are"} read, but has not been proved against a live session.` : "",
     ]
       .filter(Boolean)
@@ -131,13 +137,62 @@
     { key: "last", label: "Last", align: "end", sort: (r) => r.last_event_at ?? "", mono: true },
   ];
 
+  // ── narrow: columns give way, and say how many ─────────────────────────
+  /// Dropped first to last as the pane narrows; State and Session stay.
+  const DROP = ["tools", "cost", "context", "last", "project", "doing"];
+  let width = $state(0);
+  const fitted = $derived.by(() => {
+    if (!width) return columns;
+    const room = width - (pick ? 352 : 0) - 4;
+    const need = (cs: Column<Run>[]) => cs.reduce((n, c) => n + (c.width ?? 128), 0);
+    let cols = columns;
+    for (const k of DROP) {
+      if (need(cols) <= room) break;
+      cols = cols.filter((c) => c.key !== k);
+    }
+    return cols;
+  });
+  const hidden = $derived(columns.filter((c) => !fitted.includes(c)));
+  const shows = (k: string) => fitted.some((c) => c.key === k);
+
+  // ── the list keys: `j`/`k` select a session, Enter opens its decisions ─
+  let order = $state<string[]>([]);
+  /// The surface that shows everything about one run (its ledger).
+  const runPage = $derived(surfaces().find((x) => x.link === "run")?.id ?? "");
+  $effect(() =>
+    cursor({
+      scope: "board",
+      size: () => order.length,
+      at: () => order.indexOf(selected ?? ""),
+      go: (i) => (selected = order[i]),
+      open: (i) => {
+        if (runPage) go(`#${runPage}/${encodeURIComponent(order[i])}`);
+      },
+    }),
+  );
+
   let said = $state("");
   async function copy(t: string) {
     said = (await copyText(t)) ? `Copied: ${t}` : `Nothing was copied — this page has no clipboard: ${t}`;
   }
+
+  // `⌘K` lists the selected session's actions first: the drawer's, and
+  // Enter's.
+  $effect(() => {
+    const p = pick;
+    if (!p) return;
+    return offerCommands(
+      p.name ?? p.agent ?? p.id,
+      [
+        ...(runPage ? [{ label: "open its decisions", icon: "keyboard", hint: spell("Enter"), run: () => go(`#${runPage}/${encodeURIComponent(p.id)}`) }] : []),
+        { label: "copy the attach command", icon: "right", run: () => void copy(`devplane run attach ${p.id}`) },
+      ],
+      "This session",
+    );
+  });
 </script>
 
-<div class="board">
+<div class="board" bind:clientWidth={width}>
   <header class="head">
     <h1>Sessions</h1>
     {#if counts}
@@ -156,6 +211,7 @@
         <option value="none">none</option>
       </select>
     </label>
+    {#if hidden.length}<span class="hidden" title="hidden to fit: {hidden.map((c) => c.label).join(', ')}">{hidden.length} {hidden.length === 1 ? "column" : "columns"} hidden</span>{/if}
     {#if summary?.cost_usd}<span class="cost" title="reported by the vendors' own telemetry">${summary.cost_usd.toFixed(2)} reported today</span>{/if}
   </header>
 
@@ -174,15 +230,16 @@
     <div class="frame">
       <Grid
         id="sessions"
-        {columns}
+        columns={fitted}
         rows={shown}
         key={(r) => r.id}
         group={groupBy === "none" ? undefined : groupBy === "project" ? (r) => r.project_name ?? "no project" : bucket}
         bind:selected
+        bind:order
         label="sessions"
       >
         {#snippet cell(r, c)}
-          {#if c.key === "state"}<Pill word={r.state ?? "unknown"} />
+          {#if c.key === "state"}<span class="st"><Pill word={r.state ?? "unknown"} />{#if !shows("context") && crowded(r)}<span class="hot" title="context nearly full"><Icon name="alert" size={12} /><span class="sr-only">context nearly full</span></span>{/if}</span>
           {:else if c.key === "session"}
             <span class="sess"><Icon name={r.mode === "driven" ? "agent" : "eye"} size={13} /> <b>{r.name ?? r.agent ?? "session"}</b> <span class="dim">{r.model ?? ""}</span></span>
           {:else if c.key === "project"}{r.project_name ?? "—"}
@@ -212,16 +269,16 @@
               { label: "Model", value: pick.model, missing: "not reported" },
               { label: "Branch", value: pick.branch, mono: true, missing: "none" },
               { label: "Directory", value: pick.cwd, mono: true },
-              { label: "Plan", value: pick.plan_total ? `${pick.plan_done ?? 0} of ${pick.plan_total} steps done` : null, missing: "no plan reported" },
+              { label: "Plan", value: pick.plan_total ? `${pick.plan_total} steps · ${pick.plan_done ?? 0} done` : null, missing: "no plan reported" },
               { label: "Sent", value: pick.sent_says },
               { label: "Subagents", value: pick.subagents ? String(pick.subagents) : null, missing: "none" },
               { label: "Session", value: pick.id, mono: true },
             ]}
           />
           <div class="acts">
-            <button onclick={() => copy(`devplane attach ${pick!.id}`)}><Icon name="terminal" size={13} /> Copy attach command</button>
+            <button onclick={() => copy(`devplane run attach ${pick!.id}`)}><Icon name="terminal" size={13} /> Copy attach command</button>
           </div>
-          {#if said}<p class="said">{said}</p>{/if}
+          {#if said}<p class="said"><Inline text={said} /></p>{/if}
         </aside>
       {/if}
     </div>
@@ -296,9 +353,15 @@
   .group select {
     font-size: var(--t-xs);
   }
-  .cost {
+  .cost,
+  .hidden {
     font-size: var(--t-xs);
     color: var(--faint);
+  }
+  .st {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
   }
   .frame {
     flex: 1;

@@ -1,0 +1,2 @@
+ok  	example.com/gop/a	0.192s
+ok  	example.com/gop/b	0.192s

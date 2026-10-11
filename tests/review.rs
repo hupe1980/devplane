@@ -6,84 +6,10 @@ mod common;
 #[path = "common/sandbox.rs"]
 mod sandbox;
 
-use devplane::core::Policy;
-use devplane::host::{AppState, Shared};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// A host for one test; its agents end with it.
-struct Host(Shared, #[allow(dead_code)] common::AgentSerial);
-impl std::ops::Deref for Host {
-    type Target = Shared;
-    fn deref(&self) -> &Shared {
-        &self.0
-    }
-}
-impl Drop for Host {
-    fn drop(&mut self) {
-        for _ in 0..100 {
-            if let Ok(mut map) = self.0.sessions.try_lock() {
-                for (_, session) in map.drain() {
-                    session.stop();
-                }
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    }
-}
-
-async fn boot() -> (std::net::SocketAddr, reqwest::Client, Host) {
-    let serial = common::one_agent_at_a_time();
-    let db = std::env::temp_dir().join(format!("vp-review-{}.db", uuid::Uuid::new_v4().simple()));
-    let state = AppState::new(
-        db.clone(),
-        "tok".into(),
-        Policy::default(),
-        db.parent().unwrap().to_path_buf(),
-    )
-    .await
-    .unwrap();
-    let app = devplane::api::router(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
-    (addr, reqwest::Client::new(), Host(state, serial))
-}
-
-async fn get(c: &reqwest::Client, addr: &std::net::SocketAddr, path: &str) -> Value {
-    c.get(format!("http://{addr}{path}"))
-        .bearer_auth("tok")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap()
-}
-
-async fn post(c: &reqwest::Client, addr: &std::net::SocketAddr, path: &str, body: Value) -> Value {
-    c.post(format!("http://{addr}{path}"))
-        .bearer_auth("tok")
-        .json(&body)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap()
-}
-
-async fn trust(c: &reqwest::Client, addr: &std::net::SocketAddr, repo: &Path) {
-    let res = post(
-        c,
-        addr,
-        "/api/projects/trust",
-        serde_json::json!({ "path": repo.to_string_lossy() }),
-    )
-    .await;
-    assert_eq!(res["trusted"], true, "{res}");
-}
+use common::{boot, echo_agent, get, post, trust, until};
 
 /// The fixture's branch, adopted as a change.
 async fn adopted(c: &reqwest::Client, addr: &std::net::SocketAddr, repo: &Path) -> String {
@@ -98,13 +24,18 @@ async fn adopted(c: &reqwest::Client, addr: &std::net::SocketAddr, repo: &Path) 
     v["change_id"].as_str().unwrap().to_string()
 }
 
-fn echo_agent() -> Option<String> {
-    let exe = std::env::current_exe().ok()?;
-    let bin = exe.parent()?.parent()?.join("examples").join("echo_agent");
-    bin.exists().then(|| bin.to_string_lossy().to_string())
+/// Every file in reading order, across the role groups.
+/// Stages a file the sandbox's `.gitignore` would hide: a project commits its
+/// `.claude/settings.json` while ignoring the rest of `.claude/`.
+fn force_add(wt: &std::path::Path, path: &str) {
+    let out = std::process::Command::new("git")
+        .args(["add", "-f", path])
+        .current_dir(wt)
+        .output()
+        .expect("git");
+    assert!(out.status.success(), "git add -f {path}");
 }
 
-/// Every file in reading order, across the role groups.
 fn reading_order(review: &Value) -> Vec<String> {
     review["groups"]
         .as_array()
@@ -410,7 +341,7 @@ async fn a_file_nobody_asked_for_is_under_its_own_heading() {
         serde_json::json!([{
             "path": "src/by_hand.rs",
             "why": {"why": "no_run_wrote"},
-            "says": "no run Devplane dispatched wrote this",
+            "says": "no dispatched run is recorded writing this, and no sent task names it",
         }]),
         "{intent}"
     );
@@ -424,7 +355,7 @@ async fn a_file_nobody_asked_for_is_under_its_own_heading() {
     );
     assert_eq!(
         file(&r, "src/by_hand.rs")["task_says"],
-        "not asked for — no run Devplane dispatched wrote this"
+        "not asked for — no dispatched run is recorded writing this, and no sent task names it"
     );
 
     // A change whose only run was observed, not started, cannot be grouped and says so.
@@ -466,41 +397,86 @@ fn the_review_computes_no_percentage_ratio_or_score() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/core/review.rs");
     let source = std::fs::read_to_string(&path).expect("src/core/review.rs is the review");
     assert!(source.contains("pub fn by_intent"), "not the review module");
+    // The counts and base checks sit beside the review's first group: held
+    // to the same rule.
+    let mut sources = vec![("review.rs", source)];
+    for rel in [
+        "src/core/base_checks.rs",
+        "src/core/testcount/mod.rs",
+        "src/core/testcount/runners.rs",
+        "src/core/testcount/compare.rs",
+        "src/core/testcount/junit.rs",
+        "src/core/controls.rs",
+        // Who approved the merge: counts in words, beside the change.
+        "src/core/approvals/mod.rs",
+        "src/core/approvals/required.rs",
+        "src/core/approvals/sentence.rs",
+    ] {
+        let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel))
+            .unwrap_or_else(|_| panic!("{rel} is where counts are composed"));
+        sources.push((rel, text));
+    }
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
     let mut hits = Vec::new();
-    for (n, line) in source.lines().enumerate() {
-        let code = line.split("//").next().unwrap_or("");
-        // The tests below the module plant the words they refuse.
-        if code.contains("#[cfg(test)]") {
-            break;
-        }
-        if code.contains('%') {
-            hits.push(format!("{}: `%`", n + 1));
-        }
-        if code.contains(" / ") || code.contains("as f32") || code.contains("as f64") {
-            hits.push(format!("{}: a division — {}", n + 1, code.trim()));
-        }
-        for word in [
-            "percent",
-            "percentage",
-            "ratio",
-            "score",
-            "grade",
-            "confidence",
-        ] {
-            let lower = code.to_lowercase();
-            let mut from = 0;
-            while let Some(i) = lower[from..].find(word) {
-                let at = from + i;
-                let before = lower[..at].chars().next_back().is_none_or(|c| !is_word(c));
-                let after = lower[at + word.len()..]
-                    .chars()
-                    .next()
-                    .is_none_or(|c| !is_word(c));
-                if before && after {
-                    hits.push(format!("{}: `{word}` — {}", n + 1, code.trim()));
+    for (file, source) in &sources {
+        for (n, line) in source.lines().enumerate() {
+            let n = n + 1;
+            let n = format!("{file}:{n}");
+            let code = line.split("//").next().unwrap_or("");
+            // The tests below the module plant the words they refuse.
+            if code.contains("#[cfg(test)]") {
+                break;
+            }
+            if code.contains('%') {
+                hits.push(format!("{n}: `%`"));
+            }
+            if code.contains(" / ") || code.contains("as f32") || code.contains("as f64") {
+                hits.push(format!("{n}: a division — {}", code.trim()));
+            }
+            for word in [
+                "percent",
+                "percentage",
+                "ratio",
+                "score",
+                "grade",
+                "confidence",
+            ] {
+                let lower = code.to_lowercase();
+                let mut from = 0;
+                while let Some(i) = lower[from..].find(word) {
+                    let at = from + i;
+                    let before = lower[..at].chars().next_back().is_none_or(|c| !is_word(c));
+                    let after = lower[at + word.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| !is_word(c));
+                    if before && after {
+                        hits.push(format!("{n}: `{word}` — {}", code.trim()));
+                    }
+                    from = at + word.len();
                 }
-                from = at + word.len();
+            }
+            // The controls' rows name a file and what it governs, never a
+            // judgement of the edit: no word in a string it writes says one.
+            // The approvals sentence says who approved, never that the
+            // change is fit to merge: no such word in a string it writes.
+            if file.starts_with("src/core/approvals/") {
+                let literals: String = code.split('"').skip(1).step_by(2).collect();
+                let lower = literals.to_lowercase();
+                for word in lower.split(|c: char| !c.is_alphanumeric()) {
+                    if ["safe", "good", "ready", "score", "grade"].contains(&word) {
+                        hits.push(format!("{n}: `{word}` — {}", code.trim()));
+                    }
+                }
+            }
+            if *file == "src/core/controls.rs" {
+                let literals: String = code.split('"').skip(1).step_by(2).collect();
+                let lower = literals.to_lowercase();
+                for word in ["risk", "safe", "dangerous", "suspicious"] {
+                    if lower.contains(word) {
+                        hits.push(format!("{n}: `{word}` — {}", code.trim()));
+                    }
+                }
             }
         }
     }
@@ -531,6 +507,14 @@ async fn checks_weakened_or_changed_come_first() {
     )
     .unwrap();
     std::fs::write(wt.join("devplane.toml"), "[gates]\ncheck = []\n").unwrap();
+    // What governs the agent is read first too.
+    std::fs::create_dir_all(wt.join(".claude")).unwrap();
+    std::fs::write(
+        wt.join(".claude/settings.json"),
+        "{ \"hooks\": { \"Stop\": [] } }\n",
+    )
+    .unwrap();
+    force_add(&wt, ".claude/settings.json");
 
     let r = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
     let first = &r["groups"][0];
@@ -544,8 +528,22 @@ async fn checks_weakened_or_changed_come_first() {
     assert!(has("tests/auth.rs", "deletes a test file"), "{weak:?}");
     assert!(has("tests/login.rs", "#[ignore"), "{weak:?}");
     assert!(has("devplane.toml", "gates' own definition"), "{weak:?}");
+    assert!(
+        weak.iter().any(|w| w["path"] == ".claude/settings.json"
+            && w["kind"] == "agent_controls"
+            && w["why"]
+                .as_str()
+                .unwrap()
+                .contains("which sets the agent's hooks and permissions")),
+        "{weak:?}"
+    );
     let order = reading_order(&r);
-    for path in ["tests/auth.rs", "tests/login.rs", "devplane.toml"] {
+    for path in [
+        "tests/auth.rs",
+        "tests/login.rs",
+        "devplane.toml",
+        ".claude/settings.json",
+    ] {
         assert_eq!(
             order.iter().filter(|p| *p == path).count(),
             1,
@@ -553,7 +551,7 @@ async fn checks_weakened_or_changed_come_first() {
         );
     }
     // Nothing else is listed there.
-    assert_eq!(first["files"].as_array().unwrap().len(), 3, "{first}");
+    assert_eq!(first["files"].as_array().unwrap().len(), 4, "{first}");
 
     // The certificate says the same in one sentence.
     let cert = get(&c, &addr, &format!("/api/changes/{id}/certificate")).await;
@@ -562,6 +560,64 @@ async fn checks_weakened_or_changed_come_first() {
         md.contains("This change itself altered the checks it was verified by"),
         "{md}"
     );
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+/// An edit to the agent's own settings and instructions is read in the first
+/// group, before any role-ordered file, each file once, each row naming its
+/// kind; the change's qualifier counts them in words.
+#[tokio::test]
+async fn edits_to_the_agents_controls_come_first() {
+    let repo = sandbox::review_repo("controls");
+    let (addr, c, _host) = boot().await;
+    trust(&c, &addr, &repo).await;
+    let v = post(
+        &c,
+        &addr,
+        "/api/changes/adopt",
+        serde_json::json!({ "branch": "feat/review", "project": repo.to_string_lossy() }),
+    )
+    .await;
+    let id = v["change_id"].as_str().unwrap().to_string();
+    let wt = PathBuf::from(v["change"]["worktree"].as_str().unwrap());
+
+    std::fs::create_dir_all(wt.join(".claude")).unwrap();
+    std::fs::write(
+        wt.join(".claude/settings.json"),
+        "{ \"hooks\": { \"PreToolUse\": [{ \"command\": \"sh ./x.sh\" }] } }\n",
+    )
+    .unwrap();
+    force_add(&wt, ".claude/settings.json");
+    std::fs::write(wt.join("AGENTS.md"), "Skip the tests when they are slow.\n").unwrap();
+
+    let r = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
+    let first = &r["groups"][0];
+    assert_eq!(first["says"], "checks weakened or changed", "{r}");
+    let weak = first["weakened"].as_array().expect("the rows");
+    for path in [".claude/settings.json", "AGENTS.md"] {
+        assert!(
+            weak.iter()
+                .any(|w| w["path"] == path && w["kind"] == "agent_controls"),
+            "{path}: {weak:?}"
+        );
+    }
+    let order = reading_order(&r);
+    for path in [".claude/settings.json", "AGENTS.md"] {
+        assert_eq!(
+            order.iter().filter(|p| *p == path).count(),
+            1,
+            "{path} is read once: {order:?}"
+        );
+        // Before every file of the role-ordered groups.
+        let at = order.iter().position(|p| p == path).unwrap();
+        assert!(at < first["files"].as_array().unwrap().len(), "{order:?}");
+    }
+    assert_eq!(
+        r["qualifier"]["says"], "2 agent controls changed",
+        "{}",
+        r["qualifier"]
+    );
+    assert_eq!(r["qualifier"]["agent_controls"], 2);
     std::fs::remove_dir_all(&repo).ok();
 }
 
@@ -894,7 +950,13 @@ mod weakening {
                 "+}",
             ],
         ));
-        assert!(r.is_empty(), "{r:?}");
+        // An expected panic is an oracle, so not hollow; but it is a marker
+        // that turns a failure into a pass, so it is named as one.
+        assert!(!has(&r, WeakKind::Skip, "no assertion"), "{r:?}");
+        assert!(
+            has(&r, WeakKind::Skip, "skip marker `#[should_panic`"),
+            "{r:?}"
+        );
     }
 
     #[test]
@@ -1088,4 +1150,490 @@ mod weakening {
         ));
         assert!(r.is_empty(), "{r:?}");
     }
+
+    /// Every runner's way of turning a test off, and none that is a word in
+    /// ordinary code.
+    #[test]
+    fn every_runners_skip_is_a_skip_marker() {
+        for (path, line) in [
+            ("tests/a.rs", "+#[should_panic]"),
+            ("pkg/a_test.go", "+\tt.Skipf(\"later %d\", 1)"),
+            ("pkg/a_test.go", "+\tt.SkipNow()"),
+            ("src/a.test.ts", "+xit(\"a\", () => {});"),
+            ("src/a.test.ts", "+xdescribe(\"a\", () => {});"),
+            ("src/a.test.ts", "+xtest(\"a\", () => {});"),
+            ("src/a.test.ts", "+it.skip.each([1])(\"a\", () => {});"),
+            ("src/a.test.ts", "+it.skipIf(ci)(\"a\", () => {});"),
+            ("src/a.test.ts", "+test.todo(\"a\");"),
+            ("tests/test_a.py", "+        self.skipTest(\"x\")"),
+            ("tests/test_a.py", "+np = pytest.importorskip(\"numpy\")"),
+            ("tests/test_a.py", "+@unittest.skip(\"x\")"),
+            ("tests/test_a.py", "+@pytest.mark.xfail"),
+            ("spec/a_spec.rb", "+    pending \"later\""),
+            ("spec/a_spec.rb", "+    skip"),
+            ("src/test/java/ATest.java", "+  @Disabled"),
+            ("src/test/java/ATest.java", "+  @Ignore"),
+            ("Tests/ATests.cs", "+    [Ignore]"),
+            ("Tests/ATests.cs", "+    [Fact(Skip = \"flaky\")]"),
+        ] {
+            let r = rows(&modified(path, &[" a", line]));
+            assert!(
+                has(&r, WeakKind::Skip, "skip marker"),
+                "{path} {line}: {r:?}"
+            );
+        }
+        for (path, line) in [
+            ("src/main.rs", "+    std::process::exit(1);"),
+            ("lib/jobs.rb", "+    pending_jobs = 1"),
+        ] {
+            let r = rows(&modified(path, &[" a", line]));
+            assert!(r.is_empty(), "{path} {line}: {r:?}");
+        }
+    }
+
+    /// Rust's tests live beside the code: a test removed from `src/` is a
+    /// test removed, whatever the path.
+    #[test]
+    fn a_test_removed_outside_the_test_files_is_named() {
+        let r = rows(&modified(
+            "src/lib.rs",
+            &[
+                " pub fn a() {}",
+                "-#[cfg(test)]",
+                "-mod tests {",
+                "-    #[test]",
+                "-    fn a() { super::a(); }",
+                "-}",
+            ],
+        ));
+        assert!(has(&r, WeakKind::Deleted, "a test removed"), "{r:?}");
+        let r = rows(&modified(
+            "src/a.js",
+            &[" export const a = 1;", "-describe(\"a\", () => {});"],
+        ));
+        assert!(has(&r, WeakKind::Deleted, "a test removed"), "{r:?}");
+        // Moved within the file is not removed.
+        let r = rows(&modified(
+            "src/lib.rs",
+            &["-#[test]", " fn a() {}", "+#[test]"],
+        ));
+        assert!(r.is_empty(), "{r:?}");
+    }
+
+    /// Runner configuration is what defines passing too; a manifest only
+    /// where the hunk is about the tests.
+    #[test]
+    fn a_runners_configuration_is_a_gate() {
+        for path in [
+            ".cargo/config.toml",
+            "crates/a/.cargo/config",
+            "build.rs",
+            ".mocharc.yml",
+            "playwright.config.ts",
+            "cypress.config.js",
+            "karma.conf.js",
+            "noxfile.py",
+            ".golangci.yml",
+            ".gitattributes",
+            "src/deep/conftest.py",
+        ] {
+            let r = rows(&modified(path, &[" a", "-b", "+c"]));
+            assert!(r.iter().any(|w| w.kind == WeakKind::Gate), "{path}: {r:?}");
+        }
+        for (path, line) in [
+            ("Cargo.toml", "+harness = false"),
+            ("Cargo.toml", "+[[test]]"),
+            ("Cargo.toml", "+[lints.rust]"),
+            ("crates/a/Cargo.toml", "+test = false"),
+            (
+                "package.json",
+                "+  \"jest\": { \"testPathIgnorePatterns\": [\"auth\"] },",
+            ),
+            ("package.json", "+    \"test\": \"exit 0\","),
+            ("pom.xml", "+    <skipTests>true</skipTests>"),
+            ("build.gradle.kts", "+tasks.test { enabled = false }"),
+            ("build.gradle", "+test {"),
+        ] {
+            let r = rows(&modified(path, &[" a", line]));
+            assert!(
+                r.iter().any(|w| w.kind == WeakKind::Gate),
+                "{path} {line}: {r:?}"
+            );
+        }
+        // A dependency is not the checks: never a gate row. It is what the
+        // build trusts, a supply-chain row of its own.
+        for (path, line, supply) in [
+            ("Cargo.toml", "+serde = \"1\"", true),
+            ("package.json", "+    \"left-pad\": \"^1.0.0\",", true),
+            ("pom.xml", "+    <version>2.0</version>", false),
+        ] {
+            let r = rows(&modified(path, &[" a", line]));
+            assert!(
+                r.iter().all(|w| w.kind == WeakKind::SupplyChain),
+                "{path} {line}: {r:?}"
+            );
+            assert_eq!(r.len(), usize::from(supply), "{path} {line}: {r:?}");
+        }
+    }
+
+    /// The view is cut at a bound; what looks for weakened checks is not.
+    #[test]
+    fn a_weakening_past_the_views_bound_is_still_read() {
+        let mut diff: String = (0..devplane::core::diff::MAX_FILES + 5)
+            .map(|i| modified(&format!("a/f{i:03}.txt"), &[" a", "+b"]))
+            .collect();
+        diff += &modified("tests/z.rs", &[" #[test]", "+#[ignore]"]);
+        let set = parse("main", &diff, "git diff");
+        assert!(set.truncated.is_some());
+        assert!(!set.files.iter().any(|f| f.path == "tests/z.rs"));
+        let r = weakened(&set, None, &[]);
+        assert!(has(&r, WeakKind::Skip, "skip marker"), "{r:?}");
+
+        // Long enough that its own lines are cut from the view.
+        let mut long: Vec<String> = (0..devplane::core::diff::MAX_LINES + 10)
+            .map(|i| format!("+// {i}"))
+            .collect();
+        long.push("+#[ignore]".into());
+        let long: Vec<&str> = long.iter().map(String::as_str).collect();
+        let set = parse("main", &modified("tests/long.rs", &long), "git diff");
+        let r = weakened(&set, None, &[]);
+        assert!(has(&r, WeakKind::Skip, "skip marker"), "{r:?}");
+
+        // A cut set with nothing whole beside it is never "nothing weakened".
+        let mut cut = parse("main", &diff, "git diff");
+        cut.whole = None;
+        let r = weakened(&cut, None, &[]);
+        assert!(
+            has(&r, WeakKind::Gate, "diff truncated — weakening not read"),
+            "{r:?}"
+        );
+    }
+
+    /// A test file git shows no lines of cannot be read for what it weakens.
+    #[test]
+    fn a_binary_test_file_is_not_readable() {
+        let diff = "diff --git a/tests/a.rs b/tests/a.rs\nindex 1111111..2222222 100644\n\
+                    Binary files a/tests/a.rs and b/tests/a.rs differ\n";
+        let r = rows(diff);
+        assert!(
+            r.iter()
+                .any(|w| w.path == "tests/a.rs" && w.matched == "not readable"),
+            "{r:?}"
+        );
+    }
+}
+
+/// Every hunk of a review in one list, with its file.
+fn hunks(review: &Value) -> Vec<(String, Value)> {
+    review["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|g| g["files"].as_array().unwrap().iter())
+        .flat_map(|f| {
+            f["hunks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| (f["path"].as_str().unwrap().to_string(), h.clone()))
+        })
+        .collect()
+}
+
+/// One *seen*, in the host: a hunk marked with `s` is seen on every read of
+/// the review (the window's, the CLI's, the inbox row's count), and a hunk
+/// the agent rewrites is unread again — its mark was on its content.
+#[tokio::test]
+async fn a_hunk_marked_seen_is_seen_everywhere_until_it_is_rewritten() {
+    let repo = sandbox::review_repo("seen");
+    let (addr, c, _host) = boot().await;
+    trust(&c, &addr, &repo).await;
+    let adopted = post(
+        &c,
+        &addr,
+        "/api/changes/adopt",
+        serde_json::json!({ "branch": "feat/review", "project": repo.to_string_lossy() }),
+    )
+    .await;
+    let id = adopted["change_id"].as_str().unwrap().to_string();
+    let wt = PathBuf::from(adopted["change"]["worktree"].as_str().unwrap());
+
+    let r = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
+    let all = hunks(&r);
+    assert!(all.iter().all(|(_, h)| h["seen"] == false), "{r}");
+    assert!(
+        all.iter()
+            .all(|(_, h)| h["digest"].as_str().is_some_and(|d| d.len() == 16)),
+        "every hunk carries its content digest: {r}"
+    );
+    let (_, rules) = all
+        .iter()
+        .find(|(p, _)| p == "src/core/rules.rs")
+        .cloned()
+        .unwrap();
+    let digest = rules["digest"].as_str().unwrap().to_string();
+
+    // A digest that is not there is refused, and marks nothing.
+    let stale = post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/review/seen"),
+        serde_json::json!({ "path": "src/core/rules.rs", "digest": "0000000000000000" }),
+    )
+    .await;
+    assert!(
+        stale["error"].as_str().unwrap().contains("changed"),
+        "{stale}"
+    );
+    assert_eq!(stale["digests"], serde_json::json!([digest]), "{stale}");
+
+    let marked = post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/review/seen"),
+        serde_json::json!({ "path": "src/core/rules.rs", "digest": digest }),
+    )
+    .await;
+    assert_eq!(marked["seen"][0]["digest"], digest.as_str(), "{marked}");
+    let unread = |r: &Value| hunks(r).iter().filter(|(_, h)| h["seen"] == false).count();
+    let r = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
+    let before = unread(&r);
+    assert_eq!(before, all.len() - 1, "{r}");
+    assert_eq!(file(&r, "src/core/rules.rs")["hunks"][0]["seen"], true);
+    // A second read — another window, the CLI — reads the same marks.
+    let again = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
+    assert_eq!(unread(&again), before);
+
+    // The agent rewrites the hunk: a new digest, unread, and the file says
+    // it changed since it was seen.
+    std::fs::write(
+        wt.join("src/core/rules.rs"),
+        "pub fn allowed(n: u32) -> bool {\n    n < 7\n}\n",
+    )
+    .unwrap();
+    let r = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
+    let rules = file(&r, "src/core/rules.rs");
+    assert_ne!(rules["hunks"][0]["digest"], digest.as_str(), "{rules}");
+    assert_eq!(rules["hunks"][0]["seen"], false, "{rules}");
+    assert_eq!(rules["changed_since_seen"], true, "{rules}");
+    assert_eq!(unread(&r), all.len(), "{r}");
+
+    // Marking a path marks every hunk there, as `--seen <path>` does.
+    let path = post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/review/seen"),
+        serde_json::json!({ "path": "src/core/rules.rs" }),
+    )
+    .await;
+    assert_eq!(path["seen"].as_array().unwrap().len(), 1, "{path}");
+    // The offer's list of files nobody opened now leaves it out, by name.
+    let r = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
+    let not: Vec<&str> = r["not_opened"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    assert!(!not.contains(&"src/core/rules.rs"), "{not:?}");
+    assert_eq!(not.len(), reading_order(&r).len() - 1, "{not:?}");
+    let says = r["not_opened_says"].as_str().unwrap();
+    assert!(
+        says.starts_with(&format!("{} files not opened: ", not.len())),
+        "{says}"
+    );
+    let fraction = says
+        .as_bytes()
+        .windows(3)
+        .any(|w| w[0].is_ascii_digit() && w[1] == b'/' && w[2].is_ascii_digit());
+    assert!(
+        !says.contains(" of ") && !fraction && !says.contains('%'),
+        "never a share of the change: {says}"
+    );
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+/// Comments are kept by the host on the line they were written on, survive
+/// a reload, say when their line changed, and go to the agent together as
+/// one prompt of structured blocks; after the agent's next turn each sent
+/// comment says whether its hunk changed.
+#[tokio::test]
+async fn comments_are_kept_and_sent_as_one_turn() {
+    let Some(agent) = echo_agent() else { return };
+    let repo = sandbox::review_repo("comments");
+    let (addr, c, _host) = boot().await;
+    trust(&c, &addr, &repo).await;
+    let v = post(
+        &c,
+        &addr,
+        "/api/changes",
+        serde_json::json!({
+            "cwd": repo.to_string_lossy(),
+            "title": "open sessions",
+            "prompt": "write-file src/session_open.rs",
+            "agent": agent,
+        }),
+    )
+    .await;
+    assert!(v.get("error").is_none(), "{v}");
+    let id = v["change_id"].as_str().unwrap().to_string();
+    let w = settled(&c, &addr, &id).await;
+    let worktree = PathBuf::from(w["worktree"].as_str().unwrap());
+    std::fs::write(
+        worktree.join("src/by_hand.rs"),
+        "pub fn one() {}\npub fn two() {}\n",
+    )
+    .unwrap();
+
+    // A line the diff does not show is refused; nothing is kept.
+    let off = post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/comments"),
+        serde_json::json!({ "path": "src/by_hand.rs", "line": 40, "body": "?" }),
+    )
+    .await;
+    assert!(
+        off["error"].as_str().unwrap().contains("does not show"),
+        "{off}"
+    );
+
+    let mut ids = Vec::new();
+    for (path, line, body) in [
+        ("src/by_hand.rs", 2, "why two?"),
+        ("src/by_hand.rs", 1, "name this"),
+        ("src/session_open.rs", 1, "and this"),
+    ] {
+        let made = post(
+            &c,
+            &addr,
+            &format!("/api/changes/{id}/comments"),
+            serde_json::json!({ "path": path, "line": line, "body": body }),
+        )
+        .await;
+        let row = &made["comment"];
+        assert!(row["sent_at"].is_null(), "{made}");
+        assert_eq!(row["hunk_digest"].as_str().unwrap().len(), 16, "{made}");
+        ids.push(row["id"].as_str().unwrap().to_string());
+    }
+    // Kept by the host: a reload (a fresh read) has every one, unsent.
+    let listed = get(&c, &addr, &format!("/api/changes/{id}/comments")).await;
+    assert_eq!(listed["unsent"], 3, "{listed}");
+    let r = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
+    assert_eq!(r["comments"].as_array().unwrap().len(), 3, "{r}");
+    assert!(
+        r["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["anchor"]["is"] == "same"),
+        "{r}"
+    );
+
+    let sent = post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/comments/send"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(sent["sent"], 3, "{sent}");
+    assert!(
+        ["reading", "queued", "resumed"].contains(&sent["delivered"].as_str().unwrap()),
+        "{sent}"
+    );
+    let run = sent["run"].as_str().unwrap().to_string();
+
+    // One prompt, in the review's order, each comment a block tied to what
+    // it was written against.
+    let heard = until(
+        "the agent hears the comments",
+        std::time::Duration::from_secs(30),
+        || {
+            let p = worktree.join(".devplane/heard.log");
+            async move {
+                std::fs::read_to_string(&p)
+                    .ok()
+                    .filter(|t| t.contains("## Review comments"))
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        heard.matches("## Review comments (3)").count(),
+        1,
+        "{heard}"
+    );
+    let one = heard.find("**src/by_hand.rs** (line 1)").unwrap();
+    let two = heard.find("**src/by_hand.rs** (line 2)").unwrap();
+    assert!(one < two, "{heard}");
+    assert!(heard.contains("written against tree `"), "{heard}");
+    assert!(heard.contains("> why two?"), "{heard}");
+
+    // Sent: each comment carries the run, and a second send has nothing.
+    let listed = get(&c, &addr, &format!("/api/changes/{id}/comments")).await;
+    assert_eq!(listed["unsent"], 0, "{listed}");
+    assert!(
+        listed["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["run_id"] == run.as_str() && c["sent_at"].is_string()),
+        "{listed}"
+    );
+    let none = post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/comments/send"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(none["says"], "nothing to send", "{none}");
+    let gone = c
+        .delete(format!(
+            "http://{addr}/api/changes/{id}/comments/{}",
+            ids[0]
+        ))
+        .bearer_auth("tok")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gone.status(), 409, "a sent comment stays");
+
+    // The person edits a commented line: the comment says so, and once the
+    // agent's turn has ended, which commented hunks changed.
+    std::fs::write(
+        worktree.join("src/by_hand.rs"),
+        "pub fn one() {}\npub fn three() {}\n",
+    )
+    .unwrap();
+    let r = until(
+        "the agent's turn ends",
+        std::time::Duration::from_secs(30),
+        || {
+            let (c, addr, id) = (c.clone(), addr, id.clone());
+            async move {
+                let r = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
+                r["comments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|c| !c["hunk_changed"].is_null())
+                    .then_some(r)
+            }
+        },
+    )
+    .await;
+    let by_line = |line: u64| {
+        r["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["path"] == "src/by_hand.rs" && c["line"] == line)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(by_line(2)["anchor"]["is"], "changed", "{r}");
+    assert_eq!(by_line(2)["hunk_changed"], true, "{r}");
+    std::fs::remove_dir_all(&repo).ok();
 }

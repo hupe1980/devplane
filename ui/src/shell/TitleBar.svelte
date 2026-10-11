@@ -26,16 +26,20 @@
 </script>
 
 <header class="title">
-  <div class="brand">
+  <!-- Narrow, the crumbs give way from the left, each one whole: the row runs
+       right to left and wraps, and the wrapped line is out of sight. The place
+       you are in is the last to go, and ellipsizes rather than going. -->
+  <div class="brand" title={crumbs.join(" › ")}>
     <svg class="mark" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
       <rect x="2" y="2" width="20" height="20" rx="5" fill="var(--accent)" />
       <path d="M8 7h4.5a5 5 0 0 1 0 10H8z" fill="none" stroke="var(--chrome)" stroke-width="2.2" />
     </svg>
-    <b>Devplane</b>
-    {#each crumbs as c, i (i)}
-      <Icon name="right" size={12} />
-      <span class="crumb" class:last={i === crumbs.length - 1}>{c}</span>
-    {/each}
+    <b class="name">Devplane</b>
+    <span class="crumbs">
+      {#each crumbs as c, i (i)}
+        <span class="crumb" class:last={i === crumbs.length - 1} style:order={crumbs.length - 1 - i}><Icon name="right" size={12} /><span class="word">{c}</span></span>
+      {/each}
+    </span>
   </div>
 
   <button class="find" onclick={find} aria-label="find anything — changes, sessions, commands">
@@ -45,8 +49,8 @@
   </button>
 
   <div class="acts">
-    <button class="primary" onclick={create} title="Start a new change ({spell('Alt+n')})">
-      <Icon name="plus" size={14} /> New change
+    <button class="primary" onclick={create} title="Start a new change ({spell('Alt+n')})" aria-label="New change">
+      <Icon name="plus" size={14} /> <span class="label">New change</span>
     </button>
     <button class="icon" class:on={sideOpen} onclick={toggleSide} title="Sidebar ({spell('Mod+b')})" aria-label="toggle the sidebar" aria-pressed={sideOpen}>
       <Icon name="sidebar" size={16} />
@@ -59,6 +63,7 @@
 
 <style>
   .title {
+    container-type: inline-size;
     display: grid;
     grid-template-columns: 1fr minmax(16rem, 34rem) 1fr;
     align-items: center;
@@ -87,12 +92,48 @@
   .mark {
     flex: none;
   }
-  .crumb {
+  .crumbs {
+    display: flex;
+    flex-direction: row-reverse;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    align-content: flex-start;
+    align-items: center;
+    min-width: 0;
+    height: 1.4rem;
     overflow: hidden;
-    text-overflow: ellipsis;
+  }
+  .crumb {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    height: 1.4rem;
+    padding-left: 0.45rem;
+    flex: none;
   }
   .crumb.last {
     color: var(--ink);
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .word {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  @container (max-width: 1000px) {
+    .primary .label {
+      display: none;
+    }
+    .primary {
+      padding: 0 0.45rem;
+    }
+  }
+  @container (max-width: 1000px) {
+    .name {
+      display: none;
+    }
   }
   .find {
     display: flex;

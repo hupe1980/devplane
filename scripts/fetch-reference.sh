@@ -57,6 +57,11 @@ fetch https://code.claude.com/docs/en/whats-new/index.md concepts/reference/clau
 for w in 37 36 35 34 33 32 31 30 29 28 27 26; do
   fetch "https://code.claude.com/docs/en/whats-new/2026-w$w.md" "concepts/reference/claude-code/whats-new-2026-w$w.md"
 done
+# Claude Mods (2.1.287): an in-process `tool.call` hook can deny before the permission
+# check, a decider the OTel `source` list does not name.
+for p in events api create; do
+  fetch "https://code.claude.com/docs/en/plugins/mods/$p.md" "concepts/reference/claude-code/mods-$p.md"
+done
 # The digests are selective; the CHANGELOG is the complete list.
 fetch https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md concepts/reference/claude-code/CHANGELOG.md
 # Claude Agent SDK docs

@@ -63,11 +63,20 @@ fn a_group_leading_process_is_found_and_a_mismatched_one_is_not() {
     };
     let pid = child.id();
 
-    // A moment for the process table to show it.
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    // Computed before the probe is killed, so a failure cannot leave it behind.
-    let snap = procs::snapshot();
+    // Until the process table shows it. Computed before the probe is killed,
+    // so a failure cannot leave it behind.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let snap = loop {
+        let snap = procs::snapshot();
+        if snap
+            .iter()
+            .any(|p| p.pid == pid && p.command.contains(&marker))
+            || std::time::Instant::now() > deadline
+        {
+            break snap;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
     let outcome = (|| {
         let p = snap
             .iter()

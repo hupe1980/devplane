@@ -133,6 +133,7 @@ fn u(a: &Attrs, k: &str) -> u64 {
 pub fn parse_logs(body: &[u8]) -> Result<Vec<OtelRecord>, serde_json::Error> {
     let payload: LogsPayload = serde_json::from_slice(body)?;
     let mut out = Vec::new();
+    let mut order: Vec<Option<u64>> = Vec::new();
 
     for rl in payload.resource_logs {
         let resource = rl
@@ -148,8 +149,10 @@ pub fn parse_logs(body: &[u8]) -> Result<Vec<OtelRecord>, serde_json::Error> {
                     .unwrap_or_default();
                 let attrs = collect(rec.attributes);
                 // The event name is in the body on some versions and an
-                // `event.name` attribute on others; read both.
-                let name = s(&attrs, "event.name").unwrap_or(name);
+                // `event.name` attribute on others; read both. The attribute
+                // is documented without the prefix (`"tool_decision"` for
+                // `claude_code.tool_decision`), so the two are one name.
+                let name = event_name(&name, s(&attrs, "event.name").as_deref());
 
                 let session_id =
                     match s(&attrs, "session.id").or_else(|| s(&resource, "session.id")) {
@@ -166,6 +169,7 @@ pub fn parse_logs(body: &[u8]) -> Result<Vec<OtelRecord>, serde_json::Error> {
                 let Some(event) = log_to_event(&name, &attrs) else {
                     continue;
                 };
+                order.push(sequence(&attrs));
                 out.push(OtelRecord {
                     session_id,
                     entrypoint,
@@ -175,7 +179,55 @@ pub fn parse_logs(body: &[u8]) -> Result<Vec<OtelRecord>, serde_json::Error> {
             }
         }
     }
-    Ok(out)
+    Ok(in_vendor_order(out, order))
+}
+
+/// Puts each session's records in the vendor's own order (`event.sequence`),
+/// so a mode change and the decision after it are applied the way they
+/// happened, whatever order the exporter wrote them in. A record without a
+/// sequence sorts with the one before it; sessions keep their first place.
+fn in_vendor_order(records: Vec<OtelRecord>, order: Vec<Option<u64>>) -> Vec<OtelRecord> {
+    let mut first: BTreeMap<String, usize> = BTreeMap::new();
+    let mut last: BTreeMap<String, u64> = BTreeMap::new();
+    let mut keyed: Vec<((usize, u64, usize), OtelRecord)> = Vec::with_capacity(records.len());
+    for (i, (r, seq)) in records.into_iter().zip(order).enumerate() {
+        let rank = *first.entry(r.session_id.clone()).or_insert(i);
+        let seq = match seq {
+            Some(n) => {
+                last.insert(r.session_id.clone(), n);
+                n
+            }
+            None => last.get(&r.session_id).copied().unwrap_or(0),
+        };
+        keyed.push(((rank, seq, i), r));
+    }
+    keyed.sort_by_key(|(k, _)| *k);
+    keyed.into_iter().map(|(_, r)| r).collect()
+}
+
+/// The vendor name a Claude Code report is recorded under.
+pub const CLAUDE_CODE: &str = "claude-code";
+
+/// One event name from the body and the `event.name` attribute: the
+/// prefixed form wins, and the documented bare attribute gets the prefix.
+fn event_name(body: &str, attr: Option<&str>) -> String {
+    const PREFIX: &str = "claude_code.";
+    match attr.filter(|a| !a.is_empty()) {
+        Some(a) if a.starts_with(PREFIX) => a.to_string(),
+        _ if body.starts_with(PREFIX) => body.to_string(),
+        Some(a) => format!("{PREFIX}{a}"),
+        None => body.to_string(),
+    }
+}
+
+/// `event.timestamp`: when the vendor says it happened (ISO 8601).
+fn timestamp(a: &Attrs) -> Option<jiff::Timestamp> {
+    s(a, "event.timestamp").and_then(|t| t.parse().ok())
+}
+
+/// `event.sequence`: the vendor's per-process order.
+fn sequence(a: &Attrs) -> Option<u64> {
+    a.get("event.sequence").and_then(|v| v.as_u64())
 }
 
 fn log_to_event(name: &str, a: &Attrs) -> Option<Event> {
@@ -200,32 +252,35 @@ fn log_to_event(name: &str, a: &Attrs) -> Option<Event> {
                 .and_then(|v| v.as_f64())
                 .map(|f| f as i64),
         }),
-        "claude_code.tool_decision" => {
-            // A closed set: who decided is a fact only when the vendor names a
-            // decider this build knows. `hook` is Devplane's own gate (or
-            // another hook), which already recorded the verdict with its rule;
-            // a copy here would count it twice and lose the rule's name.
-            let by = match s(a, "source")?.as_str() {
-                "config" => "Claude Code's permission settings",
-                "user_permanent" | "user_temporary" | "user_reject" | "user_abort" => "person",
-                _ => return None,
-            };
-            Some(Event::PermissionDecided {
-                tool: s(a, "tool_name").unwrap_or_default(),
-                decision: s(a, "decision").unwrap_or_default(),
-                by: by.into(),
-                reason: None,
-                context: None,
-                // The only thing that lets a batched, late decision clear the
-                // block it is about and no other.
-                call_id: s(a, "tool_use_id"),
-            })
-        }
+        // Every report is kept, whatever its `source`: who decided is worked
+        // out where it is recorded (`core::decision::attribute`), from the
+        // vendor's word verbatim, the mode in force and the session's kind —
+        // never here, and never by filling in a word the vendor did not send.
+        "claude_code.tool_decision" => Some(Event::VendorDecided {
+            vendor: CLAUDE_CODE.into(),
+            tool: s(a, "tool_name").unwrap_or_default(),
+            decision: s(a, "decision").unwrap_or_default(),
+            source: s(a, "source").filter(|v| !v.is_empty()),
+            // Matches the `tool_use_id` passed to hooks.
+            call_id: s(a, "tool_use_id").filter(|v| !v.is_empty()),
+            sequence: sequence(a),
+            at: timestamp(a),
+            mode_in_force: None,
+            session: crate::core::decision::SessionKind::NotKnown,
+            matched: None,
+        }),
         // The mode changing (`Shift+Tab`, leaving plan mode, an auto-mode
-        // gate), which no hook announces; a repeated mode is a no-op.
-        "claude_code.permission_mode_changed" => s(a, "to_mode")
-            .filter(|m| !m.is_empty())
-            .map(|mode| Event::PermissionModeSeen { mode }),
+        // gate), which no hook announces; a repeated mode is a no-op. When it
+        // changed is the vendor's own time, not this batch's arrival.
+        "claude_code.permission_mode_changed" => {
+            s(a, "to_mode")
+                .filter(|m| !m.is_empty())
+                .map(|mode| Event::PermissionModeSeen {
+                    mode,
+                    at: timestamp(a),
+                    sequence: sequence(a),
+                })
+        }
         // Everything else the hook channel already reports, sooner — including
         // `tool_result`, which would double-count failures. One channel per
         // fact.
@@ -388,21 +443,108 @@ mod tests {
         super::parse_logs(body.to_string().as_bytes()).expect("parses")
     }
 
-    /// Who decided is a closed set: a hook's verdict is already on the
-    /// ledger, and an unnamed or unknown decider is no decider at all.
+    /// Every report is kept, with the vendor's word verbatim or its absence:
+    /// none is dropped, none is given a decider here, none reads `unknown`.
     #[test]
-    fn a_tool_decision_names_only_a_known_decider() {
-        assert!(decision(Some("hook")).is_empty(), "the gate recorded it");
-        assert!(decision(None).is_empty(), "never an invented decider");
-        assert!(decision(Some("something_new")).is_empty());
-        let person = decision(Some("user_reject"));
-        match &person[0].event {
-            crate::core::event::Event::PermissionDecided { by, call_id, .. } => {
-                assert_eq!(by, "person");
-                assert_eq!(call_id.as_deref(), Some("toolu_9"));
+    fn every_tool_decision_is_kept_with_the_vendors_word() {
+        for source in [
+            Some("hook"),
+            None,
+            Some("something_new"),
+            Some("user_reject"),
+            Some("config"),
+        ] {
+            let recs = decision(source);
+            assert_eq!(recs.len(), 1, "{source:?}");
+            match &recs[0].event {
+                Event::VendorDecided {
+                    vendor,
+                    tool,
+                    decision,
+                    source: got,
+                    call_id,
+                    mode_in_force,
+                    matched,
+                    ..
+                } => {
+                    assert_eq!(vendor, "claude-code");
+                    assert_eq!(tool, "Bash");
+                    assert_eq!(decision, "reject");
+                    assert_eq!(got.as_deref(), source);
+                    assert_eq!(call_id.as_deref(), Some("toolu_9"));
+                    // Filled where it is recorded, never guessed here.
+                    assert_eq!(*mode_in_force, None);
+                    assert_eq!(*matched, None);
+                }
+                e => panic!("{e:?}"),
+            }
+            assert!(!format!("{:?}", recs[0].event).contains("unknown"));
+        }
+    }
+
+    /// The page documents `event.name` as the bare name; the body, where
+    /// sent, carries the prefixed one. Either way it is one event.
+    #[test]
+    fn the_documented_bare_event_name_is_read_as_the_prefixed_one() {
+        assert_eq!(
+            event_name("", Some("tool_decision")),
+            "claude_code.tool_decision"
+        );
+        assert_eq!(
+            event_name("claude_code.tool_decision", Some("tool_decision")),
+            "claude_code.tool_decision"
+        );
+        assert_eq!(
+            event_name("x", Some("claude_code.api_error")),
+            "claude_code.api_error"
+        );
+        assert_eq!(
+            event_name("claude_code.api_request", None),
+            "claude_code.api_request"
+        );
+    }
+
+    /// A batch is applied in the vendor's own order: a decision written
+    /// before the mode change that preceded it is moved after it.
+    #[test]
+    fn a_batch_is_put_in_the_vendors_order_within_a_session() {
+        let rec = |name: &str, seq: &str, extra: Vec<serde_json::Value>| {
+            let mut attrs = vec![
+                json!({"key": "event.name", "value": {"stringValue": name}}),
+                json!({"key": "session.id", "value": {"stringValue": "s1"}}),
+                json!({"key": "event.sequence", "value": {"intValue": seq}}),
+                json!({"key": "event.timestamp", "value": {"stringValue": "2026-10-03T10:00:00.000Z"}}),
+            ];
+            attrs.extend(extra);
+            json!({"attributes": attrs})
+        };
+        let body = json!({"resourceLogs": [{"scopeLogs": [{"logRecords": [
+            rec("claude_code.tool_decision", "7", vec![
+                json!({"key": "source", "value": {"stringValue": "config"}}),
+            ]),
+            rec("claude_code.permission_mode_changed", "6", vec![
+                json!({"key": "to_mode", "value": {"stringValue": "auto"}}),
+            ]),
+        ]}]}]});
+        let recs = parse_logs(&serde_json::to_vec(&body).unwrap()).unwrap();
+        match &recs[0].event {
+            Event::PermissionModeSeen { mode, at, sequence } => {
+                assert_eq!(mode, "auto");
+                assert_eq!(*sequence, Some(6));
+                assert_eq!(
+                    *at,
+                    Some("2026-10-03T10:00:00Z".parse::<jiff::Timestamp>().unwrap())
+                );
             }
             e => panic!("{e:?}"),
         }
+        assert!(matches!(
+            &recs[1].event,
+            Event::VendorDecided {
+                sequence: Some(7),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -580,7 +722,7 @@ mod tests {
         }]}]}]});
         let recs = parse_logs(&serde_json::to_vec(&body).unwrap()).unwrap();
         assert!(
-            matches!(&recs[0].event, Event::PermissionModeSeen { mode } if mode == "auto"),
+            matches!(&recs[0].event, Event::PermissionModeSeen { mode, .. } if mode == "auto"),
             "{:?}",
             recs
         );

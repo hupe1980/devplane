@@ -1,9 +1,11 @@
 <script lang="ts">
   // What a region says when it has nothing to show: one sentence of fact, at
   // most one next step. `limit` — what this view cannot see — renders apart,
-  // so *nothing here* and *nothing visible here* never look alike.
+  // so *nothing here* and *nothing visible here* never look alike. The words
+  // are often the host's, so they go through the one markdown renderer.
   import type { Snippet } from "svelte";
   import Icon from "./Icon.svelte";
+  import Inline from "./Inline.svelte";
 
   let {
     icon = "dot",
@@ -16,9 +18,9 @@
 
 <div class="empty">
   <span class="glyph"><Icon name={icon} size={22} /></span>
-  <p class="title">{title}</p>
-  {#if body}<p class="body">{body}</p>{/if}
-  {#if limit}<p class="limit"><Icon name="eye" size={13} /> {limit}</p>{/if}
+  <p class="title"><Inline text={title} /></p>
+  {#if body}<p class="body"><Inline text={body} /></p>{/if}
+  {#if limit}<p class="limit"><Icon name="eye" size={13} /> <Inline text={limit} /></p>{/if}
   {#if action}<div class="action">{@render action()}</div>{/if}
 </div>
 

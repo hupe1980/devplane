@@ -1,52 +1,39 @@
 // The interface in a real browser, over the recorded fixtures: the bugs a
 // server render cannot see (a poll that resets a tab, a reply that carries to
 // the next item, Enter on a focused button, a ⌥ chord on a Mac, a failure
-// drawn as calm, a long write cut off). Playwright is not a dependency of this
-// package; this runs where it is installed and says so where it is not.
+// drawn as calm, a long write cut off, a palette that opens without focus).
+// Playwright is not a dependency of this package; this runs where it is
+// installed and says so where it is not.
 //
 //   PLAYWRIGHT=/path/to/node_modules/playwright-core node tests/browser.mjs
 //
-// `CHROME` names a browser binary (default: the system Chrome on macOS, else
-// Playwright's own). It starts `vite` with `DEVPLANE_FIXTURES=1` on a free
-// port, or uses `BASE` (e.g. http://localhost:5290/) if one is running.
-// `npm run render` stays the CI check; this is the one a person runs.
+// Start-up is the bars' (`tests/bars/driver.mjs`): `CHROME` names a browser
+// binary, and `BASE` a running `npm run dev:fixtures`; otherwise Vite is
+// started with `DEVPLANE_FIXTURES=1` on a free port. `npm run render` is the
+// check every build runs; this one runs beside the bars.
 
-import { existsSync } from "node:fs";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { resolve } from "node:path";
+import { HarnessError, SUBJECT, recorded as find, sleep, start } from "./bars/driver.mjs";
 
-const here = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
-const where = process.env.PLAYWRIGHT;
-if (!where) {
-  console.log("browser: skipped — set PLAYWRIGHT to a playwright-core install to run it");
-  process.exit(0);
-}
-/** @type {any} */
-let pw;
+/** @type {import("./bars/driver.mjs").Driver} */
+let driver;
 try {
-  pw = await import(existsSync(where) ? pathToFileURL(resolve(where, existsSync(resolve(where, "index.mjs")) ? "index.mjs" : "index.js")).href : where);
+  driver = await start();
 } catch (e) {
-  console.log(`browser: skipped — ${where} could not be loaded (${e instanceof Error ? e.message : String(e)})`);
+  if (!(e instanceof HarnessError)) throw e;
+  console.log(`browser: skipped — ${e.message}`);
   process.exit(0);
 }
-const chromium = pw.chromium ?? pw.default?.chromium;
-
-/** @type {{ close(): Promise<void> } | null} */
-let server = null;
-let BASE = process.env.BASE ?? "";
-if (!BASE) {
-  process.env.DEVPLANE_FIXTURES = "1";
-  const { createServer } = await import("vite");
-  const s = await createServer({ root: here, configFile: resolve(here, "vite.config.ts"), logLevel: "error", server: { port: 0, host: "127.0.0.1" } });
-  await s.listen();
-  server = s;
-  BASE = s.resolvedUrls?.local[0] ?? "";
+const BASE = driver.base;
+// The recorded change, found by its title: the file names carry ids that
+// change on every capture.
+const recorded = find("change", SUBJECT);
+if (!recorded) {
+  console.error(`browser: no recorded change titled "${SUBJECT}" — run scripts/capture-fixtures.sh`);
+  await driver.close();
+  process.exit(1);
 }
-const mac = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const executablePath = process.env.CHROME ?? (existsSync(mac) ? mac : undefined);
-const browser = await chromium.launch({ executablePath, headless: true });
-const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
-const CHANGE = "c-01a0dbe60c9b76e6936cf1fc4701a22f";
+/** @type {string} */
+const CHANGE = recorded.id;
 
 let failures = 0;
 /** @param {string} name @param {boolean} ok @param {string} [detail] */
@@ -55,8 +42,7 @@ function check(name, ok, detail = "") {
   if (!ok) failures += 1;
 }
 async function page() {
-  const c = await browser.newContext({ viewport: { width: 1280, height: 800 } });
-  const p = await c.newPage();
+  const p = await driver.page();
   p.on("pageerror", (/** @type {Error} */ e) => check(`no page error`, false, e.message));
   return p;
 }
@@ -64,20 +50,25 @@ const selectedTab = async (/** @type {any} */ p) =>
   ((await p.locator(".doc [role=tab][aria-selected=true]").allTextContents()).join("")).replace(/\s+/g, " ").trim();
 
 try {
-  // 1. The change page keeps its tab and its result through the poll.
+  // 1. Offer is held while a weakened row is unread; the page keeps its tab
+  //    and its result through the poll.
   {
     const p = await page();
+    await p.route(`**/api/changes/${CHANGE}/verify`, (/** @type {any} */ r) => r.fulfill({ json: { passed: true, summary: "check passed" } }));
     await p.goto(`${BASE}#change/${CHANGE}`);
     await p.locator(".doc").waitFor();
-    await p.getByRole("button", { name: /Offer as pull request/ }).click();
-    await sleep(500);
-    check("an offer's refusal is shown", (await p.locator(".refusal").count()) === 1);
+    const offer = p.getByRole("button", { name: /Offer as pull request/ });
+    check("Offer is held while a weakened row is unread", recorded.qualifier?.unseen > 0 && (await offer.isDisabled()));
+    const why = (await p.locator(".doc [role=toolbar]").innerText()).replace(/\s+/g, " ");
+    check("…and says why beside it", /Read the weakened checks? first/.test(why), why);
+    await p.getByRole("button", { name: /Run gates/ }).click();
+    await sleep(800);
     let reads = 0;
     p.on("request", (/** @type {any} */ r) => {
       if (new URL(r.url()).pathname === `/api/changes/${CHANGE}`) reads += 1;
     });
     await sleep(5000);
-    check("the refusal is still shown after 5 s", (await p.locator(".refusal").count()) === 1);
+    check("a result is still shown after 5 s", /The gates exited zero/.test(await p.locator(".said").first().innerText()));
     check("the change is not re-read while nothing moved", reads === 0, `${reads} reads in 5 s`);
     await p.locator(".doc [role=tab]", { hasText: "Gates" }).click();
     await sleep(5000);
@@ -145,7 +136,7 @@ try {
     p.on("request", (/** @type {any} */ r) => {
       if (r.url().includes("/api/board")) boards += 1;
     });
-    for (const h of ["#change", "#board", "#plan", "#inbox", "#setup", "#change", "#board", "#inbox", "#reports", "#board"]) {
+    for (const h of ["#change", "#board", "#plan", "#inbox", "#setup", "#change", "#board", "#inbox", "#plan", "#board"]) {
       await p.evaluate((/** @type {string} */ h) => (location.hash = h), h);
       await sleep(300);
     }
@@ -204,6 +195,10 @@ try {
     await p.route(`**/api/changes/${CHANGE}/offer`, (/** @type {any} */ r) =>
       r.fulfill({ json: { offer: "commands", push: "git push -u origin change/x", create: "gh pr create --head change/x" } }),
     );
+    // Every weakened row read, so Offer is live.
+    await p.route(`**/api/changes/${CHANGE}`, (/** @type {any} */ r) =>
+      r.fulfill({ json: { ...recorded, qualifier: { ...recorded.qualifier, unseen: 0 } } }),
+    );
     await p.goto(`${BASE}#change/${CHANGE}`);
     await p.locator(".doc").waitFor();
     await p.locator(".doc [role=tab]", { hasText: "Agent" }).click();
@@ -218,17 +213,112 @@ try {
     const after = await p.locator(".said").first().innerText();
     check("the finished run says what it came to", /The gates failed: check failed/.test(after) && !/running/.test(after), after);
     await p.getByRole("button", { name: /Offer as pull request/ }).click();
-    await sleep(500);
-    const offered = await p.locator(".head").innerText();
-    check("an offer that handed back commands shows them", offered.includes("git push -u origin change/x") && offered.includes("gh pr create"));
+    // Wait for the answer rather than a fixed pause: a loaded machine is slower.
+    await p.getByText("git push -u origin change/x").first().waitFor({ timeout: 5000 }).catch(() => {});
+    const offered = await p.locator(".doc").innerText();
+    check("an offer that handed back commands shows them", offered.includes("git push -u origin change/x") && offered.includes("gh pr create"), offered.slice(0, 400).replace(/\s+/g, " "));
     check("…and does not say it was offered", !/offer made/.test(offered));
+    await p.context().close();
+  }
+
+  // 7. The list keys on a fresh load; the view in the address; the header's height.
+  {
+    const p = await page();
+    await p.goto(`${BASE}#change`);
+    await p.locator(".side [id^=change-row]").first().waitFor();
+    await p.keyboard.press("j");
+    await sleep(300);
+    check("j on a fresh Changes opens the first change", /^#change\/c-/.test(await p.evaluate(() => location.hash)), await p.evaluate(() => location.hash));
+    await p.goto(`${BASE}#change/${CHANGE}`);
+    await p.locator(".doc").waitFor();
+    await p.evaluate(() => /** @type {HTMLElement | null} */ (document.activeElement)?.blur());
+    await p.evaluate(() => dispatchEvent(new KeyboardEvent("keydown", { key: "£", code: "Digit3", altKey: true, bubbles: true })));
+    await sleep(300);
+    check("⌥3 shows the review and the address says so", (await p.evaluate(() => location.hash)).startsWith(`#change/${CHANGE}/review`), await p.evaluate(() => location.hash));
+    await p.reload();
+    await p.locator(".doc").waitFor();
+    check("a reload returns to the view", (await selectedTab(p)).startsWith("Review"), await selectedTab(p));
+    const head = await p.locator(".doc .head").boundingBox();
+    check("the change header stays under 120 px", !!head && head.height <= 120, `${head?.height}px`);
+    // Code above the fold: the first diff line starts above 300 px.
+    await p.locator(".doc .hunk table tr").first().waitFor();
+    const first = await p.locator(".doc .hunk table tr").first().boundingBox();
+    check("at 1280×800 the first diff line starts above 300 px", !!first && first.y < 300, `${first?.y}px`);
+    // Each count once: the unread hunks on the Review tab, and nowhere else.
+    const texts = (await p.locator(".doc").innerText()).replace(/\s+/g, " ");
+    const words = /(\d+ hunks? unread)/.exec(texts)?.[1] ?? "";
+    check("the unread count is said once", !!words && texts.split(words).length - 1 === 1, `${words} × ${texts.split(words).length - 1}`);
+    // The hunk is in the address, and a reload returns to it.
+    await p.evaluate(() => /** @type {HTMLElement | null} */ (document.activeElement)?.blur());
+    await p.keyboard.press("j");
+    await sleep(700);
+    const at = await p.evaluate(() => location.hash);
+    check("moving to a hunk puts it in the address", /^#change\/[^/]+\/review%2F.+%40/.test(at), at);
+    const cursor = await p.locator(".doc .hunk.current").getAttribute("id");
+    await p.reload();
+    await p.locator(".doc .hunk.current").waitFor();
+    await sleep(500);
+    check("a reload returns to the same hunk", (await p.locator(".doc .hunk.current").getAttribute("id")) === cursor, `${cursor}`);
+    for (const [where, rows] of [["#board", ".frame [role=row][data-key]"], ["#plan", ".side [data-spec]"], ["#why", ".frame [role=row][data-key]"]]) {
+      await p.goto(`${BASE}${where}`);
+      const first = p.locator(rows).first();
+      const has = await first.waitFor({ timeout: 4000 }).then(() => true, () => false);
+      if (!has) continue;
+      await p.keyboard.press("j");
+      await sleep(300);
+      const moved = where === "#plan" ? /^#plan\/./.test(await p.evaluate(() => location.hash)) : (await p.locator("[role=row][aria-selected=true]").count()) === 1;
+      check(`j on a fresh ${where} moves its cursor`, moved);
+    }
+    await p.setViewportSize({ width: 900, height: 700 });
+    await p.goto(`${BASE}#change/${CHANGE}/review`);
+    await p.locator(".doc .hunk table tr").first().waitFor();
+    const seen = await p.locator(".doc .hunk table tr").first().boundingBox();
+    check("at 900×700 a diff line is visible", !!seen && seen.y + seen.height <= 700, `${seen?.y}px`);
+    const cut = await p.evaluate(() => [...document.querySelectorAll(".doc .head h1, .doc .head button, .doc .head summary, .doc [role=tab]")]
+      .filter((e) => e.getBoundingClientRect().width > 0 && (e.scrollWidth > e.clientWidth + 1 || e.getBoundingClientRect().right > innerWidth))
+      .map((e) => e.textContent?.trim()));
+    check("at 900 px nothing in the header is clipped", cut.length === 0, cut.join(" | "));
+    await p.goto(`${BASE}#change/${CHANGE}`);
+    await p.locator(".doc").waitFor();
+    check("under 1100 px an open change folds the sidebar", (await p.locator(".side [role=option]").count()) === 0 || !(await p.locator(".side").isVisible()));
+    check("the title bar's New change is an icon at 900 px", !(await p.locator(".title .primary .label").isVisible()));
+    const clip = await p.evaluate(() => { const t = document.querySelector(".doc [role=tablist]"); return t ? t.scrollWidth > t.clientWidth && getComputedStyle(t).overflowX : "none"; });
+    check("the view tabs scroll rather than clip", clip === false || clip === "auto", String(clip));
+    await p.context().close();
+  }
+
+  // 8. ⌘K puts focus in the palette's field, from the page and from a field,
+  //    and lists each place once with its chord.
+  {
+    const p = await page();
+    for (const [from, focus] of [["#inbox", null], ["#search/x", "input[type=search]"]]) {
+      await p.goto(`${BASE}${from}`);
+      await sleep(600);
+      if (focus) await p.locator(focus).first().focus();
+      else await p.evaluate(() => /** @type {HTMLElement | null} */ (document.activeElement)?.blur());
+      await p.keyboard.press("Meta+k");
+      await p.locator(".palette input").waitFor();
+      await sleep(200);
+      const on = await p.evaluate(() => document.activeElement?.closest(".palette") ? document.activeElement.tagName : document.activeElement?.tagName ?? "none");
+      check(`⌘K from ${from}${focus ? "'s field" : ""} focuses the palette's field`, on === "INPUT", on);
+      await p.keyboard.type("rate");
+      await sleep(200);
+      check(`…and what is typed lands in it (${from})`, (await p.locator(".palette input").inputValue()) === "rate");
+      await p.keyboard.press("Escape");
+      await sleep(300);
+    }
+    await p.keyboard.press("Meta+k");
+    await p.locator(".palette [role=option]").first().waitFor();
+    const labels = (await p.locator(".palette [role=option] .label").allTextContents()).map((t) => t.trim().toLowerCase());
+    const twice = labels.filter((l, i) => labels.indexOf(l) !== i);
+    check("the palette lists each row once", twice.length === 0, twice.join(", "));
+    check("the sessions are one row, with their chord", labels.filter((l) => /^go to (the )?sessions$/.test(l)).length === 1);
     await p.context().close();
   }
 } catch (e) {
   check("the check ran to the end", false, e instanceof Error ? e.message.split("\n")[0] : String(e));
 } finally {
-  await browser.close();
-  await server?.close();
+  await driver.close();
 }
 
 if (failures) {

@@ -1,0 +1,6 @@
+runner go_test_verbose
+ran 6
+lines 7
+pass 6
+fail 0
+skip 1

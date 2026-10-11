@@ -10,70 +10,30 @@ use devplane::host::{AppState, Shared};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+use common::{boot, echo_agent, get, post, scratch_repo as configured_repo, trust};
+
 /// A repository whose gate fails until `fixed.txt` exists.
 fn scratch_repo(tag: &str, on_fail: &str, rounds: u32) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "vp-work-{tag}-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&dir)
-            .output()
-            .expect("git");
+    // `escalate`: a failure stops the change at once, which is no rounds.
+    let rounds = match on_fail {
+        "escalate" => 0,
+        _ => rounds,
     };
-    git(&["init", "-q", "-b", "main"]);
-    git(&["config", "user.email", "t@example.com"]);
-    git(&["config", "user.name", "Test"]);
-    std::fs::write(
-        dir.join("devplane.toml"),
-        format!(
+    common::scratch_repo_with(
+        tag,
+        &format!(
             r#"
 [gates]
 check = ["sh ./check.sh"]
 timeout = "30s"
-on_fail = "{on_fail}"
 max_feedback_rounds = {rounds}
 "#
         ),
+        &[(
+            "check.sh",
+            "#!/bin/sh\nif [ -f fixed.txt ]; then exit 0; fi\necho 'test auth::login ... FAILED'\nexit 1\n",
+        )],
     )
-    .unwrap();
-    std::fs::write(
-        dir.join("check.sh"),
-        "#!/bin/sh\nif [ -f fixed.txt ]; then exit 0; fi\necho 'test auth::login ... FAILED'\nexit 1\n",
-    )
-    .unwrap();
-    git(&["add", "-A"]);
-    git(&["commit", "-qm", "init"]);
-    // macOS temp dirs sit behind a symlink the host canonicalises.
-    dir.canonicalize().unwrap()
-}
-
-/// A repository with this `devplane.toml` committed.
-fn configured_repo(tag: &str, config: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "vp-pipe-{tag}-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&dir)
-            .output()
-            .expect("git");
-    };
-    git(&["init", "-q", "-b", "main"]);
-    git(&["config", "user.email", "t@example.com"]);
-    git(&["config", "user.name", "Test"]);
-    std::fs::write(dir.join("devplane.toml"), config).unwrap();
-    git(&["add", "-A"]);
-    git(&["commit", "-qm", "init"]);
-    dir.canonicalize().unwrap()
 }
 
 /// The counts fixture (15 task lines, 11 ticked, one passing gate), copied into its own repository.
@@ -111,77 +71,6 @@ fn counts_repo(tag: &str) -> PathBuf {
     git(&["add", "-A"]);
     git(&["commit", "-qm", "init"]);
     dir.canonicalize().unwrap()
-}
-
-fn echo_agent() -> Option<String> {
-    let exe = std::env::current_exe().ok()?;
-    let bin = exe.parent()?.parent()?.join("examples").join("echo_agent");
-    bin.exists().then(|| bin.to_string_lossy().to_string())
-}
-
-/// A host for one test that stops its agents on drop, so a panicking test
-/// cannot leave ACP sessions starving the shared async-io reactor.
-struct Host(Shared, #[allow(dead_code)] common::AgentSerial);
-impl std::ops::Deref for Host {
-    type Target = Shared;
-    fn deref(&self) -> &Shared {
-        &self.0
-    }
-}
-
-impl Drop for Host {
-    fn drop(&mut self) {
-        for _ in 0..100 {
-            if let Ok(mut map) = self.0.sessions.try_lock() {
-                for (_, session) in map.drain() {
-                    session.stop();
-                }
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    }
-}
-
-async fn boot() -> (std::net::SocketAddr, reqwest::Client, Host) {
-    let serial = common::one_agent_at_a_time();
-    let db = std::env::temp_dir().join(format!("vp-work-{}.db", uuid::Uuid::new_v4().simple()));
-    let state = AppState::new(
-        db.clone(),
-        "tok".into(),
-        Policy::default(),
-        db.parent().unwrap().to_path_buf(),
-    )
-    .await
-    .unwrap();
-    let app = devplane::api::router(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
-    (addr, reqwest::Client::new(), Host(state, serial))
-}
-
-async fn post(c: &reqwest::Client, addr: &std::net::SocketAddr, path: &str, body: Value) -> Value {
-    c.post(format!("http://{addr}{path}"))
-        .bearer_auth("tok")
-        .json(&body)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap()
-}
-
-async fn trust(c: &reqwest::Client, addr: &std::net::SocketAddr, repo: &Path) {
-    let res = post(
-        c,
-        addr,
-        "/api/projects/trust",
-        serde_json::json!({ "path": repo.to_string_lossy() }),
-    )
-    .await;
-    assert_eq!(res["trusted"], true, "{res}");
 }
 
 /// A driven run in `dir` with no change behind it. Returns the run id.
@@ -288,7 +177,10 @@ async fn an_untrusted_project_will_not_host_an_agent() {
     .await;
     let err = res["error"].as_str().unwrap_or_default();
     assert!(err.contains("not trusted"), "got {err:?}");
-    assert!(err.contains("devplane trust"), "and says how to fix it");
+    assert!(
+        err.contains("devplane project trust"),
+        "and says how to fix it"
+    );
 
     // Nothing was created on the way to refusing.
     assert!(!repo.join(".claude/worktrees").exists());
@@ -514,31 +406,39 @@ async fn a_finished_change_exports_a_certificate_a_stranger_could_check() {
 
     // Committed, clean, and unchanged since the gate ran: the one passing basis.
     assert_eq!(
-        st["predicate"]["completion"]["basis"], "gates_passed",
+        st["predicate"]["devplane"]["completion"]["basis"], "gates_passed",
         "{}",
-        st["predicate"]["completion"]
+        st["predicate"]["devplane"]["completion"]
     );
-    assert_eq!(st["predicate"]["evidence"]["passed"], true);
+    assert_eq!(
+        st["predicateType"],
+        "https://in-toto.io/attestation/test-result/v0.1"
+    );
+    assert_eq!(st["predicate"]["result"], "PASSED");
     assert!(md.contains("gates passed"), "{md}");
-    let tree = st["predicate"]["evidence"]["commit"]["tree"]
+    let tree = st["subject"][0]["digest"]["gitTree"]
         .as_str()
         .expect("no tree digest was stamped by the code that actually runs");
     assert_eq!(tree.len(), 40, "not a full object id: {tree}");
     assert_ne!(tree, sha);
     assert!(md.contains(tree), "the document does not carry the tree");
 
-    let steps = st["predicate"]["verification"]["steps"].as_array().unwrap();
+    let ext = &st["predicate"]["devplane"];
+    let steps = ext["verification"]["steps"].as_array().unwrap();
     assert_eq!(steps[0], format!("git checkout {sha}"));
-    for cmd in st["predicate"]["evidence"]["commands"].as_array().unwrap() {
+    for cmd in ext["commands"].as_array().unwrap() {
         assert!(
-            cmd["outcome"]["outcome"].is_string(),
+            cmd["outcome"].is_string(),
             "a command with no structured outcome: {cmd}"
         );
-        assert!(cmd["output_digest"].as_str().is_some_and(|d| d.len() == 16));
+        assert!(cmd["outputDigest"].as_str().is_some_and(|d| d.len() == 16));
     }
+    // The committed devplane.toml, named by its blob, beside the commands.
+    assert_eq!(st["predicate"]["configuration"][1]["name"], "devplane.toml");
+    assert!(ext["permissionsDecidedBy"].is_object(), "{ext}");
 
     assert!(md.contains("not evidence that the work is correct"), "{md}");
-    let caveat = &st["predicate"]["verification"]["caveat"];
+    let caveat = &st["predicate"]["devplane"]["verification"]["caveat"];
     assert!(
         caveat.is_string(),
         "a scratch repository has no remote, so the certificate owes the reader a caveat"
@@ -984,7 +884,7 @@ async fn a_ceiling_stops_a_change_that_gets_expensive() {
     let Some(agent) = echo_agent() else { return };
     let repo = configured_repo(
         "budget",
-        "[budget]\nusd = 10\n\n[gates]\ncheck = [\"true\"]\n",
+        "[budget]\nmax_usd = 10\n\n[gates]\ncheck = [\"true\"]\n",
     );
     let (addr, c, _state) = boot().await;
     trust(&c, &addr, &repo).await;
@@ -1154,12 +1054,21 @@ async fn a_driven_run_keeps_the_conversation_it_is_the_only_window_for() {
 async fn a_repository_can_refuse_to_keep_what_its_agents_say() {
     // Agent prose can quote secrets (e.g. an included `.env`), so the repo can opt out.
     let Some(agent) = echo_agent() else { return };
-    let repo = configured_repo("quiet", "[transcripts]\nkeep = false\n");
+    let repo = configured_repo("quiet", "[agent]\nkeep_transcripts = false\n");
     let (addr, c, state) = boot().await;
     trust(&c, &addr, &repo).await;
 
     let run = run_in(&state, &agent, &repo, Some("say something quotable")).await;
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    // Until the turn has ended, so anything it would have kept is written.
+    let id = devplane::core::RunId::new(&run);
+    common::until("the turn to end", SETTLE, || async {
+        let world = state.world.lock().await;
+        world
+            .run(&id)
+            .is_some_and(|r| r.totals.turns >= 1)
+            .then_some(())
+    })
+    .await;
 
     let said: Vec<Value> = c
         .get(format!("http://{addr}/api/runs/{run}/messages"))
@@ -1200,7 +1109,7 @@ async fn shutting_down_takes_the_agents_with_it() {
 #[tokio::test]
 async fn a_config_that_cannot_work_is_refused_before_anything_is_spent() {
     // An empty gate is refused up front.
-    let repo = configured_repo("invalid", "[gates.named.empty]\nrun = []\n");
+    let repo = configured_repo("invalid", "[gates.empty]\nrun = []\n");
     let (addr, c, _state) = boot().await;
     trust(&c, &addr, &repo).await;
 
@@ -1286,6 +1195,7 @@ async fn snoozing_a_change_actually_quietens_it() {
         url: "https://github.com/acme/app/pull/7".into(),
         status: "failing".into(),
         failing_checks: vec!["test".into()],
+        ..Default::default()
     });
     let id = work.id.clone();
     // No run has ever touched it.
@@ -1361,6 +1271,7 @@ async fn a_red_pull_request_reaches_the_inbox_after_the_agent_is_gone() {
         url: "https://github.com/acme/app/pull/142".into(),
         status: "failing".into(),
         failing_checks: vec!["test".into()],
+        ..Default::default()
     });
     let id = work.id.clone();
     state.changes.lock().await.insert(id.clone(), work);
@@ -1419,6 +1330,7 @@ async fn an_approved_and_green_pull_request_asks_for_nothing() {
         url: "u".into(),
         status: "ready_to_merge".into(),
         failing_checks: vec![],
+        ..Default::default()
     });
     state.changes.lock().await.insert(work.id.clone(), work);
 
@@ -1446,7 +1358,7 @@ async fn a_projects_own_rules_decide_its_agents() {
     let repo = scratch_repo("policy", "escalate", 0);
     std::fs::write(
         repo.join("devplane.toml"),
-        "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n",
+        "[policy]\ndeny = [\"Bash(rm -rf *)\"]\n",
     )
     .unwrap();
     let home = std::env::temp_dir().join(format!(
@@ -1505,11 +1417,7 @@ async fn a_projects_parallelism_limit_is_enforced() {
     // Agents in one repository collide on files, so their number is capped.
     let Some(agent) = echo_agent() else { return };
     let repo = scratch_repo("parallel", "escalate", 0);
-    std::fs::write(
-        repo.join("devplane.toml"),
-        "[policy]\nmax_parallel_runs = 1\n",
-    )
-    .unwrap();
+    std::fs::write(repo.join("devplane.toml"), "[agent]\nmax_parallel = 1\n").unwrap();
     git_out(&repo, &["commit", "-qam", "one agent at a time"]);
     let (addr, c, state) = boot().await;
     trust(&c, &addr, &repo).await;
@@ -1530,10 +1438,7 @@ async fn a_projects_parallelism_limit_is_enforced() {
     .await;
     let err = second["error"].as_str().unwrap_or_default();
     assert!(err.contains("allows 1"), "{second}");
-    assert!(
-        err.contains("max_parallel_runs"),
-        "and says how to change it"
-    );
+    assert!(err.contains("max_parallel"), "and says how to change it");
 
     std::fs::remove_dir_all(&repo).ok();
 }
@@ -1585,17 +1490,16 @@ async fn a_restart_does_not_lose_the_conversation_the_change_was_having() {
     let repo = scratch_repo("resume", "escalate", 0);
     let db = std::env::temp_dir().join(format!("vp-resume-{}.db", uuid::Uuid::new_v4().simple()));
 
-    let _serial = common::one_agent_at_a_time();
-
     let (change_id, agent_session) = {
         let state = AppState::new(
             db.clone(),
             "tok".into(),
             Policy::default(),
-            db.parent().unwrap().to_path_buf(),
+            db.with_extension("home"),
         )
         .await
         .unwrap();
+        common::as_the_app(&state);
         let app = devplane::api::router(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1652,7 +1556,7 @@ async fn a_restart_does_not_lose_the_conversation_the_change_was_having() {
         db.clone(),
         "tok".into(),
         Policy::default(),
-        db.parent().unwrap().to_path_buf(),
+        db.with_extension("home"),
     )
     .await
     .unwrap();
@@ -1776,16 +1680,16 @@ async fn a_restart_does_not_leave_a_run_looking_drivable() {
     let repo = scratch_repo("restart", "escalate", 0);
     let db = std::env::temp_dir().join(format!("vp-restart-{}.db", uuid::Uuid::new_v4().simple()));
 
-    let _serial = common::one_agent_at_a_time();
     let change_id = {
         let state = AppState::new(
             db.clone(),
             "tok".into(),
             Policy::default(),
-            db.parent().unwrap().to_path_buf(),
+            db.with_extension("home"),
         )
         .await
         .unwrap();
+        common::as_the_app(&state);
         let app = devplane::api::router(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1826,7 +1730,7 @@ async fn a_restart_does_not_leave_a_run_looking_drivable() {
         db.clone(),
         "tok".into(),
         Policy::default(),
-        db.parent().unwrap().to_path_buf(),
+        db.with_extension("home"),
     )
     .await
     .unwrap();
@@ -2486,7 +2390,7 @@ fn explain_says_why_nothing_answered() {
 
     let explain = |dir: &std::path::Path| -> Value {
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
-            .args(["explain", "--json", "--dir"])
+            .args(["config", "explain", "--json", "--dir"])
             .arg(dir)
             .arg("cat .env")
             .env("DEVPLANE_HOME", &home)
@@ -2502,7 +2406,7 @@ fn explain_says_why_nothing_answered() {
     // 2. An unparsable file: no rules are in force.
     std::fs::write(
         dir.join("devplane.toml"),
-        "[project]\nname=\"x\"\n[polcy]\nnever_auto=[\"Read(.env)\"]\n",
+        "[project]\nname=\"x\"\n[polcy]\ndeny=[\"Read(.env)\"]\n",
     )
     .unwrap();
     let r = explain(&dir);
@@ -2513,13 +2417,13 @@ fn explain_says_why_nothing_answered() {
     assert_eq!(r["rules"]["in_force"], false);
     assert!(
         r["rules"]["error"].as_str().unwrap().contains("polcy"),
-        "it has to name what is wrong, like `devplane check` does"
+        "it has to name what is wrong, like `devplane config check` does"
     );
 
     // 3. Rules that load, found without a git repository above them.
     std::fs::write(
         dir.join("devplane.toml"),
-        "[project]\nname=\"x\"\n[policy]\nnever_auto=[\"Read(.env)\"]\n",
+        "[project]\nname=\"x\"\n[policy]\ndeny=[\"Read(.env)\"]\n",
     )
     .unwrap();
     let r = explain(&dir);
@@ -2601,17 +2505,17 @@ async fn a_graceful_stop_records_interrupted_and_never_completed() {
     let Some(agent) = echo_agent() else { return };
     let repo = scratch_repo("gracefulstop", "escalate", 0);
     let db = std::env::temp_dir().join(format!("vp-stop-{}.db", uuid::Uuid::new_v4().simple()));
-    let _serial = common::one_agent_at_a_time();
 
     let run_id = {
         let state = AppState::new(
             db.clone(),
             "tok".into(),
             Policy::default(),
-            db.parent().unwrap().to_path_buf(),
+            db.with_extension("home"),
         )
         .await
         .unwrap();
+        common::as_the_app(&state);
         let app = devplane::api::router(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2655,7 +2559,7 @@ async fn a_graceful_stop_records_interrupted_and_never_completed() {
         db.clone(),
         "tok".into(),
         Policy::default(),
-        db.parent().unwrap().to_path_buf(),
+        db.with_extension("home"),
     )
     .await
     .unwrap();
@@ -2673,13 +2577,12 @@ async fn a_graceful_stop_records_interrupted_and_never_completed() {
     std::fs::remove_dir_all(&repo).ok();
 }
 
-/// `devplane quit` from the CLI against a separate host process: it names what
+/// `devplane down` from the CLI against a separate host process: it names what
 /// it ends first, no Devplane process remains, and no agent is orphaned.
 #[tokio::test]
 #[cfg(unix)]
 async fn quitting_from_the_command_line_names_the_agent_and_leaves_nothing_behind() {
     let Some(agent) = echo_agent() else { return };
-    let _serial = common::one_agent_at_a_time();
     let repo = scratch_repo("quitcli", "feedback", 1);
     let home = std::env::temp_dir().join(format!(
         "vp-quit-{}-{}",
@@ -2690,7 +2593,7 @@ async fn quitting_from_the_command_line_names_the_agent_and_leaves_nothing_behin
 
     // Port 0: test binaries run in parallel.
     let mut host = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
-        .arg("serve")
+        .args(["up", "--no-browser"])
         .arg("--port")
         .arg("0")
         .env("DEVPLANE_HOME", &home)
@@ -2735,18 +2638,14 @@ async fn quitting_from_the_command_line_names_the_agent_and_leaves_nothing_behin
         }
     };
 
-    let trusted = send(
-        "/api/projects/trust".into(),
-        serde_json::json!({ "path": repo.to_string_lossy() }),
-    )
-    .await;
-    assert_eq!(trusted["trusted"], true, "{trusted}");
+    common::trust_from_a_terminal(&home, &repo);
 
-    // Pre-existing `echo_agent` pids, to tell this test's agent from leftovers.
+    // `echo_agent` pids this host started (`sh` execs the agent, so the host is
+    // its parent): other tests' agents run concurrently and must not count.
     let echoes = || -> std::collections::HashSet<u32> {
         devplane::observe::procs::snapshot()
             .into_iter()
-            .filter(|p| p.command.contains("echo_agent"))
+            .filter(|p| p.ppid == pid && p.command.contains("echo_agent"))
             .map(|p| p.pid)
             .collect()
     };
@@ -2789,7 +2688,7 @@ async fn quitting_from_the_command_line_names_the_agent_and_leaves_nothing_behin
 
     // 1. It says what it ends, before it ends it.
     let quit = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
-        .arg("quit")
+        .arg("down")
         .env("DEVPLANE_HOME", &home)
         .output()
         .expect("quit runs");
@@ -2863,17 +2762,6 @@ fn hand_made_branch(repo: &Path, branch: &str) {
     git(&["add", "-A"]);
     git(&["commit", "-qm", "write the spec"]);
     git(&["checkout", "-q", "main"]);
-}
-
-async fn get(c: &reqwest::Client, addr: &std::net::SocketAddr, path: &str) -> Value {
-    c.get(format!("http://{addr}{path}"))
-        .bearer_auth("tok")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap()
 }
 
 async fn change_row(c: &reqwest::Client, addr: &std::net::SocketAddr, id: &str) -> Value {
@@ -3004,6 +2892,7 @@ fn a_named_gate_after_a_failing_check_is_not_verified() {
     let stamp = CommitStamp {
         commit: Some("c0ffee".into()),
         tree: Some("7ree".into()),
+        tree_unknown: None,
         branch: Some("b".into()),
         clean: false,
         changed_files: 1,
@@ -3011,6 +2900,8 @@ fn a_named_gate_after_a_failing_check_is_not_verified() {
         remote: None,
     };
     let report = |gate: &str, code: i32| GateReport {
+        junit: Vec::new(),
+        base_commit: None,
         gate: gate.into(),
         at: jiff::Timestamp::now(),
         duration_ms: 0,
@@ -3141,7 +3032,7 @@ async fn an_adopted_branch_certifies_exactly_like_a_started_one() {
         "the history is git's: {adopted_cert}"
     );
     assert_eq!(
-        adopted_cert["statement"]["predicate"]["specification"]["tasks_total"], 2,
+        adopted_cert["statement"]["predicate"]["devplane"]["specification"]["tasks_total"], 2,
         "the specification travelled onto the certificate: {adopted_cert}"
     );
 
@@ -3236,13 +3127,17 @@ async fn an_adopted_branch_certifies_exactly_like_a_started_one() {
         keys(&started_cert["statement"]["predicate"])
     );
     assert_eq!(
-        keys(&adopted_cert["statement"]["predicate"]["evidence"]),
-        keys(&started_cert["statement"]["predicate"]["evidence"])
+        keys(&adopted_cert["statement"]["predicate"]["devplane"]),
+        keys(&started_cert["statement"]["predicate"]["devplane"])
+    );
+    assert_eq!(
+        keys(&adopted_cert["statement"]["predicate"]["devplane"]["run"]),
+        keys(&started_cert["statement"]["predicate"]["devplane"]["run"])
     );
     assert_eq!(keys(&adopted_cert["page"]), keys(&started_cert["page"]));
     assert_eq!(
-        adopted_cert["statement"]["predicate"]["completion"]["basis"],
-        started_cert["statement"]["predicate"]["completion"]["basis"],
+        adopted_cert["statement"]["predicate"]["devplane"]["completion"]["basis"],
+        started_cert["statement"]["predicate"]["devplane"]["completion"]["basis"],
         "both rest on the same basis"
     );
     std::fs::remove_dir_all(&repo).ok();
@@ -3405,7 +3300,6 @@ async fn offering_without_permission_hands_back_the_commands_and_pushes_nothing(
 #[tokio::test]
 async fn a_killed_host_is_recovered_by_the_next_one() {
     let Some(agent) = echo_agent() else { return };
-    let _serial = common::one_agent_at_a_time();
     let repo = scratch_repo("killed", "feedback", 1);
     let home = std::env::temp_dir().join(format!(
         "vp-kill-{}-{}",
@@ -3416,7 +3310,7 @@ async fn a_killed_host_is_recovered_by_the_next_one() {
 
     let spawn_host = || {
         std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
-            .arg("serve")
+            .args(["up", "--no-browser"])
             .arg("--port")
             .arg("0")
             .env("DEVPLANE_HOME", &home)
@@ -3465,22 +3359,27 @@ async fn a_killed_host_is_recovered_by_the_next_one() {
                 .unwrap()
         }
     };
-    let trusted = post_to(
-        port,
-        "/api/projects/trust".into(),
-        serde_json::json!({ "path": repo.to_string_lossy() }),
-    )
-    .await;
-    assert_eq!(trusted["trusted"], true, "{trusted}");
+    common::trust_from_a_terminal(&home, &repo);
 
+    // `echo_agent` pids this host started (`sh` execs the agent, so the host is
+    // its parent). Other tests' agents run concurrently, and a new one of
+    // theirs taken for this host's would be killed below, mid-turn.
+    let host_pid = info["pid"].as_u64().expect("a pid") as u32;
     let echoes = || -> std::collections::HashSet<u32> {
         devplane::observe::procs::snapshot()
             .into_iter()
-            .filter(|p| p.command.contains("echo_agent"))
+            .filter(|p| p.ppid == host_pid && p.command.contains("echo_agent"))
             .map(|p| p.pid)
             .collect()
     };
     let before = echoes();
+    // Somebody else's agent, started in the same window: it must survive.
+    let mut bystander = std::process::Command::new(&agent)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("a bystander agent");
     let started = post_to(
         port,
         "/api/changes".into(),
@@ -3515,8 +3414,17 @@ async fn a_killed_host_is_recovered_by_the_next_one() {
         info_path.exists(),
         "a killed host cannot clear its record; the next start has to"
     );
-    // The orphaned agent is the harness's to end.
+    // The orphaned agent is the harness's to end, and only it.
     unsafe { libc::kill(agent_pid as i32, libc::SIGKILL) };
+    // A kill lands asynchronously: given time to, the bystander would be gone.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let bystander_alive = matches!(bystander.try_wait(), Ok(None));
+    let _ = bystander.kill();
+    let _ = bystander.wait();
+    assert!(
+        bystander_alive,
+        "the harness killed an agent this host never started"
+    );
 
     let mut second = spawn_host();
     let mut second_guard = common::HostGuard::new(second.id());
@@ -3852,7 +3760,7 @@ async fn isolation_refuses_before_anything_is_written() {
     let untrusted = scratch_repo("refuse-trust", "escalate", 0);
     let res = start_change(&c, &addr, &untrusted, "x", "claude").await;
     let err = res["error"].as_str().unwrap_or_default();
-    assert!(err.contains("devplane trust"), "{err}");
+    assert!(err.contains("devplane project trust"), "{err}");
     untouched(&untrusted);
 
     for r in [dirty, nobase, taken, untrusted] {
@@ -4026,7 +3934,15 @@ async fn a_declared_cache_is_shared_between_changes() {
         expected.to_string_lossy(),
         "the second change builds where the first did"
     );
-    assert_eq!(seen(&three), "", "nothing declared, nothing redirected");
+    // Nothing declared, nothing redirected: the setup sees only what the
+    // host's own environment already held, which is empty unless the runner
+    // set it.
+    let inherited = std::env::var("CARGO_TARGET_DIR").unwrap_or_default();
+    assert_eq!(
+        seen(&three),
+        inherited,
+        "nothing declared, nothing redirected"
+    );
 
     for r in [&one, &two, &three] {
         await_rest_of(
@@ -4572,16 +4488,14 @@ fn git_ok(dir: &Path, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-/// A spec never committed is not in the worktree's base: the start refuses,
-/// naming folder and base, before creating anything.
+/// A spec folder in neither the worktree's base nor the project's checkout is
+/// refused, naming folder and base, before creating anything.
 #[tokio::test]
 async fn a_spec_missing_from_the_base_is_refused_before_anything_is_created() {
     let Some(agent) = echo_agent() else { return };
     let repo = counts_repo("spec-base");
     let (addr, c, _state) = boot().await;
     trust(&c, &addr, &repo).await;
-    std::fs::create_dir_all(repo.join("specs/042-new")).unwrap();
-    std::fs::write(repo.join("specs/042-new/spec.md"), "# New\n").unwrap();
 
     let v = post(
         &c,
@@ -4589,17 +4503,14 @@ async fn a_spec_missing_from_the_base_is_refused_before_anything_is_created() {
         "/api/changes",
         serde_json::json!({
             "cwd": repo.to_string_lossy(),
-            "title": "work to a spec nobody committed",
+            "title": "work to a spec nobody wrote",
             "agent": agent,
             "spec": "specs/042-new",
         }),
     )
     .await;
     let err = v["error"].as_str().unwrap_or_else(|| panic!("{v}"));
-    assert!(
-        err.contains("specs/042-new") && err.contains("`main`"),
-        "{err}"
-    );
+    assert!(err.contains("specs/042-new"), "{err}");
     assert_eq!(worktrees_of(&repo).len(), 1, "a worktree was made");
     assert!(
         get(&c, &addr, "/api/changes")
@@ -4612,8 +4523,82 @@ async fn a_spec_missing_from_the_base_is_refused_before_anything_is_created() {
     std::fs::remove_dir_all(&repo).ok();
 }
 
-/// Offering a dirty worktree, or a branch with nothing past its base, is
-/// refused and says which.
+/// A spec folder in the checkout but not yet committed is declared to the
+/// worktree's agent as an additional directory, by its absolute path under the
+/// project; an agent that cannot take one ends before any prompt, saying why.
+#[tokio::test]
+async fn declares_the_spec_folder() {
+    let Some(agent) = echo_agent() else { return };
+    for (env, declared) in [
+        ("DEVPLANE_ECHO_ADDDIRS=1", true),
+        ("DEVPLANE_ECHO_X=1", false),
+    ] {
+        let repo = counts_repo("spec-declared");
+        let (addr, c, state) = boot().await;
+        trust(&c, &addr, &repo).await;
+        std::fs::create_dir_all(repo.join("specs/042-new")).unwrap();
+        std::fs::write(repo.join("specs/042-new/spec.md"), "# New\n").unwrap();
+        let v = post(
+            &c,
+            &addr,
+            "/api/changes",
+            serde_json::json!({
+                "cwd": repo.to_string_lossy(),
+                "title": "work to a spec not yet committed",
+                "agent": format!("env {env} {agent}"),
+                "spec": "specs/042-new",
+            }),
+        )
+        .await;
+        let id = v["change_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{v}"))
+            .to_string();
+        let (worktree, run) = {
+            let changes = state.changes.lock().await;
+            let w = changes.get(&devplane::core::ChangeId::new(&id)).unwrap();
+            (w.worktree.clone().unwrap(), w.runs[0].clone())
+        };
+        let want = repo.join("specs/042-new").canonicalize().unwrap();
+        let ended = common::until(
+            "the agent to start or end",
+            std::time::Duration::from_secs(30),
+            || {
+                let (state, run, worktree) = (state.clone(), run.clone(), worktree.clone());
+                async move {
+                    let dirs = std::fs::read_to_string(worktree.join(".devplane/dirs.json")).ok();
+                    let w = state.world.lock().await;
+                    let r = w.run(&run)?;
+                    match (dirs, r.totals.turns, r.state.is_live()) {
+                        (Some(d), t, _) if t >= 1 => Some(Ok(d)),
+                        (None, _, false) => Some(Err(())),
+                        _ => None,
+                    }
+                }
+            },
+        )
+        .await;
+        match (ended, declared) {
+            (Ok(d), true) => {
+                let got: Vec<PathBuf> = serde_json::from_str(&d).unwrap();
+                assert_eq!(
+                    got,
+                    vec![want.clone()],
+                    "declared by its path under the project"
+                );
+            }
+            (Err(()), false) => assert!(
+                !worktree.join(".devplane/heard.log").exists(),
+                "an agent that cannot see its specification was prompted"
+            ),
+            other => panic!("{env}: {other:?}"),
+        }
+        std::fs::remove_dir_all(&repo).ok();
+    }
+}
+
+/// Offering work no passing check saw, or a branch with nothing past its
+/// base, is refused and says which.
 #[tokio::test]
 async fn offering_a_dirty_or_empty_branch_is_refused() {
     let repo = scratch_repo("offer-refused", "escalate", 1);
@@ -4640,7 +4625,10 @@ async fn offering_a_dirty_or_empty_branch_is_refused() {
     std::fs::write(wt.join("left-behind.txt"), "not committed\n").unwrap();
     let offer = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
     let err = offer["error"].as_str().unwrap_or_else(|| panic!("{offer}"));
-    assert!(err.contains("uncommitted or untracked"), "{err}");
+    assert!(
+        err.contains("no passing check has run against"),
+        "work no check saw is never committed: {err}"
+    );
 
     let v = adopt("feat/empty").await;
     let id = v["change_id"]
@@ -4650,6 +4638,150 @@ async fn offering_a_dirty_or_empty_branch_is_refused() {
     let offer = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
     let err = offer["error"].as_str().unwrap_or_else(|| panic!("{offer}"));
     assert!(err.contains("no commits past `main`"), "{err}");
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+/// A git command's output, trimmed.
+fn git_line(dir: &Path, args: &[&str]) -> String {
+    git_out(dir, args).trim().to_string()
+}
+
+/// The agent never commits; the person's offer does. One commit lands on the
+/// change's branch, its tree is the one the passing check ran against (the
+/// certificate's `gitTree`), the worktree is clean after it, and archiving
+/// needs no leave to discard anything.
+#[tokio::test]
+async fn offering_commits_exactly_the_tree_the_check_passed_on() {
+    let repo = scratch_repo("offer-commits", "escalate", 1);
+    hand_made_branch(&repo, "feat/agent-edits");
+    let before = git_line(&repo, &["rev-parse", "feat/agent-edits"]);
+    let (addr, c, _state) = boot().await;
+    trust(&c, &addr, &repo).await;
+    let v = post(
+        &c,
+        &addr,
+        "/api/changes/adopt",
+        serde_json::json!({ "branch": "feat/agent-edits", "project": repo.to_string_lossy() }),
+    )
+    .await;
+    let id = v["change_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let wt = PathBuf::from(v["change"]["worktree"].as_str().unwrap());
+    // What an agent leaves: edits and a new file, none of it committed.
+    std::fs::write(wt.join("fixed.txt"), "yes, and then some\n").unwrap();
+    std::fs::write(wt.join("added-by-the-agent.txt"), "new\n").unwrap();
+
+    let verified = post(&c, &addr, &format!("/api/changes/{id}/verify"), Value::Null).await;
+    assert_eq!(verified["passed"], true, "{verified}");
+    let row = change_row(&c, &addr, &id).await;
+    let checked = row["gate"]["ran_at"]["tree"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the passing check recorded no tree: {row}"))
+        .to_string();
+
+    let person_head = git_line(&repo, &["rev-parse", "HEAD"]);
+    let offer = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
+    assert_eq!(offer["offer"], "commands", "{offer}");
+    let committed = offer["committed"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the offer wrote no commit: {offer}"))
+        .to_string();
+
+    // One commit, on the change's branch, whose tree is the checked one.
+    let head = git_line(&repo, &["rev-parse", "feat/agent-edits"]);
+    assert_eq!(head, committed, "the branch points at the offer's commit");
+    assert_eq!(
+        git_line(&repo, &["rev-parse", &format!("{committed}^")]),
+        before,
+        "exactly one commit on top of what was there"
+    );
+    assert_eq!(
+        git_line(&repo, &["rev-parse", &format!("{committed}^{{tree}}")]),
+        checked,
+        "the commit's tree is the tree the check passed on"
+    );
+    let message = git_line(&repo, &["log", "-1", "--format=%B", &committed]);
+    assert!(
+        message.contains(&format!("Devplane change {id}")) && message.contains("certificate"),
+        "{message}"
+    );
+    // The worktree is clean against it, and the person's checkout untouched.
+    assert!(
+        git_line(&wt, &["status", "--porcelain"]).is_empty(),
+        "the worktree is clean after the offer"
+    );
+    assert_eq!(git_line(&repo, &["rev-parse", "HEAD"]), person_head);
+    assert!(git_line(&repo, &["status", "--porcelain"]).is_empty());
+
+    // Still verified: the tree did not move, it was committed.
+    assert_eq!(change_row(&c, &addr, &id).await["state"], "verified");
+    // A second offer has nothing to commit.
+    let again = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
+    assert!(again["committed"].is_null(), "{again}");
+    assert_eq!(
+        git_line(&repo, &["rev-parse", "feat/agent-edits"]),
+        committed
+    );
+
+    // Nothing is left uncommitted, so archiving needs no discard.
+    let archived = post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/archive"),
+        Value::Null,
+    )
+    .await;
+    assert!(archived["error"].is_null(), "{archived}");
+    assert_eq!(archived["worktree_removed"], true, "{archived}");
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+/// A file touched after the passing check is work nobody checked: the offer
+/// refuses, says so, and writes nothing.
+#[tokio::test]
+async fn offering_after_the_tree_moved_is_refused() {
+    let repo = scratch_repo("offer-moved", "escalate", 1);
+    hand_made_branch(&repo, "feat/moved");
+    let (addr, c, _state) = boot().await;
+    trust(&c, &addr, &repo).await;
+    let v = post(
+        &c,
+        &addr,
+        "/api/changes/adopt",
+        serde_json::json!({ "branch": "feat/moved", "project": repo.to_string_lossy() }),
+    )
+    .await;
+    let id = v["change_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let wt = PathBuf::from(v["change"]["worktree"].as_str().unwrap());
+    std::fs::write(wt.join("added-by-the-agent.txt"), "new\n").unwrap();
+    let verified = post(&c, &addr, &format!("/api/changes/{id}/verify"), Value::Null).await;
+    assert_eq!(verified["passed"], true, "{verified}");
+    let head = git_line(&repo, &["rev-parse", "feat/moved"]);
+
+    // An edit after the check.
+    std::fs::write(
+        wt.join("added-by-the-agent.txt"),
+        "changed after the check\n",
+    )
+    .unwrap();
+    let offer = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
+    let err = offer["error"].as_str().unwrap_or_else(|| panic!("{offer}"));
+    assert!(
+        err.contains("moved since the last passing check")
+            && err.contains(&format!("devplane change verify {id}")),
+        "{err}"
+    );
+    assert_eq!(
+        git_line(&repo, &["rev-parse", "feat/moved"]),
+        head,
+        "a refused offer writes no commit"
+    );
+    assert!(change_row(&c, &addr, &id).await["pull_request"].is_null());
     std::fs::remove_dir_all(&repo).ok();
 }
 
@@ -4722,6 +4854,7 @@ async fn archive_keeps_the_branch_and_a_merged_pull_request_counts_as_merged() {
             url: "https://example.test/pr/7".into(),
             status: "merged".into(),
             failing_checks: Vec::new(),
+            ..Default::default()
         });
     }
     let done = post(
@@ -4823,14 +4956,17 @@ async fn an_offer_waits_for_every_weakened_row_to_be_seen() {
         &c,
         &addr,
         &format!("/api/changes/{id}/review/seen"),
-        serde_json::json!({ "path": "fixed.txt" }),
+        serde_json::json!({ "path": "not-in-this-change.txt" }),
     )
     .await;
     assert!(
-        none["error"].as_str().unwrap().contains("no weakened row"),
+        none["error"]
+            .as_str()
+            .unwrap()
+            .contains("nothing in this change to mark seen"),
         "{none}"
     );
-    assert_eq!(none["rows"][0]["path"], "tests/login.test.ts", "{none}");
+    assert_eq!(none["digests"], serde_json::json!([]), "{none}");
 
     // Seen by a person: the review says so, and the offer proceeds as before.
     let seen = post(
@@ -4858,6 +4994,7 @@ async fn an_offer_waits_for_every_weakened_row_to_be_seen() {
         "test(\"login\", () => {});\nit.skip(\"rejects a burst\", () => {});\n",
     )
     .unwrap();
+    std::fs::write(wt.join("extra.txt"), "nobody opened this\n").unwrap();
     commit_in(&wt, "reword the skipped test");
     let again = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
     assert_eq!(again["refused"], "weakened_unseen", "{again}");
@@ -4868,6 +5005,187 @@ async fn an_offer_waits_for_every_weakened_row_to_be_seen() {
         serde_json::json!({ "path": "tests/login.test.ts" }),
     )
     .await;
+    // The tree moved since the check, so the check runs again before an offer.
+    let moved = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
+    assert!(
+        moved["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("moved since the last passing check")),
+        "{moved}"
+    );
+    post(&c, &addr, &format!("/api/changes/{id}/verify"), Value::Null).await;
+    let offer = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
+    assert_eq!(offer["offer"], "commands", "{offer}");
+    assert!(
+        offer["committed"].is_null(),
+        "the checked tree was already committed: {offer}"
+    );
+    // The file nobody opened is named — it informs the offer, never refuses
+    // it — and never as a share of the change's files.
+    let not: Vec<&str> = offer["not_opened"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    assert!(not.contains(&"extra.txt"), "{offer}");
+    assert!(!not.contains(&"tests/login.test.ts"), "{offer}");
+    let says = offer["not_opened_says"].as_str().unwrap();
+    assert_eq!(
+        says,
+        format!("{} files not opened: {}", not.len(), not.join(", ")),
+        "{offer}"
+    );
+    let text = offer.to_string();
+    assert!(!text.contains(" of ") && !text.contains('%'), "{offer}");
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+/// The hand-made branch on a base that commits the agent's settings and a
+/// lockfile; the branch adds a hook and a package whose name carries markup.
+fn branch_that_edits_controls(repo: &Path, branch: &str) {
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}");
+    };
+    std::fs::create_dir_all(repo.join(".claude")).unwrap();
+    std::fs::write(
+        repo.join(".claude/settings.json"),
+        "{\n  \"hooks\": {}\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"a\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "the agent's settings and a lockfile"]);
+    hand_made_branch(repo, branch);
+    git(&["checkout", "-q", branch]);
+    std::fs::write(
+        repo.join(".claude/settings.json"),
+        "{\n  \"hooks\": {\n    \"PreToolUse\": [{ \"command\": \"sh ./x.sh\" }]\n  }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"a\"\nversion = \"1.0.0\"\n\n[[package]]\nname = \"evil`pkg <b>\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "add a hook and a package"]);
+    git(&["checkout", "-q", "main"]);
+}
+
+/// An edit to the agent's settings and to a lockfile holds the offer like any
+/// weakened row: refused naming both with their kinds, released only by a
+/// person's marks, and a further edit is unseen again.
+#[tokio::test]
+async fn an_offer_waits_for_an_edited_agent_control_and_lockfile() {
+    let repo = scratch_repo("offer-controls", "escalate", 1);
+    branch_that_edits_controls(&repo, "feat/controls");
+    let (addr, c, _state) = boot().await;
+    trust(&c, &addr, &repo).await;
+    let adopted = post(
+        &c,
+        &addr,
+        "/api/changes/adopt",
+        serde_json::json!({ "branch": "feat/controls", "project": repo.to_string_lossy() }),
+    )
+    .await;
+    let id = adopted["change_id"].as_str().unwrap().to_string();
+    let wt = PathBuf::from(adopted["change"]["worktree"].as_str().unwrap());
+    post(&c, &addr, &format!("/api/changes/{id}/verify"), Value::Null).await;
+
+    let row = change_row(&c, &addr, &id).await;
+    assert_eq!(row["state"], "verified", "{row}");
+    assert_eq!(
+        row["qualifier"]["says"], "1 agent control changed · 1 supply-chain file changed",
+        "{row}"
+    );
+    assert_eq!(row["qualifier"]["unseen"], 2, "{row}");
+
+    let kinds = |offer: &Value| -> Vec<(String, String)> {
+        let mut k: Vec<(String, String)> = offer["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r["path"].as_str().unwrap().to_string(),
+                    r["kind"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        k.sort();
+        k
+    };
+    let offer = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
+    assert_eq!(offer["refused"], "weakened_unseen", "{offer}");
+    assert_eq!(
+        kinds(&offer),
+        [
+            (".claude/settings.json".into(), "agent_controls".into()),
+            ("Cargo.lock".into(), "supply_chain".into()),
+        ],
+        "{offer}"
+    );
+    // The planted name is data: carried verbatim, never interpreted here.
+    let lock = offer["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["path"] == "Cargo.lock")
+        .unwrap();
+    assert_eq!(
+        lock["why"], "edits the lockfile `Cargo.lock`: 1 package added (`evil`pkg <b>` 0.1.0)",
+        "{offer}"
+    );
+    assert!(change_row(&c, &addr, &id).await["pull_request"].is_null());
+
+    let mark = |path: &'static str| {
+        let (c, addr, id) = (c.clone(), addr, id.clone());
+        async move {
+            post(
+                &c,
+                &addr,
+                &format!("/api/changes/{id}/review/seen"),
+                serde_json::json!({ "path": path }),
+            )
+            .await
+        }
+    };
+    mark(".claude/settings.json").await;
+    let one = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
+    assert_eq!(one["refused"], "weakened_unseen", "{one}");
+    assert_eq!(
+        kinds(&one),
+        [("Cargo.lock".into(), "supply_chain".into())],
+        "{one}"
+    );
+
+    // The settings edited again: a different row, unseen.
+    std::fs::write(
+        wt.join(".claude/settings.json"),
+        "{\n  \"hooks\": {\n    \"PreToolUse\": [{ \"command\": \"sh ./y.sh\" }]\n  }\n}\n",
+    )
+    .unwrap();
+    commit_in(&wt, "another hook");
+    let again = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
+    assert_eq!(again["refused"], "weakened_unseen", "{again}");
+    assert!(
+        kinds(&again).contains(&(".claude/settings.json".into(), "agent_controls".into())),
+        "{again}"
+    );
+
+    mark(".claude/settings.json").await;
+    mark("Cargo.lock").await;
+    post(&c, &addr, &format!("/api/changes/{id}/verify"), Value::Null).await;
     let offer = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
     assert_eq!(offer["offer"], "commands", "{offer}");
     std::fs::remove_dir_all(&repo).ok();
@@ -4911,6 +5229,65 @@ async fn an_unreadable_diff_refuses_the_offer_and_is_unknown_on_the_certificate(
     );
 
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+/// A `devplane.toml` that will not load is never read as the defaults by the
+/// offer's guard: the gates it declares name files the defaults do not.
+#[tokio::test]
+async fn an_unreadable_configuration_refuses_the_offer() {
+    let repo = scratch_repo("offer-config", "escalate", 1);
+    branch_that_skips_a_test(&repo, "feat/skips");
+    let (addr, c, _state) = boot().await;
+    trust(&c, &addr, &repo).await;
+    let adopted = post(
+        &c,
+        &addr,
+        "/api/changes/adopt",
+        serde_json::json!({ "branch": "feat/skips", "project": repo.to_string_lossy() }),
+    )
+    .await;
+    let id = adopted["change_id"].as_str().unwrap().to_string();
+    std::fs::write(repo.join("devplane.toml"), "[gates\ncheck = ").unwrap();
+    let offer = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
+    let err = offer["error"].as_str().unwrap_or_else(|| panic!("{offer}"));
+    assert!(err.contains("configuration unreadable"), "{err}");
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+/// One change is read now, not from the last tick: an edit made a moment ago
+/// is in its tree; the board says how old its tree is.
+#[tokio::test]
+async fn one_change_reads_its_tree_now_and_the_board_says_when() {
+    let repo = scratch_repo("tree-now", "escalate", 1);
+    branch_that_skips_a_test(&repo, "feat/skips");
+    let (addr, c, _state) = boot().await;
+    trust(&c, &addr, &repo).await;
+    let adopted = post(
+        &c,
+        &addr,
+        "/api/changes/adopt",
+        serde_json::json!({ "branch": "feat/skips", "project": repo.to_string_lossy() }),
+    )
+    .await;
+    let id = adopted["change_id"].as_str().unwrap().to_string();
+    let wt = PathBuf::from(adopted["change"]["worktree"].as_str().unwrap());
+    let before = get(&c, &addr, &format!("/api/changes/{id}")).await;
+    let before = before["tree_now"]["tree"].clone();
+    assert!(before.is_string(), "{before}");
+    std::fs::write(wt.join("new.txt"), "just now\n").unwrap();
+    let after = get(&c, &addr, &format!("/api/changes/{id}")).await;
+    assert_ne!(after["tree_now"]["tree"], before, "{after}");
+    assert!(after["tree_as_of"].is_string(), "{after}");
+    let board = get(&c, &addr, "/api/board").await;
+    let brief = board["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["id"] == id.as_str())
+        .cloned()
+        .unwrap_or_else(|| panic!("{board}"));
+    assert!(brief["tree_as_of"].is_string(), "{brief}");
     std::fs::remove_dir_all(&repo).ok();
 }
 
@@ -4973,7 +5350,7 @@ fn a_decision_about_a_change_is_refused_from_an_agent_session() {
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success(), "{args:?} ran from an agent session");
         assert!(
-            err.contains("`CLAUDECODE` is set") && err.contains("does not close it"),
+            err.contains("`CLAUDECODE` is set") && err.contains("advisory"),
             "{args:?}: {err}"
         );
     }
@@ -4990,6 +5367,7 @@ fn a_pass_by_other_check_commands_is_not_verified() {
     let stamp = CommitStamp {
         commit: Some("abc".into()),
         tree: Some("t1".into()),
+        tree_unknown: None,
         branch: None,
         clean: true,
         changed_files: 0,
@@ -5003,10 +5381,13 @@ fn a_pass_by_other_check_commands_is_not_verified() {
         jiff::Timestamp::now(),
     );
     change.gates.push(GateReport {
+        junit: Vec::new(),
+        base_commit: None,
         gate: "check".into(),
         at: jiff::Timestamp::now(),
         duration_ms: 1,
         commands: vec![CommandResult {
+            tests: Default::default(),
             command: "cargo test".into(),
             outcome: Outcome::Exited { code: 0 },
             duration_ms: 1,

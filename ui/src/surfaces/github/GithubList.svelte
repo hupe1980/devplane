@@ -68,6 +68,8 @@
   import Empty from "../../lib/ui/Empty.svelte";
   import { safeHref } from "../../lib/href";
   import { ago, listed, plural } from "../../lib/text";
+  import Skeleton from "../../lib/Skeleton.svelte";
+  import { cursor } from "../../lib/cursor";
 
   let {
     issues = [],
@@ -111,9 +113,29 @@
   const stale = $derived(!!says && !says.blocks);
   const more = $derived(projects.reduce((n, p) => n + ((showing === "issues" ? p.issues_more : p.pull_requests_more) ?? 0), 0));
   const age = $derived(readAt ? ago((Date.now() - new Date(readAt).getTime()) / 1000) : "");
+  /// Projects whose own read failed: named, with the host's words, so an
+  /// empty list beside them is never read as *nothing open*.
+  const unread = $derived(projects.filter((p) => p.stale && p.github?.state !== "not_github"));
+  /// A failure that a sign-in fixes, in the host's words.
+  const signIn = $derived(/sign(ed)? ?in|auth login|not signed/i.test(failed));
   /// Counts only for data: a failure state has none.
   const counted = $derived(loaded && !failed && !blocking && !allElsewhere && !stale);
   let selected = $state<string | null>(null);
+  let order = $state<string[]>([]);
+  const openRow = (url: string) => {
+    const to = safeHref(url);
+    if (to) window.open(to, "_blank", "noopener");
+  };
+  // The registry's list keys: `j`/`k` select, Enter opens it on GitHub.
+  $effect(() =>
+    cursor({
+      scope: "github",
+      size: () => order.length,
+      at: () => order.indexOf(selected ?? ""),
+      go: (i) => (selected = order[i]),
+      open: (i) => openRow(order[i]),
+    }),
+  );
   const columns: Column<Row>[] = [
     { key: "you", label: "", width: 36 },
     { key: "title", label: "Title", width: 520, sort: (r) => r.title },
@@ -132,7 +154,7 @@
 <div class="page">
   <header class="head">
     <h1>Issues and pull requests</h1>
-    {#if coverage && !blocking}<span class="cov">{coverage.configured} of {coverage.projects} projects are on GitHub{absent ? ` — ${absent} not seen here` : ""}</span>{/if}
+    {#if coverage && !blocking}<span class="cov">{coverage.configured} {plural(coverage.configured, "project", "projects")} on GitHub{absent ? ` · ${absent} not, and not seen here` : ""}</span>{/if}
   </header>
   <Tabs
     tabs={[
@@ -143,9 +165,11 @@
     label="what to show"
   />
   {#if !loaded}
-    <p class="quiet">Asking GitHub…</p>
+    <Skeleton />
   {:else if failed}
-    <Empty icon="alert" title="The forge could not be read" body={failed} />
+    <Empty icon="alert" title={signIn ? "Not signed in to GitHub" : "The forge could not be read"} body={failed}>
+      {#snippet action()}{#if signIn}{@render act("sign_in")}{:else}{@render act("doctor")}{/if}{/snippet}
+    </Empty>
   {:else if says && blocking}
     <div class="state" data-state={github?.state}>
       <Empty icon="alert" title={says.title} body={says.body}>
@@ -169,16 +193,20 @@
     {#if elsewhere.length}
       <p class="quiet">{listed(elsewhere.map((p) => p.project_name))}: not a GitHub repository.</p>
     {/if}
+    {#each unread as p (p.project)}
+      <p class="banner" data-state="project-failed"><Icon name="alert" size={13} /> <b>{p.project_name}</b> could not be read — {p.stale}</p>
+    {/each}
     {#if shown.length === 0 && stale}
       <p class="quiet">Nothing was read before GitHub stopped answering, so there is no list to show.</p>
+    {:else if shown.length === 0 && !readAt}
+      <p class="quiet">Not read yet: Devplane has not asked GitHub since it started. The list appears once it has.</p>
+    {:else if shown.length === 0 && unread.length}
+      <p class="quiet">Nothing open was read, and {listed(unread.map((p) => p.project_name))} could not be read at all, so this is not every project.</p>
     {:else if shown.length === 0}
       <Empty icon="forge" title={showing === "issues" ? "No open issue" : "No open pull request"} body="Across every registered project that has a GitHub remote." limit={absent ? `${absent} projects have no GitHub remote and are not counted.` : ""} />
     {:else}
       <div class="frame">
-        <Grid id="forge" {columns} rows={shown} key={(r) => r.url} group={(r) => (r.needs_you ? "Needs you" : "Everything else")} bind:selected open={(r) => {
-          const to = safeHref(r.url);
-          if (to) window.open(to, "_blank", "noopener");
-        }} label={showing}>
+        <Grid id="forge" {columns} rows={shown} key={(r) => r.url} group={(r) => (r.needs_you ? "Needs you" : "Everything else")} bind:selected bind:order open={(r) => openRow(r.url)} label={showing}>
           {#snippet cell(r, c)}
             {#if c.key === "you"}{#if r.needs_you}<span class="you" title="needs you"><Icon name="person" size={13} /></span>{/if}
             {:else if c.key === "title"}<span class="t">{r.title}</span>

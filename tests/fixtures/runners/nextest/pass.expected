@@ -1,0 +1,6 @@
+runner nextest
+ran 7
+lines 1
+run 7
+passed 7
+skipped 1

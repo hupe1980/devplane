@@ -1,14 +1,15 @@
 //! The CLI's view of the host: every terminal command is a client of the same
 //! API the browser uses, so anything a person can see they can script with
-//! `--json`.
+//! `--json`. Reads come back as the very structs the host serialises
+//! (`crate::view`), so the terminal cannot read a field the host never wrote.
 
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
 
 /// The one sentence for *nothing is running*, shared by every command that
 /// needs a host.
-pub const NO_HOST: &str = "no host is running — start one with `devplane open` (the workbench), \
-     or `devplane serve` to host without a window";
+pub const NO_HOST: &str = "no host is running — start one with `devplane up` (the workbench), \
+     or `devplane up --no-browser` to host without opening it";
 
 /// The error for a route only a running host can answer: the cause (no host)
 /// first, then what needed one.
@@ -17,17 +18,11 @@ pub fn needs_host(what: &str) -> anyhow::Error {
     anyhow::anyhow!("{NO_HOST}. {what} needs one.")
 }
 
-/// Whether an error is the missing host, so a caller's own context does not
-/// bury it under a wrong guess.
-#[must_use]
-pub fn is_no_host(e: &anyhow::Error) -> bool {
-    e.chain()
-        .any(|c| c.to_string().starts_with("no host is running"))
-}
-
 #[derive(Clone)]
 pub struct Client {
     base: String,
+    /// The port the record names, which the host's proof must name too.
+    port: u16,
     token: String,
     http: reqwest::Client,
 }
@@ -41,11 +36,11 @@ fn explain_status(path: &str, status: reqwest::StatusCode) -> String {
     match status {
         reqwest::StatusCode::NOT_FOUND => format!(
             "{path} returned 404 — this binary knows that route, so the running host is \
-             probably an older build of it. `devplane quit` and run the command again."
+             probably an older build of it. `devplane down` and run the command again."
         ),
         reqwest::StatusCode::UNAUTHORIZED => format!(
             "{path} returned 401 — the token in ~/.devplane/token is not the one the running \
-             host started with. `devplane quit` and run the command again."
+             host started with. `devplane down` and run the command again."
         ),
         other => format!("{path} returned {other}"),
     }
@@ -57,6 +52,7 @@ impl Client {
         let info = crate::config::read_host()?.context(NO_HOST)?;
         Ok(Self {
             base: info.base_url(),
+            port: info.port,
             token: crate::config::load_or_create_token()?,
             http: reqwest::Client::new(),
         })
@@ -69,19 +65,24 @@ impl Client {
         match c.version().await {
             Some(v) if v == env!("CARGO_PKG_VERSION") => Ok(c),
             Some(v) => bail!(
-                "the running host is v{v} and this is v{}. `devplane quit`, then start it again.",
+                "the running host is v{v} and this is v{}. `devplane down`, then start it again.",
                 env!("CARGO_PKG_VERSION")
             ),
             None => bail!("{NO_HOST}"),
         }
     }
 
-    /// The running host's version, or `None` when nothing healthy answers.
-    /// A host that says only `ok` reports as `0.0.0`, which matches nothing.
+    /// The running host's version, or `None` when nothing answers that can
+    /// prove it holds the token. Asked with a fresh nonce, which the host
+    /// answers with [`crate::config::host_proof`]; whatever else holds the
+    /// port — a stale record, another user's process — is never sent the
+    /// token, because every route that carries it is reached through here or
+    /// [`Client::healthy`].
     pub async fn version(&self) -> Option<String> {
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
         let text = self
             .http
-            .get(format!("{}/healthz", self.base))
+            .get(format!("{}/healthz?nonce={nonce}", self.base))
             .timeout(std::time::Duration::from_millis(500))
             .send()
             .await
@@ -92,7 +93,18 @@ impl Client {
             .await
             .ok()?;
         let mut words = text.split_whitespace();
-        (words.next() == Some("ok")).then(|| words.next().unwrap_or("0.0.0").to_string())
+        let (Some("ok"), Some(version), Some(proof)) = (words.next(), words.next(), words.next())
+        else {
+            return None;
+        };
+        let expected = crate::config::host_proof(&self.token, self.port, &nonce);
+        let same = proof.len() == expected.len()
+            && proof
+                .bytes()
+                .zip(expected.bytes())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0;
+        same.then(|| version.to_string())
     }
 
     /// Asks the host to stop and waits for its port to go quiet.
@@ -115,14 +127,9 @@ impl Client {
         }
     }
 
+    /// Whether the host the record names answers and proves it holds the token.
     pub async fn healthy(&self) -> bool {
-        self.http
-            .get(format!("{}/healthz", self.base))
-            .timeout(std::time::Duration::from_millis(500))
-            .send()
-            .await
-            .map(|r| r.status().is_success())
-            .unwrap_or(false)
+        self.version().await.is_some()
     }
 
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -133,10 +140,26 @@ impl Client {
             .send()
             .await
             .with_context(|| format!("GET {path}"))?;
-        if !res.status().is_success() {
-            bail!("{}", explain_status(path, res.status()));
+        let status = res.status();
+        if !status.is_success() {
+            // A refusal the host explained (`{"error": …}`) is said as it
+            // wrote it; only a bare status is a wrong route or a wrong token.
+            let said = res.json::<serde_json::Value>().await.ok();
+            match said
+                .as_ref()
+                .and_then(|v| v.get("error"))
+                .and_then(|e| e.as_str())
+            {
+                Some(e) => bail!("{e}"),
+                None => bail!("{}", explain_status(path, status)),
+            }
         }
         res.json().await.with_context(|| format!("decoding {path}"))
+    }
+
+    /// What only a running host knows about its own health.
+    pub async fn diagnostics(&self) -> Result<crate::view::Diagnostics> {
+        self.get("/api/diagnostics").await
     }
 
     pub async fn post<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -204,5 +227,94 @@ impl Client {
 
     pub fn token(&self) -> &str {
         &self.token
+    }
+}
+
+/// The typed reads every terminal command makes, from a host that answers or
+/// from the store: the same structs the host serialises.
+impl crate::local::Reader {
+    /// The board: sessions in play, the summary, and GitHub's counts.
+    pub async fn board(&self, all: bool) -> Result<crate::view::BoardResponse> {
+        self.get_as(match all {
+            true => "/api/board?all=true",
+            false => "/api/board",
+        })
+        .await
+    }
+
+    /// The inbox, narrowed by the host so every surface narrows alike. A read
+    /// by a person, so it moves the *since you last looked* boundary.
+    pub async fn inbox(
+        &self,
+        project: Option<&str>,
+        needs_you: bool,
+    ) -> Result<crate::view::InboxView> {
+        let mut path = String::from("/api/inbox?read=true");
+        if let Some(p) = project {
+            path.push_str(&format!("&project={}", crate::core::text::url_escape(p)));
+        }
+        if needs_you {
+            path.push_str("&needs_you=true");
+        }
+        self.get_as(&path).await
+    }
+
+    /// Every change, newest first.
+    pub async fn changes(&self) -> Result<Vec<crate::view::ChangeView<'static>>> {
+        self.get_as("/api/changes").await
+    }
+
+    /// One change, its tree read now. `id` is a whole id: resolve a prefix
+    /// with `cli::ids` first.
+    pub async fn change(&self, id: &str) -> Result<crate::view::ChangeView<'static>> {
+        self.get_as(&format!("/api/changes/{id}")).await
+    }
+
+    /// Answers an ask and reads the reply as `T`: the ask as it now stands,
+    /// or the reason it was refused.
+    pub async fn answer_as<T: DeserializeOwned>(
+        &self,
+        ask: &str,
+        body: &serde_json::Value,
+    ) -> Result<T> {
+        let v = self.answer(ask, body).await?;
+        serde_json::from_value(v).with_context(|| format!("reading the answer to ask `{ask}`"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// Something else on the port: it answers `/healthz` as a host would, but
+    /// cannot prove it holds the token, so it is never sent it.
+    #[tokio::test]
+    async fn a_process_that_cannot_prove_the_token_is_never_sent_it() {
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let log = seen.clone();
+        let app = axum::Router::new().fallback(move |headers: axum::http::HeaderMap| {
+            let log = log.clone();
+            async move {
+                if let Some(a) = headers.get("authorization") {
+                    log.lock()
+                        .unwrap()
+                        .push(a.to_str().unwrap_or_default().into());
+                }
+                concat!("ok ", env!("CARGO_PKG_VERSION"), " 00")
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+        let c = Client {
+            base: format!("http://127.0.0.1:{port}"),
+            port,
+            token: "secret".into(),
+            http: reqwest::Client::new(),
+        };
+        assert_eq!(c.version().await, None);
+        assert!(!c.healthy().await);
+        assert!(seen.lock().unwrap().is_empty(), "the token went out");
     }
 }

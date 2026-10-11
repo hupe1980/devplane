@@ -2,15 +2,23 @@
   // The ledger: everything Devplane recorded as decided, and on whose
   // authority. *Decided for you* is one click. No rate, no score, no count per
   // person — the chips count rows.
+  import Inline from "../../lib/ui/Inline.svelte";
   import { resource } from "../../lib/resource.svelte";
   import Failed from "../../lib/Failed.svelte";
   import Grid, { type Column } from "../../lib/ui/Grid.svelte";
   import Pill, { type Tone } from "../../lib/ui/Pill.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
   import Empty from "../../lib/ui/Empty.svelte";
+  import Skeleton from "../../lib/Skeleton.svelte";
+  import { cursor } from "../../lib/cursor";
+  import { go } from "../../lib/route";
+  import { surfaces } from "../../lib/surfaces";
 
-  import type { Decision } from "../../wire/Decision";
-  let { about = "" }: { about?: string } = $props();
+  import type { Decision as Row } from "../../wire/Decision";
+  import Edits, { type Edit } from "./Edits.svelte";
+  /// A ledger row: the decision, and for a driven call the edits it reported.
+  type Decision = Row & { edits?: Edit[]; no_edit?: string | null };
+  let { about = "", blind = "" }: { about?: string; blind?: string } = $props();
 
   /// How many rows one read asks for; a full read says there are more.
   const LIMIT = 1000;
@@ -38,6 +46,27 @@
     ),
   );
   const pick = $derived(shown.find((r) => r.id === selected) ?? null);
+  /// Authorities with nothing recorded fold behind one counted chip.
+  let allChips = $state(false);
+  const zero = $derived(counts.filter(([, n]) => n === 0));
+  const chips = $derived(allChips || !rows ? counts : counts.filter(([a, n]) => n > 0 || only === a));
+
+  // The list keys: `j`/`k` select a decision, Enter opens what it is about.
+  let order = $state<string[]>([]);
+  const changePage = $derived(surfaces().find((x) => x.link === "change")?.id ?? "");
+  $effect(() =>
+    cursor({
+      scope: "why",
+      size: () => order.length,
+      at: () => order.indexOf(selected ?? ""),
+      go: (i) => (selected = order[i]),
+      open: (i) => {
+        const r = shown.find((x) => x.id === order[i]);
+        if (r?.change_id && changePage) go(`#${changePage}/${encodeURIComponent(r.change_id)}`);
+        else if (r?.run_id) go(`#why/${encodeURIComponent(r.run_id)}`);
+      },
+    }),
+  );
   const tone = (a: string): Tone => (a === "person" ? "work" : a === "rule" ? "wait" : a === "devplane" ? "none" : "fail");
   const day = (r: Decision) => new Date(r.at).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
   const project = (p?: string | null) => (p ? (p.split("/").filter(Boolean).pop() ?? p) : "—");
@@ -60,9 +89,12 @@
       <Icon name="person" size={13} /> Decided for you <span>{rows ? rows.filter((r) => FOR_YOU.has(r.authority)).length : ""}</span>
     </button>
     <div class="chips" role="group" aria-label="by authority">
-      {#each counts as [a, n] (a)}
+      {#each chips as [a, n] (a)}
         <button class:on={only === a} disabled={n === 0} onclick={() => (only = only === a ? null : a)}>{a} <span>{rows ? n : ""}</span></button>
       {/each}
+      {#if rows && !allChips && zero.length > 0}
+        <button class="more" title="authorities with nothing recorded: {zero.map(([a]) => a).join(', ')}" onclick={() => (allChips = true)}>+{zero.length}</button>
+      {/if}
     </div>
     <span class="gap"></span>
     <label class="find"><Icon name="search" size={13} /><input bind:value={text} placeholder="Filter" aria-label="filter the ledger" /></label>
@@ -78,27 +110,28 @@
   {#if read.phase === "failed" && read.failure}
     <Failed what="the ledger" failure={read.failure} />
   {:else if rows && rows.length === 0}
-    <Empty icon="ledger" title="Nothing has been decided yet" body="Every refusal a rule made, every question a person answered, every gate Devplane ran — each lands here with the authority that decided it." />
+    <Empty icon="ledger" title="Nothing has been decided yet" body="Every refusal a rule made, every question a person answered, every gate Devplane ran — each lands here with the authority that decided it." limit={blind} />
   {:else}
     <div class="frame">
-      <Grid id="ledger" {columns} rows={shown} key={(r) => r.id} group={day} bind:selected label="decisions">
+      <Grid id="ledger" {columns} rows={shown} key={(r) => r.id} group={day} bind:selected bind:order label="decisions">
         {#snippet cell(r, c)}
           {#if c.key === "at"}{new Date(r.at).toTimeString().slice(0, 5)}
           {:else if c.key === "authority"}<Pill word={r.authority} as={tone(r.authority)} />
           {:else if c.key === "outcome"}<span class="out {r.outcome}">{r.outcome}</span>
           {:else if c.key === "action"}{r.action}
           {:else if c.key === "project"}{project(r.project_id)}
-          {:else if c.key === "subject"}{r.subject}
+          {:else if c.key === "subject"}<span title={r.subject}>{r.subject}</span>
           {:else}<span class="dim">{r.reason ?? ""}</span>{/if}
         {/snippet}
-        {#snippet empty()}<p class="quiet">{rows === null ? "Reading…" : "Nothing matches."}</p>{/snippet}
+        {#snippet empty()}{#if rows === null}<Skeleton />{:else}<p class="quiet">Nothing matches.</p>{/if}{/snippet}
       </Grid>
       {#if pick}
         <aside class="drawer">
           <header><Pill word={pick.authority} as={tone(pick.authority)} /> <b>{pick.action}</b> <button class="x" aria-label="close" onclick={() => (selected = null)}><Icon name="x" size={13} /></button></header>
           <p class="when">{new Date(pick.at).toLocaleString()} · {pick.outcome}</p>
           <pre>{pick.subject}</pre>
-          {#if pick.reason}<p>{pick.reason}</p>{/if}
+          {#if pick.reason}<p><Inline text={pick.reason} /></p>{/if}
+          <Edits edits={pick.edits} none={pick.no_edit} />
           <div class="links">
             {#if pick.change_id}<a href={`#change/${encodeURIComponent(pick.change_id)}`}><Icon name="change" size={13} /> the change</a>{/if}
             {#if pick.run_id}<a href={`#why/${encodeURIComponent(pick.run_id)}`}><Icon name="sessions" size={13} /> everything about this run</a>{/if}

@@ -1,0 +1,33 @@
+
+[1m[30m[46m RUN [49m[39m[22m [36mv5.0.2 [39m[90m/work/js/vt[39m
+
+ [31m❯[39m a.test.js [2m([22m[2m5 tests[22m[2m | [22m[31m1 failed[39m[2m | [22m[33m1 skipped[39m[2m | [22m[90m1 todo[39m[2m)[22m[32m 11[2mms[22m[39m
+[31m   [31m×[31m fails when asked[39m[32m 6[2mms[22m[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m a.test.js[2m > [22mfails when asked
+[31m[1mAssertionError[22m: expected '1' to be undefined[39m
+
+[32m- Expected:[39m
+undefined
+
+[31m+ Received:[39m
+"1"
+
+[36m [2m❯[22m a.test.js:[2m4:57[22m[39m
+    [90m  2|[39m test('one', () => expect(1).toBe(1));
+    [90m  3|[39m test('two', () => expect(2).toBe(2));
+    [90m  4|[39m test('fails when asked', () => expect(process.env.FAIL).toBeUndefined(…
+    [90m   |[39m                                                         [31m^[39m
+    [90m  5|[39m test.skip('skipped', () => {});
+    [90m  6|[39m test.todo('later');
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m2 passed[39m[22m[2m | [22m[33m1 skipped[39m[2m | [22m[90m1 todo[39m[90m (5)[39m
+[2m   Start at [22m 07:45:17
+[2m   Duration [22m 592ms[2m (import 63%, transform 21%, worker 13%, tests 3%)[22m
+

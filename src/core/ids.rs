@@ -3,17 +3,22 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// `string_id!(Name, "doc")` exports `ui/src/wire/Name.ts`; a trailing
+/// `internal` keeps an id the interface never names out of the wire.
 macro_rules! string_id {
     ($name:ident, $doc:literal) => {
+        string_id!(@with $name, $doc, ts(type = "string", export, export_to = "wire/"));
+    };
+    ($name:ident, $doc:literal, internal) => {
+        string_id!(@with $name, $doc, ts(type = "string"));
+    };
+    (@with $name:ident, $doc:literal, $ts:meta) => {
         #[doc = $doc]
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
         #[serde(transparent)]
         // A plain string on the wire and in the generated TypeScript.
         #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-        #[cfg_attr(
-            feature = "typescript",
-            ts(type = "string", export, export_to = "wire/")
-        )]
+        #[cfg_attr(feature = "typescript", $ts)]
         pub struct $name(pub String);
 
         impl $name {
@@ -53,40 +58,29 @@ string_id!(
 string_id!(
     SessionId,
     "A provider's own session identifier — Claude Code's `session_id`, an ACP \
-     session id. Stable across resume, which is why runs are keyed by it."
+     session id. Stable across resume, which is why runs are keyed by it.",
+    internal
 );
 string_id!(
     RunId,
     "A Devplane run. For observed sessions this mirrors the `SessionId`: a \
      session we did not start has no other identity we can correlate on."
 );
-string_id!(AttentionId, "One item in the inbox.");
+string_id!(AttentionId, "One item in the inbox.", internal);
 string_id!(
     AskId,
     "One thing an agent asked a person. **An opaque token, and that is the \
      point**: it is what an answer is addressed to, from any surface, however \
      long afterwards and whatever process is alive by then. Addressing an \
      answer by session is what made an answer undeliverable the moment the \
-     session was gone."
+     session was gone.",
+    internal
 );
 string_id!(
     ChangeId,
     "One unit of work: durable across sessions, and the thing a branch, a \
      worktree and a set of gates belong to."
 );
-
-string_id!(
-    ReportId,
-    "A finding one project filed about another. Minted `rp-…` when it is \
-     filed, so it reads as what it is wherever it is pasted."
-);
-
-impl ReportId {
-    /// A fresh id. Uuid v7, so ordering by id is ordering by filing time.
-    pub fn mint() -> Self {
-        Self(format!("rp-{}", uuid::Uuid::now_v7().simple()))
-    }
-}
 
 impl ProjectId {
     /// The path as given, minus a trailing separator. No normalisation or

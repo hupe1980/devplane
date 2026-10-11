@@ -1,7 +1,6 @@
 import { register, surfaces } from "../../lib/surfaces";
 import { onAction } from "../../lib/keys";
 import { go } from "../../lib/route";
-import New from "./New.svelte";
 
 // Starting a change from anywhere. It floats over the current page, and
 // closing it goes back there.
@@ -37,5 +36,5 @@ register({
   transient: true,
   reads: ["/api/projects", "/api/agents", "/api/specs", "/api/changes/preflight"],
   select: () => ({ changeSurface: surfaces().find((s) => s.link === "change")?.id ?? "" }),
-  component: New,
+  page: () => import("./New.svelte"),
 });

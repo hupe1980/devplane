@@ -1,6 +1,8 @@
-//! Every permission-policy bypass the audit reproduced, driven through the
-//! same library calls `devplane explain` makes (`PolicyCache::restrictive`),
+//! Known permission-policy bypasses, each driven through the
+//! same library calls `devplane config explain` makes (`PolicyCache::restrictive`),
 //! plus the ordinary commands that must not become questions.
+
+mod common;
 
 use devplane::core::policy::Context;
 use devplane::core::{Policy, Verdict};
@@ -13,7 +15,7 @@ fn policy(deny: &[&str], ask: &[&str]) -> Policy {
     Policy::rules(&s(deny), &s(ask))
 }
 
-/// The rules the audit ran `devplane explain` with.
+/// The rules every bypass here is tried against.
 fn audited() -> Policy {
     policy(&["Bash(rm -rf *)", "Read(.env)"], &["Bash(git push *)"])
 }
@@ -299,10 +301,7 @@ fn ordinary_commands_are_not_over_asked() {
 }
 
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("vp-bypass-{tag}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::canonicalize(&dir).unwrap()
+    std::fs::canonicalize(common::scratch(&format!("bypass-{tag}"))).unwrap()
 }
 
 #[test]
@@ -311,7 +310,7 @@ fn a_nested_git_directory_does_not_drop_the_projects_rules() {
     std::fs::create_dir_all(root.join(".git")).unwrap();
     std::fs::write(
         root.join("devplane.toml"),
-        "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n",
+        "[policy]\ndeny = [\"Bash(rm -rf *)\"]\n",
     )
     .unwrap();
     let sub = root.join("sub");
@@ -322,7 +321,7 @@ fn a_nested_git_directory_does_not_drop_the_projects_rules() {
         Verdict::Deny { .. }
     ));
     // Nor by planting a laxer file beside the nested `.git`.
-    std::fs::write(sub.join("devplane.toml"), "[policy]\nnever_auto = []\n").unwrap();
+    std::fs::write(sub.join("devplane.toml"), "[policy]\ndeny = []\n").unwrap();
     let fresh = PolicyCache::new(Policy::default(), PathBuf::from("/"), None);
     assert!(matches!(
         fresh.restrictive(&sub, "Bash", &json!({"command": "rm -rf /"})),
@@ -348,6 +347,7 @@ fn an_agent_may_not_change_devplanes_own_files_or_read_its_token() {
     for file in [
         format!("{h}/policy.toml"),
         format!("{h}/agents.toml"),
+        format!("{h}/trusted.toml"),
         format!("{h}/devplane.db"),
         format!("{h}/devplane.db-wal"),
         format!("{h}/token"),
@@ -372,6 +372,7 @@ fn an_agent_may_not_change_devplanes_own_files_or_read_its_token() {
         format!("cat {h}/token"),
         "echo '[policy]' > devplane.toml".to_string(),
         format!("cp /tmp/x {h}/agents.toml"),
+        format!("echo 'roots = [\"/x\"]' > {h}/trusted.toml"),
     ] {
         assert!(matches!(sh(cmd.clone()), Verdict::Deny { .. }), "{cmd}");
     }
@@ -379,19 +380,31 @@ fn an_agent_may_not_change_devplanes_own_files_or_read_its_token() {
         sh(format!("sed -i s/a/b/ {r}/devplane.toml")),
         Verdict::Unresolved { .. }
     ));
-    // Reading is still fine, except the token.
-    assert_eq!(
-        cache.restrictive(
-            &root,
-            "Read",
-            &json!({"file_path": format!("{h}/policy.toml")})
-        ),
-        Verdict::Undecided
-    );
-    assert!(matches!(
-        cache.restrictive(&root, "Read", &json!({"file_path": format!("{h}/token")})),
-        Verdict::Deny { .. }
-    ));
+    // Nothing under the home is read either: the store holds the answers.
+    for file in [
+        "policy.toml",
+        "trusted.toml",
+        "token",
+        "devplane.db",
+        "spool/x.json",
+    ] {
+        match cache.restrictive(&root, "Read", &json!({"file_path": format!("{h}/{file}")})) {
+            Verdict::Deny { rule } => assert!(rule.starts_with("devplane-own-files"), "{rule}"),
+            v => panic!("{file}: {v:?}"),
+        }
+    }
+    for cmd in [
+        format!("sqlite3 {h}/devplane.db .dump"),
+        format!("cat {h}/policy.toml"),
+        "cat ~/.devplane/devplane.db".to_string(),
+        "sqlite3 \"$HOME/.devplane/devplane.db\" .dump".to_string(),
+        "ls ${HOME}/.devplane".to_string(),
+    ] {
+        match sh(cmd.clone()) {
+            Verdict::Deny { rule } => assert!(rule.starts_with("devplane-own-files"), "{rule}"),
+            v => panic!("{cmd}: {v:?}"),
+        }
+    }
     assert_eq!(sh(format!("cat {r}/devplane.toml")), Verdict::Undecided);
     assert_eq!(sh("cat devplane.toml".into()), Verdict::Undecided);
     assert_eq!(sh("cargo test".into()), Verdict::Undecided);
@@ -462,10 +475,14 @@ fn moving_removing_or_reaching_devplanes_files_through_cd_is_refused() {
         "cp README.md docs/",
         "cd /tmp && rm policy.toml",
         "cat devplane.toml",
-        &format!("cd {h} && cat policy.toml"),
     ] {
         assert_eq!(sh(cmd.to_string()), Verdict::Undecided, "{cmd}");
     }
+    // Reading the home is refused as well as changing it.
+    assert!(matches!(
+        sh(format!("cd {h} && cat policy.toml")),
+        Verdict::Deny { .. }
+    ));
     std::fs::remove_dir_all(&root).ok();
     std::fs::remove_dir_all(&user).ok();
 }

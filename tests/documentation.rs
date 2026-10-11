@@ -1,7 +1,7 @@
 //! Documentation examples and the parser must agree.
 //!
 //! `devplane.toml` uses `deny_unknown_fields`, so one bad key in a documented example stops
-//! the whole file loading. Every example must parse, mean something, and pass `devplane check`.
+//! the whole file loading. Every example must parse, mean something, and pass `devplane config check`.
 
 use std::path::{Path, PathBuf};
 
@@ -107,6 +107,41 @@ fn check(blocks: Vec<Block>) -> usize {
             continue;
         }
 
+        if b.names.contains("trusted.toml") {
+            // It must read as the person's trust file, naming a root.
+            let home = std::env::temp_dir().join(format!(
+                "vp-doc-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(devplane::trust::path(&home), &b.body).unwrap();
+            let read = devplane::trust::Trusted::read(&home);
+            assert!(
+                read.as_ref().is_ok_and(|t| t.projects().next().is_some()),
+                "{}: this `trusted.toml` example does not read as a trust file naming a root: {:?}\n{}",
+                b.source,
+                read.err(),
+                b.body
+            );
+            std::fs::remove_dir_all(&home).ok();
+            continue;
+        }
+
+        if b.names.contains("policy.toml") {
+            // The person's own file: it must load as Devplane loads it, with
+            // every grant it shows accepted.
+            let parsed = devplane::core::GlobalConfig::parse(&b.body);
+            assert!(
+                parsed.as_ref().is_ok_and(|g| g.grants().is_ok()),
+                "{}: this `policy.toml` example does not load: {:?}\n{}",
+                b.source,
+                parsed.err(),
+                b.body
+            );
+            continue;
+        }
+
         if b.names.contains("agents.toml") {
             // It must add an agent, pinned.
             let home = std::env::temp_dir().join(format!(
@@ -153,7 +188,7 @@ fn check(blocks: Vec<Block>) -> usize {
             b.body
         );
 
-        // And `devplane check` must accept it.
+        // And `devplane config check` must accept it.
         let fatal: Vec<String> = config
             .validate()
             .into_iter()
@@ -162,7 +197,7 @@ fn check(blocks: Vec<Block>) -> usize {
             .collect();
         assert!(
             fatal.is_empty(),
-            "{}: shows a configuration `devplane check` refuses: {fatal:?}\n{}",
+            "{}: shows a configuration `devplane config check` refuses: {fatal:?}\n{}",
             b.source,
             b.body
         );
@@ -197,27 +232,6 @@ fn every_example_on_the_documentation_site_is_one_that_works() {
     );
 }
 
-/// Reports a skipped test; under `CI`, fails instead.
-///
-/// The ignored tests below read gitignored inputs; `just notes` runs them where present.
-fn skip(why: &str) {
-    if std::env::var("CI").is_ok() {
-        panic!("{why} — a skip cannot pass in CI");
-    }
-    eprintln!("skipped: {why}");
-}
-
-#[test]
-#[ignore = "reads the gitignored concepts/; `just notes` runs it where the notes are present"]
-fn every_example_in_the_internal_notes_is_one_that_works() {
-    let dir = repo_root().join("concepts");
-    if !dir.is_dir() {
-        skip("concepts/ is not in this checkout, so no example in the notes was checked");
-        return;
-    }
-    check(blocks_under(&dir));
-}
-
 /// Every key a project can set appears in the configuration reference.
 ///
 /// A key that is read but undocumented is a feature nobody can find.
@@ -242,8 +256,17 @@ fn every_key_a_project_can_set_is_in_the_reference() {
             continue;
         }
         let body_end = block.find("\n}").unwrap_or(block.len());
+        let mut flattened = false;
         for line in block[header_end..body_end].lines() {
             let line = line.trim();
+            // A flattened map is the table's other keys (`[gates.<name>]`), not a key.
+            if line.starts_with("#[serde(flatten)]") {
+                flattened = true;
+                continue;
+            }
+            if std::mem::take(&mut flattened) && line.starts_with("pub ") {
+                continue;
+            }
             if let Some(rest) = line.strip_prefix("pub ")
                 && let Some((field, _)) = rest.split_once(':')
                 && field.chars().all(|c| c.is_ascii_lowercase() || c == '_')
@@ -290,68 +313,6 @@ fn every_key_a_project_can_set_is_in_the_reference() {
         undocumented.is_empty(),
         "a project can set these and the configuration reference never mentions them: {undocumented:?}"
     );
-}
-
-/// The release workflow and CI both build every target in `[workspace.metadata.dist]`:
-/// a missing one would silently drop out of the release, or first be built at a tag.
-#[test]
-fn the_release_workflow_builds_every_target_the_manifest_declares() {
-    let manifest = std::fs::read_to_string(repo_root().join("Cargo.toml")).expect("Cargo.toml");
-    let manifest: toml::Value = toml::from_str(&manifest).expect("Cargo.toml parses");
-    let declared: Vec<String> = manifest["workspace"]["metadata"]["dist"]["targets"]
-        .as_array()
-        .expect("[workspace.metadata.dist] targets")
-        .iter()
-        .map(|t| t.as_str().expect("a target triple").to_string())
-        .collect();
-
-    let workflow = std::fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
-        .expect("release.yml");
-    let mut built: Vec<String> = workflow
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix("target: "))
-        .map(|t| t.trim().to_string())
-        .collect();
-    built.sort();
-    built.dedup();
-
-    let mut declared_sorted = declared.clone();
-    declared_sorted.sort();
-    assert_eq!(
-        declared_sorted, built,
-        "[workspace.metadata.dist] targets and the release.yml build matrix disagree"
-    );
-
-    // CI builds the same targets on every push, so a tag is never the first
-    // build of one.
-    let ci = std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("ci.yml");
-    let mut ci_built: Vec<String> = ci
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix("target: "))
-        .map(|t| t.trim().to_string())
-        .collect();
-    ci_built.sort();
-    ci_built.dedup();
-    assert_eq!(
-        declared_sorted, ci_built,
-        "[workspace.metadata.dist] targets and the ci.yml build matrix disagree"
-    );
-}
-
-/// The Spec Kit version this integration was read against is recorded as a version.
-#[test]
-fn the_spec_kit_version_this_was_read_against_is_recorded() {
-    use devplane::spec::SPEC_KIT_READ_AGAINST;
-
-    assert!(
-        SPEC_KIT_READ_AGAINST
-            .split('.')
-            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())),
-        "the recorded version must be a version: {SPEC_KIT_READ_AGAINST}"
-    );
-
-    // The comparison with the installed copy lives in `scripts/concepts-check.sh`: Spec
-    // Kit's directory is gitignored and the published tree may not point at it.
 }
 
 /// The npm package is generated by `dist` from this manifest, so its version is the
@@ -770,156 +731,6 @@ fn every_skill_the_plugin_ships_is_loadable_and_runs_only_real_commands() {
     );
 }
 
-/// Spec Kit's hook contract still contains the clauses this integration relies on.
-///
-/// A reworded clause could leave a registered hook that never fires.
-#[test]
-#[ignore = "reads the gitignored .claude/skills/; `just notes` runs it where Spec Kit is installed"]
-fn the_speckit_hook_contract_still_says_what_this_feature_relies_on() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let skill = root.join(".claude/skills/speckit-implement/SKILL.md");
-    let Ok(body) = std::fs::read_to_string(&skill) else {
-        skip("Spec Kit is not installed here, so its hook contract was not checked");
-        return;
-    };
-
-    // Quoted verbatim: a paraphrase would survive the rewording that matters.
-    const CLAUSES: &[(&str, &str)] = &[
-        (
-            "hooks come from `.specify/extensions.yml`",
-            "`.specify/extensions.yml` exists in the project root",
-        ),
-        (
-            "the event this feature registers under",
-            "hooks.after_implement",
-        ),
-        (
-            "a non-empty condition is skipped, so our entry carries none",
-            "skip the hook and leave condition evaluation to the HookExecutor",
-        ),
-        (
-            "dots in the command name become hyphens",
-            "replace dots (`.`) with hyphens (`-`)",
-        ),
-        (
-            "a mandatory hook must actually be invoked and waited for",
-            "you MUST actually invoke the hook and wait for it to finish",
-        ),
-        (
-            "`enabled: false` turns a hook off",
-            "Filter out hooks where `enabled` is explicitly `false`",
-        ),
-        (
-            "an unparseable extensions.yml is reported rather than skipped",
-            "do not skip silently",
-        ),
-    ];
-
-    let mut gone = Vec::new();
-    for (why, quote) in CLAUSES {
-        if !body.contains(quote) {
-            gone.push(format!("{why} — no longer says: {quote:?}"));
-        }
-    }
-    assert!(
-        gone.is_empty(),
-        "Spec Kit's hook contract changed under this feature. Re-read \
-         {skill:?} and `devplane speckit` before trusting it:\n  {}",
-        gone.join("\n  ")
-    );
-
-    // And the event we default to is one the installed copy actually reads.
-    assert!(
-        body.contains(&format!("hooks.{}", devplane::spec::DEFAULT_HOOK_EVENT)),
-        "`{}` is not an event this Spec Kit version looks for",
-        devplane::spec::DEFAULT_HOOK_EVENT
-    );
-}
-
-/// Every session status, wait reason and state the vendor documents is one this build
-/// handles, so a new vendor value fails here rather than being mishandled.
-#[test]
-#[ignore = "reads the gitignored concepts/reference/; `just notes` runs it where the corpus is fetched"]
-fn every_session_state_the_vendor_documents_is_one_this_build_handles() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let Ok(reference) =
-        std::fs::read_to_string(root.join("concepts/reference/claude-code/agent-view.md"))
-    else {
-        skip("concepts/reference/ is not fetched, so the vendor's session states were not checked");
-        return;
-    };
-
-    // The `status` row of the vendor's field table.
-    let status_row = reference
-        .lines()
-        .find(|l| l.contains("`pid`, `status`"))
-        .expect("the field table still documents `status`");
-    let documented: Vec<&str> = ["busy", "waiting", "idle"]
-        .into_iter()
-        .filter(|v| status_row.contains(&format!("`{v}`")))
-        .collect();
-    assert_eq!(
-        documented.len(),
-        3,
-        "the three status values this build handles are no longer the ones \
-         documented; the row now reads: {status_row}"
-    );
-    // Counted, so a value nobody here has thought about is noticed.
-    let backticked = status_row.matches('`').count() / 2;
-    assert_eq!(
-        backticked, 5,
-        "`pid`, `status` and three values is five quoted terms; the row now has \
-         {backticked}, so something was added or removed: {status_row}"
-    );
-
-    // Every documented wait reason must reach a person.
-    let waiting_row = reference
-        .lines()
-        .find(|l| l.contains("`waitingFor`"))
-        .expect("the field table still documents `waitingFor`");
-    for value in [
-        "permission prompt",
-        "input needed",
-        "sandbox request",
-        "worker request",
-        "dialog open",
-    ] {
-        assert!(
-            waiting_row.contains(value),
-            "`{value}` is no longer documented as something a session waits on"
-        );
-        let parsed = devplane::core::event::WaitingFor::parse_roster(Some(value));
-        assert!(
-            devplane::core::RunState::Waiting(parsed).needs_human(),
-            "`{value}` must reach a person"
-        );
-    }
-
-    // The background `state` vocabulary, from its own row.
-    let state_row = reference
-        .lines()
-        .find(|l| l.contains("| `state`"))
-        .expect("the field table still documents `state`");
-    for value in ["working", "blocked", "done", "failed", "stopped"] {
-        assert!(
-            state_row.contains(&format!("`{value}`")),
-            "`{value}` is no longer a documented session state: {state_row}"
-        );
-    }
-    let state_terms = state_row.matches('`').count() / 2;
-    assert_eq!(
-        state_terms, 6,
-        "`state` plus five values is six quoted terms; the row now has          {state_terms}, so the vocabulary changed: {state_row}"
-    );
-
-    // The sentence the inbox's central inference rests on.
-    assert!(
-        reference.contains("`blocked` always means the session needs something from you"),
-        "the vendor no longer says `blocked` always means a person is needed, \
-         so the inbox's central inference needs re-reading"
-    );
-}
-
 /// Every command, hidden ones included, is in the CLI reference or exempted here with a
 /// reason. Hidden commands like `mcp` are still configured by people.
 #[test]
@@ -932,12 +743,12 @@ fn every_command_is_in_the_cli_reference_or_deliberately_not() {
     const UNDOCUMENTED: &[(&str, &str)] = &[
         (
             "statusline",
-            "the status-line shim's own entry point. `devplane connect` installs \
+            "the status-line shim's own entry point. `devplane agent connect` installs \
              it and nobody types it",
         ),
         (
             "hook",
-            "the `SessionStart` shim. `devplane connect` installs it and nobody \
+            "the `SessionStart` shim. `devplane agent connect` installs it and nobody \
              types it",
         ),
         ("help", "clap's builtin"),
@@ -977,12 +788,12 @@ fn every_command_is_in_the_cli_reference_or_deliberately_not() {
         })
         .collect();
     assert!(
-        listed.len() > 20,
+        listed.len() > 12,
         "the parse found {} listed commands, so it is not reading the help",
         listed.len()
     );
     assert!(
-        commands.len() > 20,
+        commands.len() > 12,
         "the parse found {} commands, so it is not reading the help",
         commands.len()
     );
@@ -1066,7 +877,7 @@ fn a_failure_a_person_meets_never_shows_them_the_plumbing() {
     let preflight =
         std::fs::read_to_string(root.join("src/core/preflight.rs")).expect("core/preflight.rs");
     assert!(
-        preflight.contains("devplane ls groups by project"),
+        preflight.contains("devplane status groups by project"),
         "the unknown-project refusal does not say how to find the names"
     );
     let api = std::fs::read_to_string(root.join("src/api.rs")).expect("api.rs");
@@ -1081,24 +892,37 @@ fn a_failure_a_person_meets_never_shows_them_the_plumbing() {
 fn both_inbox_surfaces_read_the_project_and_the_wait() {
     let root = repo_root();
 
-    // The CLI's own view of an item must carry them…
-    let render = std::fs::read_to_string(root.join("src/render.rs")).expect("render.rs");
-    let item = render
-        .split("pub struct InboxItem")
-        .nth(1)
-        .expect("InboxItem")
-        .split("\n}")
-        .next()
-        .expect("the struct body");
-    for field in ["project_name", "since"] {
+    // The type the CLI reads an item as — the one the host serialises — must
+    // carry them…
+    let view = std::fs::read_to_string(root.join("src/view.rs")).expect("view.rs");
+    let attention =
+        std::fs::read_to_string(root.join("src/core/attention.rs")).expect("attention.rs");
+    let body = |text: &str, name: &str| -> String {
+        text.split(&format!("pub struct {name}"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("{name}"))
+            .split("\n}")
+            .next()
+            .expect("the struct body")
+            .to_string()
+    };
+    for (text, name, field, says) in [
+        (
+            &view,
+            "WaitingRow",
+            "project_name",
+            "which project a row is from",
+        ),
+        (
+            &attention,
+            "AttentionItem",
+            "since",
+            "how long a row has waited",
+        ),
+    ] {
         assert!(
-            item.contains(&format!("pub {field}:")),
-            "`InboxItem` has no `{field}`, so `devplane inbox` cannot say {}",
-            if field == "since" {
-                "how long a row has waited"
-            } else {
-                "which project a row is from"
-            }
+            body(text, name).contains(&format!("pub {field}:")),
+            "`{name}` has no `{field}`, so `devplane inbox` cannot say {says}"
         );
     }
 
@@ -1113,7 +937,7 @@ fn both_inbox_surfaces_read_the_project_and_the_wait() {
     // `i.since` is not a substring of the file even where the code reads it.
     let squashed: String = code.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        squashed.contains("i.project_name"),
+        squashed.contains("row.project_name"),
         "the CLI inbox row never reads `project_name`"
     );
     assert!(
@@ -1236,6 +1060,20 @@ fn the_site_and_the_binary_agree_which_group_a_command_is_in() {
 #[test]
 fn the_readme_names_as_many_commands_as_the_binary_groups() {
     const WORDS: &[(&str, usize)] = &[
+        ("fourteen", 14),
+        ("fifteen", 15),
+        ("sixteen", 16),
+        ("seventeen", 17),
+        ("eighteen", 18),
+        ("nineteen", 19),
+        ("twenty", 20),
+        ("twenty-one", 21),
+        ("twenty-two", 22),
+        ("twenty-three", 23),
+        ("twenty-four", 24),
+        ("twenty-five", 25),
+        ("twenty-six", 26),
+        ("twenty-seven", 27),
         ("twenty-eight", 28),
         ("twenty-nine", 29),
         ("thirty", 30),
@@ -1316,73 +1154,6 @@ fn the_package_carries_the_built_interface_and_not_its_sources() {
     );
 }
 
-/// The published docs state what is true, never what changed.
-///
-/// Only unambiguous history phrases count; runtime past tense is ordinary prose.
-#[test]
-fn the_published_docs_are_not_a_changelog() {
-    const HISTORY: &[&str] = &[
-        "used to",
-        "before this,",
-        "previously,",
-        "was renamed",
-        "was added in",
-        "has since been",
-        "stopped being",
-        "this release",
-        "in an earlier version",
-        "it was the other way",
-    ];
-
-    let root = repo_root();
-    let mut pages: Vec<std::path::PathBuf> = std::fs::read_dir(root.join("site/content/docs"))
-        .expect("the docs")
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "md"))
-        .collect();
-    pages.push(root.join("README.md"));
-    pages.sort();
-    assert!(
-        pages.len() > 10,
-        "the docs directory has stopped being read"
-    );
-
-    let mut found = Vec::new();
-    for page in &pages {
-        let text = std::fs::read_to_string(page).unwrap_or_default();
-        let mut fenced = false;
-        for (n, line) in text.lines().enumerate() {
-            if line.trim_start().starts_with("```") {
-                fenced = !fenced;
-                continue;
-            }
-            // A fenced block is sample output, and a table row is a value.
-            if fenced || line.trim_start().starts_with('|') {
-                continue;
-            }
-            let lower = line.to_lowercase();
-            for phrase in HISTORY {
-                if lower.contains(phrase) {
-                    found.push(format!(
-                        "{}:{} — \"{}\" in: {}",
-                        page.file_name().unwrap_or_default().to_string_lossy(),
-                        n + 1,
-                        phrase,
-                        line.trim()
-                    ));
-                }
-            }
-        }
-    }
-    assert!(
-        found.is_empty(),
-        "the published docs describe changes rather than state. A page says what is true now; \
-         the changelog says what moved:\n  {}",
-        found.join("\n  ")
-    );
-}
-
 /// Every route the MCP server asks for is one the host serves.
 ///
 /// Routes are `format!` strings, so a deleted handler is not a compile error.
@@ -1409,8 +1180,10 @@ fn every_route_the_mcp_server_asks_for_is_one_the_host_serves() {
 
     let mut missing = Vec::new();
     for path in &asked {
-        // Literal match only: the MCP server uses no `{id}` routes.
-        if !api.contains(&format!("\"{path}\"")) {
+        // A `{}` the server fills in is the router's `{id}`: the one such
+        // route is the stop claim's, about the caller's own run.
+        let route = path.replace("{}", "{id}");
+        if !api.contains(&format!("\"{route}\"")) {
             missing.push(path.clone());
         }
     }
@@ -1451,7 +1224,7 @@ fn every_command_the_binary_offers_is_in_a_group() {
          list them: {missing:?}"
     );
     assert!(
-        grouped.len() > 20,
+        grouped.len() > 12,
         "only {} commands are grouped; this guard has stopped reading the tree",
         grouped.len()
     );

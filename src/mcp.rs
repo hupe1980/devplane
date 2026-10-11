@@ -1,13 +1,18 @@
-//! An MCP server the agents can ask, and cannot act through.
+//! An MCP server the agents can ask, and can say one thing through.
 //!
 //! Answers an agent's questions — what is blocked on me, why was that denied —
-//! over stdio, to any MCP client.
+//! over stdio, to any MCP client. Every tool is a question
+//! (`every_tool_is_a_question` over [`QUESTIONS`]) except one: through
+//! [`CLAIMS`] a driven agent can say that the specification and the tests of
+//! its own change conflict, which records its claim where a person reads it
+//! and stops its run. That claim grants, answers, offers, finishes, archives
+//! and marks seen nothing, and reaches no other agent.
 //!
-//! Read-only by construction: `TOOLS` is the whole surface and every entry is
-//! a question (`every_tool_is_a_question`); `readOnlyHint` would bind no
-//! server. Payloads are other people's text, so each is framed as a report,
-//! never as instructions. An agent's `explain` goes through the host and is
-//! recorded in `devplane audit`; the CLI's offline `explain` is not.
+//! What the server may write is an explicit list ([`WRITES`]): the audit row
+//! an agent's `explain` leaves (it goes through the host and is recorded in
+//! `devplane audit`; the CLI's offline `config explain` is not), and the
+//! claim. `readOnlyHint` would bind no server. Payloads are other people's
+//! text, so each is framed as a report, never as instructions.
 
 use crate::local::Reader;
 use rmcp::handler::server::ServerHandler;
@@ -20,7 +25,7 @@ use rmcp::{ErrorData as McpError, ServiceExt};
 use std::borrow::Cow;
 use std::sync::Arc;
 
-/// One question this server answers.
+/// One tool this server offers.
 ///
 /// A table rather than a match arm per tool, so "every tool is a question" is
 /// a property a test can read.
@@ -31,8 +36,8 @@ struct Question {
     schema: &'static str,
 }
 
-/// The whole surface: five questions.
-const TOOLS: &[Question] = &[
+/// The questions: four, and none of them acts.
+const QUESTIONS: &[Question] = &[
     Question {
         name: "inbox",
         description: "What needs a human right now, most urgent first, across every project on \
@@ -43,10 +48,11 @@ const TOOLS: &[Question] = &[
     Question {
         name: "change",
         description: "A change: its phase, the gate verdicts it has collected, the \
-                      specification it answers and what its checks said. Omit `id` for every open \
-                      change.",
+                      specification it answers and what its checks said. Omit `id` for the change \
+                      you were started for, or, when Devplane did not start you for one, every \
+                      open change.",
         schema: r#"{"type":"object","properties":{"id":{"type":"string",
-                   "description":"The change id. Omit for all open changes."}}}"#,
+                   "description":"The change id. Omit for your own change, or all open changes when you have none."}}}"#,
     },
     Question {
         name: "explain",
@@ -66,19 +72,46 @@ const TOOLS: &[Question] = &[
         schema: r#"{"type":"object","properties":{"about":{"type":"string",
                    "description":"A run or change id. Omit for the most recent decisions."}}}"#,
     },
-    // A question and never a filing: an agent files a report through its
-    // shell, where the host can check the run it came from.
-    Question {
-        name: "reports",
-        description: "What was filed against and from a project, and what became of each — \
-                      fixed, rejected with a reason, deferred, still open. Ask before filing \
-                      one: somebody may have already. To file, run `devplane report file` in \
-                      your shell.",
-        schema: r#"{"type":"object","properties":{
-                   "to":{"type":"string","description":"Reports filed against this project."},
-                   "from":{"type":"string","description":"Reports this project filed."}}}"#,
-    },
 ];
+
+/// The claims: one. An agent's statement about its own run, never an action
+/// on anybody else's; its schema names no run, change, project, agent or
+/// person, because the host resolves those from what it gave this server.
+const CLAIMS: &[Question] = &[Question {
+    name: crate::core::claim::TOOL,
+    description: "Say that the specification and the tests of the change you were started for \
+                  cannot both be satisfied, and stop. Call this instead of editing, skipping or \
+                  weakening a test, and instead of changing the specification: a conflict between \
+                  them is a defect worth reporting, not a failure. It records your claim, \
+                  attributed to you and this run, where your person reads it beside the change's \
+                  checks; it does not mark the change failed and does not change whether its \
+                  checks pass. Devplane then stops this run: your person answers you by resuming \
+                  it. Only an agent Devplane started for a change can call it, once per run until \
+                  your person answers.",
+    schema: r#"{"type":"object","required":["reason"],"additionalProperties":false,"properties":{
+               "reason":{"type":"string","minLength":1,"maxLength":1024,
+                 "description":"What the specification requires, what the tests assert, and why both cannot hold. At most 1024 bytes: cite, do not transcribe."},
+               "paths":{"type":"array","maxItems":10,"items":{"type":"string","maxLength":512},
+                 "description":"The specification files and test files involved, relative to the project or the change's worktree. At most 10."}}}"#,
+}];
+
+/// Everything this server may write, and through which tool: the audit row
+/// of an `explain` question, and the caller's own stop claim. A tool that
+/// reaches any other writing route fails `only_the_listed_writes_are_made`.
+/// A declaration the tests hold the code to, read by nothing else.
+#[cfg_attr(not(test), allow(dead_code))]
+const WRITES: &[(&str, &str)] = &[
+    ("explain", "an audit row recording the question it asked"),
+    (
+        crate::core::claim::TOOL,
+        "a stop claim about the caller's own run, which then stops that run",
+    ),
+];
+
+/// Every tool, questions first.
+fn tools() -> impl Iterator<Item = &'static Question> {
+    QUESTIONS.iter().chain(CLAIMS.iter())
+}
 
 /// The sentence every payload is wrapped in.
 ///
@@ -124,12 +157,41 @@ impl Server {
                 .as_array()
                 .and_then(|a| a.iter().find(|x| x["id"].as_str() == Some(id)))
             {
-                Some(one) => Ok(report(one)),
+                Some(one) => Ok(report(&with_tasks(one.clone()))),
                 None => Ok(text_error(&format!("no change `{id}`"))),
             },
             Err(e) => Ok(text_error(&e.to_string())),
         }
     }
+}
+
+/// A change with its task lines, read from its specification folder where
+/// the agent works (its worktree, else the project's checkout): the agent
+/// asks for its tasks rather than being handed them in the prompt.
+fn with_tasks(mut change: serde_json::Value) -> serde_json::Value {
+    let Some(spec) = change["spec"].as_str().map(str::to_string) else {
+        return change;
+    };
+    let Some(root) = change["project_id"].as_str().map(std::path::PathBuf::from) else {
+        return change;
+    };
+    let worked_in = change["worktree"]
+        .as_str()
+        .map(std::path::PathBuf::from)
+        .filter(|w| w.join(&spec).exists())
+        .unwrap_or_else(|| root.clone());
+    let Ok(config) = crate::core::ProjectConfig::load(&root) else {
+        return change;
+    };
+    let Ok(folder) = crate::spec::ChangeFolder::at(&worked_in, &spec) else {
+        return change;
+    };
+    let tasks: Vec<serde_json::Value> = crate::spec::task_lines(&config.spec.trace(&folder))
+        .into_iter()
+        .map(|(task, done)| serde_json::json!({ "task": task, "done": done }))
+        .collect();
+    change["tasks"] = serde_json::Value::Array(tasks);
+    change
 }
 
 fn report(v: &serde_json::Value) -> CallToolResponse {
@@ -154,8 +216,9 @@ impl ServerHandler for Server {
         info.server_info.version = env!("CARGO_PKG_VERSION").into();
         info.instructions = Some(
             "Devplane watches the coding-agent sessions on this machine and gates what they may \
-             do. Every tool here answers a question; none of them changes anything. Anything that \
-             acts still goes through a person."
+             do. Every tool here answers a question except `spec_and_tests_conflict`, which \
+             records your claim that the specification and the tests conflict and stops your \
+             run. Anything else that acts still goes through a person."
                 .into(),
         );
         info
@@ -167,7 +230,7 @@ impl ServerHandler for Server {
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         Ok(ListToolsResult {
-            tools: TOOLS.iter().map(tool_of).collect(),
+            tools: tools().map(tool_of).collect(),
             ..Default::default()
         })
     }
@@ -180,22 +243,14 @@ impl ServerHandler for Server {
         let args = request.arguments.unwrap_or_default();
         let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::to_string);
         match request.name.as_ref() {
+            crate::core::claim::TOOL => Ok(claim(args).await),
             "inbox" => self.ask("/api/inbox").await,
             // Filtered here rather than behind a route of its own: one
             // endpoint with one shape cannot disagree with another.
-            "change" => match s("id") {
+            "change" => match change_asked(s("id"), own_change()) {
                 Some(id) => self.ask_filtered("/api/changes", &id).await,
                 None => self.ask("/api/changes").await,
             },
-            "reports" => {
-                let mut path = String::from("/api/reports?all=true");
-                for key in ["to", "from"] {
-                    if let Some(v) = s(key) {
-                        path.push_str(&format!("&{key}={}", enc(&v)));
-                    }
-                }
-                self.ask(&path).await
-            }
             "audit" => match s("about") {
                 Some(a) => self.ask(&format!("/api/decisions?about={}", enc(&a))).await,
                 None => self.ask("/api/decisions").await,
@@ -217,10 +272,80 @@ impl ServerHandler for Server {
                 .await
             }
             other => Ok(text_error(&format!(
-                "no tool named `{other}`. This server answers: {}",
-                TOOLS.iter().map(|t| t.name).collect::<Vec<_>>().join(", ")
+                "no tool named `{other}`. This server offers: {}",
+                tools().map(|t| t.name).collect::<Vec<_>>().join(", ")
             ))),
         }
+    }
+}
+
+/// The change Devplane started this server's agent for, from what the host
+/// put in its environment ([`crate::driven::CHANGE_ENV`]); `None` for an
+/// agent Devplane did not start for a change.
+fn own_change() -> Option<String> {
+    std::env::var(crate::driven::CHANGE_ENV)
+        .ok()
+        .filter(|v| !v.is_empty())
+}
+
+/// Which change the `change` tool answers about: the one asked for by id,
+/// else the caller's own, else (`None`) every open change. Scoping is a
+/// default, not a wall: any change can still be asked for by id, as before.
+fn change_asked(id: Option<String>, own: Option<String>) -> Option<String> {
+    id.or(own)
+}
+
+/// The stop tool: the run, change and key come from what the host put in this
+/// server's environment, never from the arguments; the host decides every
+/// refusal but the three it cannot see (no run, a bad argument, no host).
+async fn claim(args: serde_json::Map<String, serde_json::Value>) -> CallToolResponse {
+    use crate::core::claim::{ClaimDraft, ClaimRefusal};
+    let refused = |r: ClaimRefusal| text_error(&r.says());
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let Some(run) = env(crate::driven::RUN_ENV) else {
+        return refused(ClaimRefusal::NoRun);
+    };
+    if let Some(extra) = args
+        .keys()
+        .find(|k| !matches!(k.as_str(), "reason" | "paths"))
+    {
+        return refused(ClaimRefusal::UnknownArgument(extra.clone()));
+    }
+    let draft: ClaimDraft = match serde_json::from_value(serde_json::Value::Object(args)) {
+        Ok(d) => d,
+        Err(e) => {
+            return text_error(&format!(
+                "The tool takes `reason` (text) and `paths` (a list of text): {e}"
+            ));
+        }
+    };
+    let client = match crate::client::Client::connect() {
+        Ok(c) if c.healthy().await => c,
+        _ => return refused(ClaimRefusal::NoHost),
+    };
+    let body = serde_json::json!({
+        "reason": draft.reason,
+        "paths": draft.paths,
+        "change": own_change(),
+        "key": env(crate::driven::CLAIM_KEY_ENV).unwrap_or_default(),
+    });
+    match client
+        .post_json::<serde_json::Value>(&format!("/api/runs/{}/claim", enc(&run)), &body)
+        .await
+    {
+        Ok(v) if v["recorded"] == serde_json::Value::Bool(true) => {
+            CallToolResult::success(vec![ContentBlock::text(
+                v["says"].as_str().unwrap_or("Recorded.").to_string(),
+            )])
+            .into()
+        }
+        Ok(v) => text_error(
+            v["says"]
+                .as_str()
+                .or_else(|| v["error"].as_str())
+                .unwrap_or("the host refused the claim without saying why"),
+        ),
+        Err(e) => text_error(&format!("the claim did not reach the host: {e}")),
     }
 }
 
@@ -257,7 +382,7 @@ mod tests {
             "set", "update", "run", "merge", "push", "trust", "connect", "decide", "snooze",
             "finish", "verify", "say", "reply",
         ];
-        for t in TOOLS {
+        for t in QUESTIONS {
             assert!(
                 !ACTS.contains(&t.name),
                 "`{}` names an action. This surface answers questions; anything that acts goes \
@@ -271,7 +396,7 @@ mod tests {
     fn every_tool_has_a_schema_that_parses_and_is_an_object() {
         // The schemas are literals and `tool_of` unwraps: a typo would panic
         // on `tools/list`, the first call every client makes.
-        for t in TOOLS {
+        for t in tools() {
             let tool = tool_of(t);
             assert_eq!(tool.name, t.name);
             assert_eq!(
@@ -281,6 +406,116 @@ mod tests {
                 t.name
             );
         }
+    }
+
+    /// The one tool that is not a question is the conflict claim, and its
+    /// schema cannot name anybody else's run.
+    #[test]
+    fn the_only_write_is_the_conflict_claim() {
+        assert_eq!(CLAIMS.len(), 1, "a second claim is a second write path");
+        let t = &CLAIMS[0];
+        assert_eq!(t.name, "spec_and_tests_conflict");
+        assert!(!QUESTIONS.iter().any(|q| q.name == t.name));
+        let schema: serde_json::Value = serde_json::from_str(t.schema).unwrap();
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["required"], serde_json::json!(["reason"]));
+        let props = schema["properties"].as_object().unwrap();
+        let mut names: Vec<&str> = props.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["paths", "reason"]);
+        for name in ["run", "change", "project", "agent", "person"] {
+            assert!(!props.contains_key(name), "the schema names `{name}`");
+        }
+    }
+
+    /// What this server writes is a list, and the code holds to it: the only
+    /// request that is not a read is the claim's, and the only read that
+    /// writes is `explain`'s audit row.
+    #[test]
+    fn only_the_listed_writes_are_made() {
+        assert_eq!(
+            WRITES.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+            ["explain", "spec_and_tests_conflict"]
+        );
+        for (tool, _) in WRITES {
+            assert!(tools().any(|t| t.name == *tool), "`{tool}` is not offered");
+        }
+        let source = include_str!("mcp.rs");
+        let code = &source[..source.find("#[cfg(test)]").unwrap()];
+        // One write route, reached once: the caller's own claim.
+        assert_eq!(code.matches(".post_json").count(), 1);
+        assert_eq!(code.matches("/api/runs/{}/claim").count(), 1);
+        for verb in [".post(", ".put(", ".delete(", ".patch("] {
+            assert!(
+                !code.contains(verb),
+                "a `{verb}` request is not on the list"
+            );
+        }
+        // The questions read through the host or the store, and only
+        // `explain` names a query the host records.
+        assert_eq!(code.matches("asked_by=mcp").count(), 1);
+    }
+
+    /// Devplane originates no approval for its own tool: with no rule of the
+    /// person's, a vendor's permission prompt for the claim reaches a person.
+    #[test]
+    fn the_claim_tool_is_never_allowed_by_devplane() {
+        let tool = format!("mcp__devplane__{}", crate::core::claim::TOOL);
+        let verdict = crate::core::Policy::default().restrictive(
+            &crate::core::policy::Context::at(std::path::Path::new("/tmp/p")),
+            &tool,
+            &serde_json::json!({"reason": "spec says 30, test says 7"}),
+        );
+        assert_eq!(verdict, crate::core::Verdict::Undecided, "{verdict:?}");
+    }
+
+    #[tokio::test]
+    async fn a_session_devplane_did_not_start_is_told_to_say_so_in_its_reply() {
+        // The server reads its run from its own environment; this test
+        // process was given none.
+        if std::env::var_os(crate::driven::RUN_ENV).is_some() {
+            return;
+        }
+        let out = claim(serde_json::Map::from_iter([(
+            "reason".to_string(),
+            serde_json::json!("spec says 30, test says 7"),
+        )]))
+        .await;
+        let text = format!("{out:?}");
+        assert!(
+            text.contains("Only an agent Devplane started for a change can stop this way"),
+            "{text}"
+        );
+        assert!(text.contains("is_error: Some(true)"), "{text}");
+    }
+
+    /// An agent Devplane started for a change asks about that change when
+    /// it names none; one it did not start sees every open change; an id is
+    /// always honoured.
+    #[test]
+    fn the_change_tool_defaults_to_the_callers_own_change() {
+        let own = || Some("chg-own".to_string());
+        assert_eq!(change_asked(None, own()).as_deref(), Some("chg-own"));
+        assert_eq!(change_asked(None, None), None);
+        assert_eq!(
+            change_asked(Some("chg-other".into()), own()).as_deref(),
+            Some("chg-other")
+        );
+        let q = QUESTIONS.iter().find(|q| q.name == "change").unwrap();
+        assert!(q.description.contains("the change you were started for"));
+        // The variable the host hands this server is the one it reads.
+        let code = include_str!("mcp.rs");
+        let code = &code[..code.find("#[cfg(test)]").unwrap()];
+        assert_eq!(
+            code.matches("std::env::var(crate::driven::CHANGE_ENV)")
+                .count(),
+            1
+        );
+        assert_eq!(
+            code.matches("own_change()").count(),
+            3,
+            "defined once, and read by the tool and by the claim"
+        );
     }
 
     #[test]

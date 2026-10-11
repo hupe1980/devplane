@@ -1,0 +1,238 @@
+{
+  ".draft": {
+    "error": "Invalid change name '.draft': Change name cannot start with a dot"
+  },
+  "crlf": {
+    "schemaName": "spec-driven",
+    "progress": {
+      "total": 2,
+      "complete": 1,
+      "remaining": 1
+    },
+    "state": "ready",
+    "tasks": [
+      {
+        "id": "1",
+        "description": "1.1 Windows line ends",
+        "done": true,
+        "sourcePath": "openspec/changes/crlf/tasks.md",
+        "line": 3
+      },
+      {
+        "id": "2",
+        "description": "1.2 Still open",
+        "done": false,
+        "sourcePath": "openspec/changes/crlf/tasks.md",
+        "line": 4
+      }
+    ]
+  },
+  "custom-schema": {
+    "error": "Unknown schema 'my-schema'. Available: spec-driven"
+  },
+  "done-padded": {
+    "schemaName": "spec-driven",
+    "progress": {
+      "total": 3,
+      "complete": 2,
+      "remaining": 1
+    },
+    "state": "ready",
+    "tasks": [
+      {
+        "id": "1",
+        "description": "1.1 Padded and done",
+        "done": true,
+        "sourcePath": "openspec/changes/done-padded/tasks.md",
+        "line": 3
+      },
+      {
+        "id": "2",
+        "description": "1.2 Shouted and done",
+        "done": true,
+        "sourcePath": "openspec/changes/done-padded/tasks.md",
+        "line": 4
+      },
+      {
+        "id": "3",
+        "description": "1.3 Still open",
+        "done": false,
+        "sourcePath": "openspec/changes/done-padded/tasks.md",
+        "line": 5
+      }
+    ]
+  },
+  "hidden-boxes": {
+    "schemaName": "spec-driven",
+    "progress": {
+      "total": 6,
+      "complete": 2,
+      "remaining": 4
+    },
+    "state": "ready",
+    "tasks": [
+      {
+        "id": "1",
+        "description": "a box in front matter",
+        "done": false,
+        "sourcePath": "openspec/changes/hidden-boxes/tasks.md",
+        "line": 4
+      },
+      {
+        "id": "2",
+        "description": "1.1 A real task",
+        "done": true,
+        "sourcePath": "openspec/changes/hidden-boxes/tasks.md",
+        "line": 9
+      },
+      {
+        "id": "3",
+        "description": "a box in a fenced block",
+        "done": false,
+        "sourcePath": "openspec/changes/hidden-boxes/tasks.md",
+        "line": 12
+      },
+      {
+        "id": "4",
+        "description": "a box in an HTML comment",
+        "done": false,
+        "sourcePath": "openspec/changes/hidden-boxes/tasks.md",
+        "line": 16
+      },
+      {
+        "id": "5",
+        "description": "a box in an indented block",
+        "done": true,
+        "sourcePath": "openspec/changes/hidden-boxes/tasks.md",
+        "line": 19
+      },
+      {
+        "id": "6",
+        "description": "1.1.1 A nested sub-task",
+        "done": false,
+        "sourcePath": "openspec/changes/hidden-boxes/tasks.md",
+        "line": 21
+      }
+    ]
+  },
+  "link-bullet": {
+    "schemaName": "spec-driven",
+    "progress": {
+      "total": 2,
+      "complete": 1,
+      "remaining": 1
+    },
+    "state": "ready",
+    "tasks": [
+      {
+        "id": "1",
+        "description": "(https://example.com) a whitespace box still counts",
+        "done": false,
+        "sourcePath": "openspec/changes/link-bullet/tasks.md",
+        "line": 5
+      },
+      {
+        "id": "2",
+        "description": "1.1 A real task",
+        "done": true,
+        "sourcePath": "openspec/changes/link-bullet/tasks.md",
+        "line": 6
+      }
+    ]
+  },
+  "list-forms": {
+    "schemaName": "spec-driven",
+    "progress": {
+      "total": 5,
+      "complete": 3,
+      "remaining": 2
+    },
+    "state": "ready",
+    "tasks": [
+      {
+        "id": "1",
+        "description": "1.1 An ordered item",
+        "done": false,
+        "sourcePath": "openspec/changes/list-forms/tasks.md",
+        "line": 3
+      },
+      {
+        "id": "2",
+        "description": "1.2 A paren item",
+        "done": true,
+        "sourcePath": "openspec/changes/list-forms/tasks.md",
+        "line": 4
+      },
+      {
+        "id": "3",
+        "description": "1.3 A plus bullet",
+        "done": true,
+        "sourcePath": "openspec/changes/list-forms/tasks.md",
+        "line": 5
+      },
+      {
+        "id": "4",
+        "description": "1.4 A star bullet",
+        "done": false,
+        "sourcePath": "openspec/changes/list-forms/tasks.md",
+        "line": 6
+      },
+      {
+        "id": "5",
+        "description": "done 1.5 No space after the box",
+        "done": true,
+        "sourcePath": "openspec/changes/list-forms/tasks.md",
+        "line": 7
+      }
+    ]
+  },
+  "no-tasks": {
+    "schemaName": "spec-driven",
+    "progress": {
+      "total": 0,
+      "complete": 0,
+      "remaining": 0
+    },
+    "state": "blocked",
+    "tasks": []
+  },
+  "open-markers": {
+    "schemaName": "spec-driven",
+    "progress": {
+      "total": 4,
+      "complete": 1,
+      "remaining": 3
+    },
+    "state": "ready",
+    "tasks": [
+      {
+        "id": "1",
+        "description": "1.1 In progress",
+        "done": false,
+        "sourcePath": "openspec/changes/open-markers/tasks.md",
+        "line": 3
+      },
+      {
+        "id": "2",
+        "description": "1.2 Dropped",
+        "done": false,
+        "sourcePath": "openspec/changes/open-markers/tasks.md",
+        "line": 4
+      },
+      {
+        "id": "3",
+        "description": "1.3 Empty box",
+        "done": false,
+        "sourcePath": "openspec/changes/open-markers/tasks.md",
+        "line": 5
+      },
+      {
+        "id": "4",
+        "description": "1.4 Done",
+        "done": true,
+        "sourcePath": "openspec/changes/open-markers/tasks.md",
+        "line": 6
+      }
+    ]
+  }
+}

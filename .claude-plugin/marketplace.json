@@ -1,6 +1,6 @@
 {
   "name": "devplane",
-  "description": "Devplane — the desktop workbench for spec-driven agentic development.",
+  "description": "Devplane puts in front of you, in minutes, the evidence for deciding whether an agent's change is safe to merge — evidence your own project produces — and keeps the record of how you know.",
   "owner": {
     "name": "hupe1980",
     "url": "https://github.com/hupe1980"
@@ -9,7 +9,7 @@
     {
       "name": "devplane",
       "source": "./plugin",
-      "description": "Ask Devplane what is happening across every project on this machine — read-only.",
+      "description": "Ask Devplane what needs you, who decided what, and whether a change is verified, across every project on this machine.",
       "category": "productivity",
       "tags": [
         "agents",

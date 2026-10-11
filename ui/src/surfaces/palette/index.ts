@@ -1,7 +1,6 @@
 import { register } from "../../lib/surfaces";
 import { onAction } from "../../lib/keys";
 import { go } from "../../lib/route";
-import Palette from "./Palette.svelte";
 
 /// Where the palette was opened from, so `Esc` goes back there.
 let from = "";
@@ -33,5 +32,5 @@ register({
   transient: true,
   reads: ["/api/changes", "/api/projects"],
   select: () => ({ from }),
-  component: Palette,
+  page: () => import("./Palette.svelte"),
 });

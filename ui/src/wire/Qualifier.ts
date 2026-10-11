@@ -19,6 +19,23 @@ deleted: number,
  */
 gates_changed: number, 
 /**
+ * Rows of kind [`WeakKind::AgentControls`]. Always set by the host;
+ * absent only in a row recorded before the kind was read.
+ */
+agent_controls?: number, 
+/**
+ * Rows of kind [`WeakKind::Ownership`]; absent as above.
+ */
+ownership?: number, 
+/**
+ * Rows of kind [`WeakKind::SupplyChain`]; absent as above.
+ */
+supply_chain?: number, 
+/**
+ * Rows of kind [`WeakKind::BaseTests`].
+ */
+base_tests: number, 
+/**
  * Rows with no current seen mark.
  */
 unseen: number, 

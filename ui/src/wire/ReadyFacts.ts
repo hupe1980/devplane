@@ -4,13 +4,18 @@ import type { Qualifier } from "./Qualifier";
 /**
  * What the review of a change *ready to decide* would lead with, carried on
  * its inbox row so the row never reads as calmer than the review. Hunks seen
- * are the window's own marks, so the host sends only the total.
+ * are the host's marks, the same every surface counts.
  */
 export type ReadyFacts = { qualifier: Qualifier, 
 /**
  * Every hunk in the change.
  */
 hunks: number, 
+/**
+ * Hunks a person marked seen, from the host's marks. Always set by the
+ * host; absent only in a row recorded before it was.
+ */
+hunks_seen?: number, 
 /**
  * Files no declared test covers; `None` when no mapping is declared.
  */

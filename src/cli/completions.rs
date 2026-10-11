@@ -91,13 +91,21 @@ _devplane_live() {{
     );
     let mut out = String::with_capacity(generated.len() + helper.len());
     for line in generated.lines() {
-        if line.starts_with(r#"if [ "$funcstack[1]" = "_devplane" ]"#) {
+        if is_zsh_dispatch(line) {
             out.push_str(&helper);
         }
         out.push_str(&live_positional(line).unwrap_or_else(|| line.to_string()));
         out.push('\n');
     }
     out
+}
+
+/// Whether `line` is clap's `if [ "$funcstack[1]" = "_devplane" ]`, the
+/// line zsh runs while loading the file.
+fn is_zsh_dispatch(line: &str) -> bool {
+    line.strip_prefix("if ")
+        .and_then(|rest| rest.strip_prefix('['))
+        .is_some_and(|rest| rest.starts_with(r#" "$funcstack[1]" = "_devplane" ]"#))
 }
 
 /// A clap positional line (`':<name>[ -- <help>]:_default' \`) rewritten to
@@ -209,7 +217,7 @@ pub async fn cmd_complete(what: &str) -> Result<()> {
     };
 
     let mut out = std::io::stdout().lock();
-    for (value, label) in values(kind, &body).into_iter().take(MAX_VALUES) {
+    for (value, label) in values(body).into_iter().take(MAX_VALUES) {
         // Escaped: project names and questions may carry spaces or quotes.
         match label {
             Some(l) => writeln!(out, "{}\t{}", escape(&value), one_line(&l))?,
@@ -224,61 +232,87 @@ pub async fn cmd_complete(what: &str) -> Result<()> {
 ///
 /// [`crate::local::Reader`] asks a running host or else the store, and never
 /// starts anything. Opening and reading share the one budget.
-async fn ask(kind: Values) -> Option<serde_json::Value> {
+async fn ask(kind: Values) -> Option<Served> {
     tokio::time::timeout(LIVE_TIMEOUT, async {
-        crate::local::Reader::open()
-            .await
-            .ok()?
-            .get(kind.route())
-            .await
-            .ok()
+        let reader = crate::local::Reader::open().await.ok()?;
+        let route = kind.route();
+        Some(match kind {
+            Values::Asks => Served::Asks(reader.get_as(route).await.ok()?),
+            Values::Runs => Served::Runs(reader.get_as(route).await.ok()?),
+            Values::Changes => Served::Changes(reader.get_as(route).await.ok()?),
+            Values::Projects => Served::Projects(reader.get_as(route).await.ok()?),
+        })
     })
     .await
     .ok()
     .flatten()
 }
 
+/// What a route served, each read as far as a completion needs it.
+enum Served {
+    Asks(Vec<AskRow>),
+    Runs(BoardRows),
+    Changes(Vec<ChangeRow>),
+    Projects(Vec<ProjectRow>),
+}
+
+#[derive(serde::Deserialize)]
+struct AskRow {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    question: Option<String>,
+    #[serde(default)]
+    tool: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct BoardRows {
+    #[serde(default)]
+    runs: Vec<RunRow>,
+}
+
+#[derive(serde::Deserialize)]
+struct RunRow {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    project_name: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ChangeRow {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ProjectRow {
+    #[serde(default)]
+    name: Option<String>,
+}
+
 /// Pulls the values out of what the route served, in the source's order.
-fn values(kind: Values, body: &serde_json::Value) -> Vec<(String, Option<String>)> {
-    let arr = |v: &serde_json::Value| v.as_array().cloned().unwrap_or_default();
-    match kind {
-        Values::Asks => arr(body)
-            .iter()
-            .filter_map(|a| {
-                let id = a.get("id")?.as_str()?.to_string();
-                let label = a
-                    .get("question")
-                    .and_then(|q| q.as_str())
-                    .or_else(|| a.get("tool").and_then(|t| t.as_str()))
-                    .map(str::to_string);
-                Some((id, label))
-            })
+fn values(body: Served) -> Vec<(String, Option<String>)> {
+    match body {
+        Served::Asks(rows) => rows
+            .into_iter()
+            .filter_map(|a| Some((a.id?, a.question.or(a.tool))))
             .collect(),
-        Values::Runs => arr(body.get("runs").unwrap_or(&serde_json::Value::Null))
-            .iter()
-            .filter_map(|r| {
-                let id = r.get("id")?.as_str()?.to_string();
-                let label = r
-                    .get("project_name")
-                    .and_then(|p| p.as_str())
-                    .map(str::to_string);
-                Some((id, label))
-            })
+        Served::Runs(board) => board
+            .runs
+            .into_iter()
+            .filter_map(|r| Some((r.id?, r.project_name)))
             .collect(),
-        Values::Changes => arr(body)
-            .iter()
-            .filter_map(|w| {
-                let id = w.get("id")?.as_str()?.to_string();
-                let label = w.get("title").and_then(|t| t.as_str()).map(str::to_string);
-                Some((id, label))
-            })
+        Served::Changes(rows) => rows
+            .into_iter()
+            .filter_map(|w| Some((w.id?, w.title)))
             .collect(),
-        Values::Projects => arr(body)
-            .iter()
-            .filter_map(|p| {
-                let name = p.get("name")?.as_str()?.to_string();
-                Some((name, None))
-            })
+        Served::Projects(rows) => rows
+            .into_iter()
+            .filter_map(|p| Some((p.name?, None)))
             .collect(),
     }
 }
@@ -318,7 +352,7 @@ mod tests {
             .map(|c| c.get_name())
             .collect();
         assert!(
-            visible.len() > 20,
+            visible.len() > 12,
             "only {} commands are visible; this guard has stopped reading the tree",
             visible.len()
         );
@@ -541,27 +575,30 @@ mod tests {
     /// The values come out of the shapes the routes actually serve.
     #[test]
     fn values_are_read_from_the_served_shapes() {
+        fn read<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> T {
+            serde_json::from_value(v).unwrap()
+        }
         let asks = serde_json::json!([{"id": "a1", "question": "Keep it?"}, {"id": "a2"}]);
-        let v = values(Values::Asks, &asks);
+        let v = values(Served::Asks(read(asks)));
         assert_eq!(v[0], ("a1".into(), Some("Keep it?".into())));
         assert_eq!(v[1], ("a2".into(), None));
 
         let board = serde_json::json!({"runs": [{"id": "r1", "project_name": "saas"}]});
         assert_eq!(
-            values(Values::Runs, &board)[0],
+            values(Served::Runs(read(board)))[0],
             ("r1".into(), Some("saas".into()))
         );
 
         let projects = serde_json::json!([{"name": "payments-api"}]);
         assert_eq!(
-            values(Values::Projects, &projects)[0],
+            values(Served::Projects(read(projects)))[0],
             ("payments-api".into(), None)
         );
 
         let changes =
             serde_json::json!([{"id": "c-1", "title": "rate-limit login", "phase": "review"}]);
         assert_eq!(
-            values(Values::Changes, &changes)[0],
+            values(Served::Changes(read(changes)))[0],
             ("c-1".into(), Some("rate-limit login".into()))
         );
     }

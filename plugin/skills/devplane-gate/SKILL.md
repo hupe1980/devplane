@@ -24,12 +24,12 @@ code.
 
 | `state` | What to say |
 |---|---|
-| `verified` | This project's checks passed, naming the commands that ran. |
+| `passed` | This project's checks passed, naming the commands that ran. |
 | `failed` | Which command failed and what it exited with. |
-| `no_gates` | This repository declares no checks, so nothing was verified. |
+| `no_gates` | This repository declares no checks, so nothing was checked. |
 | `config_unreadable` | `devplane.toml` could not be read — quote `error` — and nothing ran. |
 
-Only `verified` is a pass. **Never report `no_gates` or `config_unreadable` as one.**
+Only `passed` is a pass. **Never report `no_gates` or `config_unreadable` as one.**
 
 ## What not to do
 

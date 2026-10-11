@@ -1,0 +1,29 @@
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+────────────
+[32;1m Nextest run[0m ID [1m32d08739-29cc-4237-87ea-67b03f8af9ca[0m with nextest profile: [1mdefault[0m
+[32;1m    Starting[0m [1m7[0m tests across [1m3[0m binaries ([1m1[0m test [33;1mskipped[0m)
+[31;1m        FAIL[0m [   0.006s] (1/7) [35;1mrs[0m [36mtests[0m[36m::[0m[34;1munit_fails_when_asked[0m
+[31;1m [0m [31;1mstdout[0m [31;1m───[0m
+
+    running 1 test
+    test tests::unit_fails_when_asked ... FAILED
+
+    failures:
+
+    failures:
+        tests::unit_fails_when_asked
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+    [0m
+[31;1m [0m [31;1mstderr[0m [31;1m───[0m
+
+    [0m[31;1mthread 'tests::unit_fails_when_asked' (346274050) panicked at src/lib.rs:12:42:[0m
+    [31;1masked to fail[0m
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace[0m
+
+[31;1m  Cancelling[0m due to [31;1mtest failure[0m: 
+────────────
+[31;1m     Summary[0m [   0.006s] [1m1[0m/[1m7[0m tests run: [1m0[0m [32;1mpassed[0m, [1m1[0m [31;1mfailed[0m, [1m1[0m [33;1mskipped[0m
+[31;1m        FAIL[0m [   0.006s] (1/7) [35;1mrs[0m [36mtests[0m[36m::[0m[34;1munit_fails_when_asked[0m
+[33;1mwarning[0m: [1m6[0m/[1m7[0m tests were not run due to [33;1mtest failure[0m (run with [1m--no-fail-fast[0m to run all tests, or run with [1m--max-fail[0m)
+[31;1merror[0m: test run failed

@@ -5,8 +5,14 @@
   import State from "../../lib/State.svelte";
   import { clip } from "../../lib/text";
   import Qualifier from "../../lib/Qualifier.svelte";
-  import { markedFor } from "../review/marks";
+  import { unreadSays } from "../change/review/unread.svelte";
+  import Inline from "../../lib/ui/Inline.svelte";
   import { safeHref } from "../../lib/href";
+  import { spell } from "../../lib/keys";
+  import { answerItemKeys } from "./keys";
+  import { copyCommand, untilActivity } from "./actions";
+  import Marker from "./Marker.svelte";
+  import GrantOffer, { type GrantOffer as Offered } from "./GrantOffer.svelte";
   import type { ReadyFacts } from "../../wire/ReadyFacts";
 
   /// How much of a detail the row shows; the rest is in the `title`.
@@ -38,6 +44,7 @@
     offer?: { rule: string; file: string; section: string; covers: number; more?: boolean } | null;
     /// Why there is no rule to offer, on a permission that has none.
     no_offer?: { reason: string; sentence: string } | null;
+    grant_offer?: Offered | null; grant_no?: string | null; grant_lapsed?: string | null; // a grant: GrantOffer.svelte
     /// The whole form behind a question; `options` is only the first
     /// question's buttons.
     form?: FormQuestion[] | null;
@@ -51,10 +58,13 @@
     answer_in?: string | null;
     new_to_you?: boolean;
     since?: string;
-    /// The report a report row is about — what its controls address.
-    report?: string | null;
     /// On a *ready to decide* row: what its review leads with.
     facts?: ReadyFacts | null;
+    /// On a dialog the vendor owns: the command that resumes its session.
+    resume_command?: string | null;
+    /// On a dialog the vendor owns, where the vendor documents one: a link
+    /// that opens the session.
+    session_link?: string | null;
   };
 
   /// The bodies the answer route accepts. A body with none of these fields
@@ -74,24 +84,32 @@
     answer,
     act,
     snooze,
+    snoozeHour = snooze,
     copyRule,
     say,
+    keys = "",
   }: {
     item: Item;
     current?: boolean;
     age?: string;
     answer: (item: Item, what: Answer) => Promise<void>;
-    act: (item: Item, action: string, reason?: string) => Promise<void>;
+    act: (item: Item, action: string) => Promise<void>;
     snooze: (item: Item) => Promise<void>;
+    /// The keyless snooze beside `s`: for an hour.
+    snoozeHour?: (item: Item) => Promise<void>;
     copyRule: (rule: string) => Promise<void>;
     /// Reports a refusal this row makes on its own, such as an empty reply.
     say: (sentence: string) => void;
+    /// The surface whose item keys this row answers (`inbox`, `answer`);
+    /// empty for a row that takes no keys. The keys are printed on the
+    /// controls either way.
+    keys?: string;
   } = $props();
 
   const acts = $derived(item.actions ?? []);
-  /// Hunks this browser marked, never more than the change has: the host
-  /// cannot see these marks, so the window adds them.
-  const markedHunks = $derived(item.facts && item.change_id ? Math.min(markedFor(item.change_id), item.facts.hunks) : 0);
+  /// Hunks a person marked seen, from the host's marks — the count the
+  /// review, the CLI and the offer read. Absent in an older recording.
+  const markedHunks = $derived(item.facts ? Math.min(item.facts.hunks_seen ?? 0, item.facts.hunks) : 0);
   const has = (a: string) => acts.includes(a);
   /// The host's links, only with a scheme `lib/href` allows.
   const url = $derived(safeHref(item.url));
@@ -104,18 +122,6 @@
   /// Free-text answers: one box per row and per field.
   let typed = $state("");
   let custom = $state<Record<string, string>>({});
-
-  /// The reason a rejection or deferral carries back to the filing project.
-  /// Refused when empty, as the host refuses it.
-  let reason = $state("");
-  function answerReport(action: "reject_report" | "defer_report") {
-    const why = reason.trim();
-    if (!why) {
-      say("say why first — the project that filed it is told the reason");
-      return;
-    }
-    void act(item, action, why);
-  }
 
   /// An empty reply is refused here rather than sent.
   function reply(field?: string) {
@@ -134,7 +140,7 @@
   /// The form, when there is one, replaces the flat option list.
   const form = $derived((item.form ?? []).length > 0 ? (item.form ?? []) : null);
 
-  /// A multi-question form is answered once: picks are held until every field
+  /// A multi-question form is answered once: picks are kept until every field
   /// has one, then sent in one body. A one-field form sends on the pick.
   let picked = $state<Record<string, { option?: string; custom?: string }>>({});
   function pick(field: string, what: { option?: string; custom?: string }) {
@@ -144,8 +150,34 @@
       return;
     }
     picked = { ...picked, [field]: what };
+    // The last field picked sends the whole form: one key per field, and the
+    // hold still lets the answer be taken back.
+    if (fields.every((q) => picked[q.field])) send();
   }
   const outstanding = $derived((form ?? []).filter((q) => !picked[q.field]).length);
+  /// The field `1`–`9` answer: the first one not yet picked.
+  const keyedField = $derived((form ?? []).find((q) => !picked[q.field])?.field ?? null);
+  /// The numbers printed on the flat list's options: only the ones that can
+  /// be chosen are counted, so `2` is the second button.
+  const optionKey = (index: number) => {
+    const n = (item.options ?? []).slice(0, index + 1).filter((o) => o.id).length;
+    return n <= 9 ? String(n) : null;
+  };
+  const answerable = $derived((item.options ?? []).filter((o) => o.id).length);
+  /// An option's number among the ones that can be chosen — its row action.
+  const optionNumber = (index: number) => (item.options ?? []).slice(0, index + 1).filter((o) => o.id).length;
+
+  /// `w`: the vendor's documented link where there is one, else the resume
+  /// command copied — and the control says which.
+  const sessionLink = $derived(safeHref(item.session_link));
+  const copyAttach = async () => say(await copyCommand(`devplane run attach ${item.run_id}`, ""));
+  const copyResume = async () => item.resume_command && say(await copyCommand(item.resume_command, " — run it in a terminal to answer there"));
+
+  // The item keys press the control they are printed on, so a key and its
+  // button can never do two different things; a control that is not here
+  // makes the key say why, in place.
+  let root = $state<HTMLLIElement | undefined>();
+  $effect(() => (keys ? answerItemKeys(keys, () => root, () => item, say) : undefined));
   function send() {
     void answer(item, {
       answers: (form ?? []).map((q) => ({ field: q.field, ...picked[q.field] })),
@@ -153,7 +185,7 @@
   }
 </script>
 
-<li class="item" class:loud class:current id={item.ask ? `row-${item.ask}` : undefined} aria-current={current ? "true" : undefined}>
+<li bind:this={root} class="item" class:loud class:current id={item.ask ? `row-${item.ask}` : undefined} aria-current={current ? "true" : undefined}>
   <span class="lvl">
     {#if loud}
       <State state="needs you" word={item.level} />
@@ -173,13 +205,10 @@
         {#if age}<span title={item.since}>{age}</span>{/if}
       </span>
     </div>
-    <!-- A report is somebody else's words: shown whole and quoted as the host
-         sent it, never clipped. Other detail is clipped, whole in the title. -->
-    {#if item.detail && item.report}
-      <pre class="quoted" aria-label="the report, quoted as it was filed">{item.detail}</pre>
-    {:else if item.detail}
+    <!-- Detail is clipped, whole in the title. -->
+    {#if item.detail}
       <p class="d" title={item.detail.length > DETAIL_CHARS ? item.detail : undefined}>
-        {clip(item.detail, DETAIL_CHARS)}
+        <Inline text={clip(item.detail, DETAIL_CHARS)} />
       </p>
     {/if}
 
@@ -188,8 +217,8 @@
     {#if item.facts}
       <p class="facts">
         <Qualifier q={item.facts.qualifier} />
-        <span title="hunks marked in this browser's review">{markedHunks} of {item.facts.hunks} {item.facts.hunks === 1 ? "hunk" : "hunks"} marked</span>
-        {#each item.facts.says as s (s)}<span>· {s}</span>{/each}
+        <span class="unread" title="hunks nobody marked seen, and weakened rows nobody has read">· {unreadSays({ hunks: item.facts.hunks - markedHunks, weakened: item.facts.qualifier.unseen })}</span>
+        {#each item.facts.says as s (s)}<span>· <Inline text={s} /></span>{/each}
       </p>
     {/if}
 
@@ -202,11 +231,16 @@
           <div class="opts">
             <!-- Keyed by position: two options may share a label. -->
             {#each q.options as o, oi (oi)}
-              <button
-                class="choice"
-                class:picked={picked[q.field]?.option === o.value}
-                title={o.detail ?? undefined}
-                onclick={() => pick(q.field, { option: o.value })}>{o.label}</button
+              {@const k = q.field === keyedField && oi < 9 ? String(oi + 1) : null}
+              <span class="keyed"
+                ><button
+                  class="choice"
+                  class:picked={picked[q.field]?.option === o.value}
+                  title={o.detail ?? undefined}
+                  data-key={k}
+                  data-action="option:{q.field}:{oi}"
+                  onclick={() => pick(q.field, { option: o.value })}>{o.label}</button
+                >{#if k}<kbd>{k}</kbd>{/if}</span
               >
             {/each}
           </div>
@@ -217,16 +251,19 @@
                 bind:value={custom[q.field]}
                 placeholder="your answer"
                 aria-label="your answer to: {q.title}"
+                data-key={q.field === keyedField ? "t" : null}
+                data-action="reply:{q.field}"
               />
-              <button onclick={() => reply(q.field)}>reply</button>
+              <button data-send onclick={() => reply(q.field)}>reply</button><kbd title="sends from inside the field">{spell("Mod+Enter")}</kbd>
+              {#if q.field === keyedField}<kbd title="puts you in this field">t</kbd>{/if}
             </div>
           {/if}
         </fieldset>
       {/each}
       {#if form.length > 1}
         <div class="reply">
-          <button onclick={send} disabled={outstanding > 0}>
-            {outstanding > 0 ? `${outstanding} of ${form.length} still to answer` : `send ${form.length} answers`}
+          <button data-action="send_form" onclick={send} disabled={outstanding > 0}>
+            {outstanding > 0 ? `${outstanding} still to answer` : `send ${form.length} answers`}
           </button>
         </div>
       {/if}
@@ -235,7 +272,11 @@
         <div class="opts">
           {#each item.options ?? [] as o, oi (oi)}
             {#if o.id}
-              <button class="choice" onclick={() => answer(item, { option: o.id! })}>{o.label}</button>
+              {@const k = optionKey(oi)}
+              <span class="keyed"
+                ><button class="choice" data-key={k} data-action="option:{optionNumber(oi)}" onclick={() => answer(item, { option: o.id! })}>{o.label}</button
+                >{#if k}<kbd>{k}</kbd>{/if}</span
+              >
             {:else}
               <!-- No id: only the provider's own window can answer, so it is
                    shown but not a button. -->
@@ -243,6 +284,9 @@
             {/if}
           {/each}
         </div>
+        {#if answerable > 9}
+          <p class="elsewhere">1–9 choose the first nine; Tab reaches the rest, and Enter chooses one.</p>
+        {/if}
       {/if}
       <!-- A free-text answer, where the agent asked for one. -->
       {#if has("reply")}
@@ -252,8 +296,11 @@
             bind:value={typed}
             placeholder="your answer"
             aria-label="your answer to: {item.title}"
+            data-key="t"
+            data-action="reply"
           />
-          <button onclick={() => reply()}>reply</button>
+          <button data-send onclick={() => reply()}>reply</button><kbd title="sends from inside the field">{spell("Mod+Enter")}</kbd>
+          <kbd title="puts you in this field">t</kbd>
         </div>
       {/if}
     {/if}
@@ -261,9 +308,9 @@
     <!-- The rule to paste, printed, never written; or the host's reason there is none. -->
     {#if item.offer}
       <p class="offer">
-        <span class="dim">never asked again:</span>
+        <span class="dim">To stop being asked, paste this rule:</span>
         <code>{item.offer.rule}</code>
-        <button onclick={() => copyRule(item.offer!.rule)}>copy</button>
+        <button data-action="copy_rule" onclick={() => copyRule(item.offer!.rule)}>copy</button>
         <span class="dim"
           >paste into {item.offer.file} {item.offer.section} · covers {item.offer.covers}{item.offer.more
             ? "+"
@@ -271,83 +318,76 @@
         >
       </p>
     {:else if item.no_offer}
-      <p class="elsewhere">{item.no_offer.sentence}</p>
+      <p class="elsewhere"><Inline text={item.no_offer.sentence} /></p>
     {/if}
 
+    <GrantOffer offer={item.grant_offer} no={item.grant_no} lapsed={item.grant_lapsed} {say} />
+    {#if has("answer") || has("tell_agent")}<Marker {item} {say} />{/if}
     <!-- A watched session has no protocol request, so nothing here can grant it. -->
-    {#if item.answer_in}<p class="elsewhere">{item.answer_in}</p>{/if}
+    {#if item.answer_in}<p class="elsewhere"><Inline text={item.answer_in} /></p>{/if}
+    <!-- The way to the vendor's own dialog: a documented link, else the
+         command to run; the control says which it does. Never a window
+         raised: no documented channel can. -->
+    {#if item.answer_in && (sessionLink || item.resume_command)}
+      <p class="session">
+        {#if sessionLink}
+          <span class="keyed"><a class="act primary" data-key="w" data-action="session" href={sessionLink}>open the session in VS Code</a><kbd>w</kbd></span>
+        {:else}
+          <span class="keyed"><button class="primary" data-key="w" data-action="session" onclick={copyResume}>copy the resume command</button><kbd>w</kbd></span>
+          <code class="cmd">{item.resume_command}</code>
+        {/if}
+      </p>
+    {/if}
 
     <div class="acts">
       {#if has("allow")}
-        <button onclick={() => answer(item, { decision: "allow" })}>allow</button>
+        <span class="keyed"><button data-key="a" data-action="allow" onclick={() => answer(item, { decision: "allow" })}>allow</button><kbd>a</kbd></span>
       {/if}
       {#if has("deny")}
-        <button onclick={() => answer(item, { decision: "deny" })}>deny</button>
+        <span class="keyed"><button data-key="d" data-action="deny" onclick={() => answer(item, { decision: "deny" })}>deny</button><kbd>d</kbd></span>
       {/if}
       {#if has("retry")}
-        <button onclick={() => act(item, "retry")}>retry</button>
+        <button data-action="retry" onclick={() => act(item, "retry")}>retry</button>
       {/if}
       {#if has("resume")}
-        <button onclick={() => act(item, "resume")}>resume</button>
+        <button data-action="resume" onclick={() => act(item, "resume")}>resume</button>
       {/if}
       {#if has("review") && item.change_id}
-        <a class="act primary" href={`#review/${encodeURIComponent(item.change_id)}`}>review</a>
+        <span class="keyed"><a class="act primary" href={`#change/${encodeURIComponent(item.change_id)}/review`} data-key="r" data-action="review">review</a><kbd>r</kbd></span>
       {/if}
       <!-- A drift: tell the run which files moved, or accept it. Either is recorded. -->
-      {#if has("tell_run")}
-        <button onclick={() => act(item, "tell_run")}>tell the run</button>
-      {/if}
-      {#if has("accept_drift")}
-        <button onclick={() => act(item, "accept_drift")}>accept the drift</button>
-      {/if}
+      {#if has("tell_run")}<button data-action="tell_run" onclick={() => act(item, "tell_run")}>tell the run</button>{/if}
+      {#if has("accept_drift")}<button data-action="accept_drift" onclick={() => act(item, "accept_drift")}>accept the drift</button>{/if}
       {#if has("open") && (item.run_id || item.change_id)}
-        <a
-          class="act"
-          href={item.change_id
-            ? `#change/${encodeURIComponent(item.change_id)}`
-            : `#why/${encodeURIComponent(item.run_id ?? "")}`}>open</a
+        <span class="keyed"
+          ><a
+            class="act"
+            data-key="o"
+            data-action="open"
+            href={item.change_id
+              ? `#change/${encodeURIComponent(item.change_id)}`
+              : `#why/${encodeURIComponent(item.run_id ?? "")}`}>open</a
+          ><kbd>o</kbd></span
         >
       {/if}
       {#if (has("open_pr") || has("open_issue")) && url}
-        <a class="act" href={url} target="_blank" rel="noreferrer noopener">
+        <a class="act" data-action={has("open_pr") ? "open_pr" : "open_issue"} href={url} target="_blank" rel="noreferrer noopener">
           {has("open_pr") ? "open pull request" : "open issue"}
         </a>
       {/if}
       <!-- A link, never a fetch: the vendor's window opens with the prompt typed. -->
       {#if launch}
-        <a class="act" href={launch}>open an agent with this typed</a>
+        <a class="act" data-action="launch" href={launch}>open an agent with this typed</a>
       {/if}
-      {#if has("start_from_report")}
-        <button onclick={() => act(item, "start_from_report")}>start a change from this</button>
-      {/if}
-      {#if has("reject_report") || has("defer_report")}
-        <input
-          class="why"
-          type="text"
-          bind:value={reason}
-          placeholder="why — the filer is told"
-          aria-label="why, for the project that filed it"
-        />
-        {#if has("reject_report")}
-          <button onclick={() => answerReport("reject_report")}>reject</button>
-        {/if}
-        {#if has("defer_report")}
-          <button onclick={() => answerReport("defer_report")}>defer</button>
-        {/if}
-      {/if}
-      <!-- A draft nothing sends until this is pressed, by you, under your GitHub sign-in. -->
-      {#if has("open_draft")}
-        <button onclick={() => act(item, "open_draft")}>open on GitHub</button>
-      {/if}
-      {#if has("discard_draft")}
-        <button onclick={() => act(item, "discard_draft")}>discard the draft</button>
-      {/if}
+      <!-- Until the next activity (an hour where there is no session), or an hour. -->
       {#if has("snooze")}
-        <button onclick={() => snooze(item)}>snooze 1h</button>
+        <span class="keyed"><button data-key="s" data-action="snooze" onclick={() => snooze(item)}>{untilActivity(item) ? "snooze until new activity" : "snooze 1h"}</button><kbd>s</kbd></span>
+        {#if untilActivity(item)}<button data-action="snooze_hour" onclick={() => snoozeHour(item)}>for an hour</button>{/if}
       {/if}
-      <!-- A browser cannot attach, so show the command. -->
+      <!-- A browser cannot attach, so show the command, and copy it. -->
       {#if has("attach") && item.run_id}
-        <code class="cmd">devplane attach {item.run_id}</code>
+        <code class="cmd">devplane run attach {item.run_id}</code>
+        <button data-action="attach" onclick={copyAttach}>copy</button>
       {/if}
     </div>
   </div>
@@ -505,22 +545,38 @@
   .reply {
     display: flex;
     gap: var(--s-2);
+    align-items: center;
+  }
+  /* A control and the key that presses it, side by side. */
+  .keyed {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  kbd {
+    font-family: var(--mono);
+    font-size: 0.625rem;
+    color: var(--faint);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 0 0.25rem;
+  }
+  .session {
+    margin: 0;
+    display: flex;
+    gap: var(--s-2);
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--chrome);
+    font-weight: 600;
   }
   .reply input {
     flex: 1;
     max-width: 36rem;
-  }
-  .quoted {
-    margin: 0;
-    color: var(--dim);
-    font-size: var(--t-sm);
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    border-left: 2px solid var(--line);
-    padding-left: var(--s-3);
-  }
-  .why {
-    max-width: 20rem;
   }
   .offer {
     margin: 0;

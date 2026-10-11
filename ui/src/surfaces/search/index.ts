@@ -1,5 +1,10 @@
+import { unseen } from "../../lib/sight";
 import { register } from "../../lib/surfaces";
-import Search from "./Search.svelte";
+import { bindList } from "../../lib/keys";
+
+// The matches are a list like every other: `j`/`k` move, Enter opens the
+// session the match is from.
+bindList("search", "open the session the match is from");
 
 register({
   id: "search",
@@ -12,6 +17,6 @@ register({
   nav: false,
   takesQuery: true,
   reads: ["/api/search"],
-  select: (_feed, focus) => ({ q: focus }),
-  component: Search,
+  select: (feed, focus) => ({ q: focus, blind: unseen(feed.board) }),
+  page: () => import("./Search.svelte"),
 });

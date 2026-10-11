@@ -14,25 +14,15 @@ pub const CONFIG_FILE: &str = "devplane.toml";
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectConfig {
     pub project: Project,
+    pub agent: AgentSection,
     pub workspace: Workspace,
     pub gates: Gates,
     pub policy: PolicySection,
     pub budget: Budget,
-    pub transcripts: Transcripts,
     pub github: GitHub,
     pub spec: SpecSection,
     pub questions: Questions,
     pub review: Review,
-    pub reports: Reports,
-}
-
-/// `[reports]`: projects whose reports are also handed to this project's live
-/// agent as quoted, attributed text (they still reach the person's inbox). Off
-/// by default; `"*"` is refused, because somebody must choose each name.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Reports {
-    pub deliver_from: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -41,8 +31,38 @@ pub struct Project {
     pub name: Option<String>,
     /// What worktrees branch from. Discovered from the repository when unset.
     pub base_branch: Option<String>,
+}
+
+/// `[agent]` — what belongs to the agent a change runs: which one, how many at
+/// once, when a silent one counts as stalled, and whether what it says is kept.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentSection {
     /// The agent `devplane change start` uses when none is named.
-    pub default_agent: Option<String>,
+    pub default: Option<String>,
+    /// How many agents this project may run at once.
+    pub max_parallel: Option<usize>,
+    /// How long a working run may produce nothing before it is called stalled.
+    /// Per project because suites differ; unset uses the global setting.
+    #[serde(default, with = "humantime_opt")]
+    pub stall_timeout: Option<Duration>,
+    /// Whether to keep what driven agents say. On by default: a driven run has
+    /// no window of its own, so without its transcript nobody can see why it
+    /// acted. Still the repository's choice, because an agent's prose can
+    /// quote what it read (`.env` included). Watched sessions carry no prose
+    /// either way.
+    pub keep_transcripts: bool,
+}
+
+impl Default for AgentSection {
+    fn default() -> Self {
+        Self {
+            default: None,
+            max_parallel: None,
+            stall_timeout: None,
+            keep_transcripts: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -56,21 +76,147 @@ pub struct Workspace {
     pub share: Vec<String>,
 }
 
+/// `[gates]`: the definition of done, and beside it every gate a person runs
+/// by name, each its own table (`[gates.slow]`). Read by hand rather than
+/// derived, because the named gates share the table with the keys.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default, try_from = "toml::Table")]
 pub struct Gates {
     /// The Definition of Done: commands that must all succeed.
     pub check: Vec<String>,
     /// How long the whole gate may take.
     #[serde(with = "humantime")]
     pub timeout: Duration,
-    pub on_fail: OnFail,
-    /// How many times failures are handed back to the agent before a human is
-    /// asked; bounded because each round costs money.
+    /// How many times failures are handed back to the agent before it stops
+    /// and a person is asked; bounded because each round costs money. Zero
+    /// stops at the first failure.
     pub max_feedback_rounds: u32,
     /// Gates run only by name (`devplane gate --name <name>`). They never
     /// make a change verified: that is `check` alone.
+    #[serde(flatten)]
     pub named: BTreeMap<String, NamedGate>,
+    /// JUnit XML files `check`'s runners write, relative to the checkout:
+    /// literal paths, read to name tests. Never an input to *verified*.
+    pub junit: Vec<String>,
+    /// When the base's tests run on a change and its new tests on the base.
+    pub base_checks: BaseChecksWhen,
+    /// Whether this repository's gates run one at a time on this machine:
+    /// for checks that share something two changes cannot both hold, such as
+    /// one test database. Off, two changes' gates run at once.
+    pub serial: bool,
+}
+
+/// When base checks run: the cost is the person's choice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BaseChecksWhen {
+    /// When a person offers or asks (`change verify --base-checks`, *Run base
+    /// checks*), and in CI.
+    #[default]
+    Offer,
+    /// Also after every passing `check`, in the background.
+    Auto,
+    /// Never; every surface and the certificate say so.
+    Off,
+}
+
+impl BaseChecksWhen {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BaseChecksWhen::Offer => "offer",
+            BaseChecksWhen::Auto => "auto",
+            BaseChecksWhen::Off => "off",
+        }
+    }
+}
+
+/// The keys `[gates]` itself takes; any other key names a gate.
+const GATES_KEYS: &[&str] = &[
+    "check",
+    "timeout",
+    "max_feedback_rounds",
+    "junit",
+    "base_checks",
+    "serial",
+];
+
+impl TryFrom<toml::Table> for Gates {
+    type Error = String;
+
+    fn try_from(mut t: toml::Table) -> Result<Self, String> {
+        let mut g = Gates::default();
+        if let Some(v) = t.remove("check") {
+            if v.is_table() {
+                return Err(
+                    "`[gates.check]` cannot be a gate run by name: `check` is the \
+                            definition of done, `check = [...]` under `[gates]`. Give the \
+                            gate another name"
+                        .into(),
+                );
+            }
+            g.check = v
+                .try_into()
+                .map_err(|e| format!("`[gates] check` is a list of commands: {e}"))?;
+        }
+        if let Some(v) = t.remove("timeout") {
+            let raw = v
+                .as_str()
+                .ok_or("`[gates] timeout` is a duration like \"10m\"")?;
+            g.timeout = humantime::parse(raw).ok_or(format!("`{raw}` is not a duration"))?;
+        }
+        if let Some(v) = t.remove("max_feedback_rounds") {
+            g.max_feedback_rounds = v
+                .as_integer()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or("`[gates] max_feedback_rounds` is a whole number, zero or more")?;
+        }
+        if let Some(v) = t.remove("junit") {
+            g.junit = v
+                .try_into()
+                .map_err(|e| format!("`[gates] junit` is a list of paths: {e}"))?;
+        }
+        if let Some(v) = t.remove("base_checks") {
+            g.base_checks = v.clone().try_into().map_err(|_| {
+                format!("`[gates] base_checks` is \"offer\", \"auto\" or \"off\", not {v}")
+            })?;
+        }
+        if let Some(v) = t.remove("serial") {
+            g.serial = v.as_bool().ok_or("`[gates] serial` is true or false")?;
+        }
+        for (name, v) in t {
+            if let Some(why) = removed_gates_key(&name) {
+                return Err(why);
+            }
+            let toml::Value::Table(_) = v else {
+                return Err(format!(
+                    "`[gates] {name}` is not a key; the keys are {}, and a gate run by name \
+                     is a table of its own: `[gates.{name}]` with `run = [...]`",
+                    GATES_KEYS.join(", ")
+                ));
+            };
+            let gate: NamedGate = v.try_into().map_err(|e| format!("`[gates.{name}]`: {e}"))?;
+            g.named.insert(name, gate);
+        }
+        Ok(g)
+    }
+}
+
+/// A key `[gates]` took once, and what to write instead.
+fn removed_gates_key(key: &str) -> Option<String> {
+    match key {
+        "on_fail" => Some(
+            "`[gates] on_fail` is gone: failures go back to the agent up to \
+             `max_feedback_rounds` times, then the change stops for a person. Write \
+             `max_feedback_rounds = 0` to stop at the first failure"
+                .into(),
+        ),
+        "named" => Some(
+            "`[gates.named.<name>]` is `[gates.<name>]`: a gate run by name is a table \
+             directly under `[gates]`"
+                .into(),
+        ),
+        _ => None,
+    }
 }
 
 /// A suite a person can run by name; never decides whether a change is done.
@@ -88,38 +234,12 @@ impl Default for Gates {
         Self {
             check: Vec::new(),
             timeout: Duration::from_secs(600),
-            on_fail: OnFail::Feedback,
             max_feedback_rounds: 2,
             named: BTreeMap::new(),
+            junit: Vec::new(),
+            base_checks: BaseChecksWhen::Offer,
+            serial: false,
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OnFail {
-    /// Hand the failures back to the same session and let it try again.
-    #[default]
-    Feedback,
-    /// Ask a human immediately.
-    Escalate,
-    /// Record the report and carry on. For a check that is advisory.
-    Ignore,
-}
-
-/// Whether to keep what driven agents say. On by default: a driven run has no
-/// window of its own, so without its transcript nobody can see why it acted.
-/// Still the repository's choice, because an agent's prose can quote what it
-/// read (`.env` included). Watched sessions carry no prose either way.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Transcripts {
-    pub keep: bool,
-}
-
-impl Default for Transcripts {
-    fn default() -> Self {
-        Self { keep: true }
     }
 }
 
@@ -133,7 +253,7 @@ pub struct Questions {
     /// `never` (the default), or a duration like `30m`, `4h`, `90s`. An
     /// unparseable value is a configuration error, never a guessed duration.
     pub deadline: Option<String>,
-    /// How long a permission on a watched session that matched `always_ask`
+    /// How long a permission on a watched session that matched an `ask` rule
     /// waits for an answer from the inbox, board or phone before the vendor's
     /// dialog appears. Absent means no hold. `true` means [`Hold::DEFAULT`];
     /// a duration names its own, up to [`Hold::CEILING`]. An unparseable or
@@ -162,7 +282,7 @@ pub const HOLD_CEILING_MS: u64 = Hold::CEILING.as_millis() as u64;
 
 impl Questions {
     /// The declared hold; `Ok(None)` is no hold. `Err` is the sentence
-    /// `devplane check` prints.
+    /// `devplane config check` prints.
     pub fn hold(&self) -> Result<Option<Hold>, String> {
         let Some(v) = self.hold.as_ref() else {
             return Ok(None);
@@ -205,12 +325,12 @@ impl Questions {
 
 /// What a change may cost before somebody is asked about it. The dollar
 /// ceiling only bites when the agent reports cost (optional in ACP), so
-/// `devplane check` warns when it is the only bound.
+/// `devplane config check` warns when it is the only bound.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Budget {
     /// What one change may spend, in US dollars, as its agent reports it.
-    pub usd: Option<f64>,
+    pub max_usd: Option<f64>,
     /// How many agent turns one change may take. Counted from events Devplane
     /// saw itself, so it binds every agent.
     pub max_turns: Option<u32>,
@@ -228,37 +348,25 @@ impl Budget {
 
     /// The dollar ceiling; zero means none.
     pub fn ceiling_usd(&self) -> Option<f64> {
-        self.usd.filter(|c| *c > 0.0)
+        self.max_usd.filter(|c| *c > 0.0)
     }
 
     pub fn is_set(&self) -> bool {
-        self.usd.is_some()
+        self.max_usd.is_some()
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GitHub {
-    /// Let `change offer` push the branch and open the pull request itself,
-    /// when a person offers the change — never on its own when gates pass.
-    /// Off by default (the offer then prints the push command and GitHub's
-    /// address instead): pushing is the first thing Devplane does that other
-    /// people can see.
+    /// Let `change offer` push the branch and open the pull request itself —
+    /// always as a draft, since nobody has read the work yet — when a person
+    /// offers the change, never on its own when gates pass. Off by default
+    /// (the offer then prints the push command and GitHub's address instead):
+    /// pushing is the first thing Devplane does that other people can see.
     pub pull_request: bool,
-    /// Open it as a draft, since nobody has read the work yet.
-    pub draft: bool,
     /// Issues carrying this label are offered as changes.
     pub ready_label: Option<String>,
-}
-
-impl Default for GitHub {
-    fn default() -> Self {
-        Self {
-            pull_request: false,
-            draft: true,
-            ready_label: None,
-        }
-    }
 }
 
 /// How to read the specification a change names, in the project's own words.
@@ -285,7 +393,7 @@ pub struct SpecSection {
 
 impl SpecSection {
     /// The configured token shapes, or the defaults. An invalid prefix is
-    /// dropped here and reported by `devplane check`.
+    /// dropped here and reported by `devplane config check`.
     pub fn token_shapes(&self) -> Vec<crate::spec::TokenShape> {
         match self.tokens.as_deref() {
             Some(list) if !list.is_empty() => list
@@ -406,75 +514,92 @@ impl Review {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PolicySection {
-    /// Rules that refuse a permission request.
-    pub never_auto: Vec<String>,
+    /// Rules that refuse a permission request (Claude Code's `deny` list).
+    pub deny: Vec<String>,
     /// Rules that always put the call in front of a person (Claude Code's
-    /// `ask` list). Evaluated after `never_auto`.
-    pub always_ask: Vec<String>,
-    pub max_parallel_runs: Option<usize>,
-    /// How long a working run may produce nothing before it is called stalled.
-    /// Per project because suites differ; unset uses the global setting.
-    #[serde(default, with = "humantime_opt")]
-    pub stall_timeout: Option<Duration>,
+    /// `ask` list). Evaluated after `deny`.
+    pub ask: Vec<String>,
 }
 
 /// The machine-wide rules, from `~/.devplane/policy.toml`, in the same
 /// `[policy]` shape a project writes so rules can be pasted between them.
+/// Also the person's grants: `[grants]` says when one is offered, and
+/// `[projects."<root>"] allow` holds the rules they wrote for one project.
+/// Only this file may hold a grant; a repository's `devplane.toml` is refused
+/// if it tries.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GlobalConfig {
     pub policy: PolicySection,
+    pub grants: crate::core::grant::GrantSettings,
+    pub projects: BTreeMap<String, crate::core::grant::ProjectGrants>,
 }
 
 impl GlobalConfig {
-    pub fn policy(&self) -> crate::core::Policy {
-        crate::core::Policy::rules(&self.policy.never_auto, &self.policy.always_ask)
+    /// Parses `policy.toml`'s text, naming any removed key, a machine-wide
+    /// `allow`, and the first grant that cannot be one.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        if let Ok(table) = text.parse::<toml::Table>() {
+            if let Some(why) = removed_key(&table) {
+                return Err(why);
+            }
+            if table
+                .get("policy")
+                .and_then(|p| p.as_table())
+                .is_some_and(|p| p.contains_key("allow"))
+            {
+                return Err(
+                    "`[policy] allow` would grant for every project, and there is no global \
+                     switch: a grant is written per project, under `[projects.\"<root>\"] allow`"
+                        .into(),
+                );
+            }
+        }
+        let parsed: Self = toml::from_str(text).map_err(|e| e.to_string())?;
+        parsed.grants()?;
+        Ok(parsed)
     }
 
-    /// Rules in the machine-wide file that cannot do what they say — and the
-    /// two keys the shared `[policy]` shape accepts that only a project reads.
+    /// The person's grants, or the first reason one cannot be.
+    pub fn grants(&self) -> Result<crate::core::grant::Grants, String> {
+        crate::core::grant::Grants::parse(&self.grants, &self.projects)
+    }
+
+    pub fn policy(&self) -> crate::core::Policy {
+        crate::core::Policy::rules(&self.policy.deny, &self.policy.ask)
+    }
+
+    /// Rules in the machine-wide file that cannot do what they say.
     pub fn validate(&self) -> Vec<Problem> {
-        let mut out: Vec<Problem> = self
-            .policy()
+        self.policy()
             .problems()
             .into_iter()
             .map(|(fatal, what)| match fatal {
                 true => Problem::error("[policy]".into(), what),
                 false => Problem::warning("[policy]".into(), what),
             })
-            .collect();
-        for (set, key) in [
-            (self.policy.max_parallel_runs.is_some(), "max_parallel_runs"),
-            (self.policy.stall_timeout.is_some(), "stall_timeout"),
-        ] {
-            if set {
-                out.push(Problem::warning(
-                    format!("[policy] {key}"),
-                    format!(
-                        "`{key}` has no effect in policy.toml; it is read only from a \
-                         project's devplane.toml"
-                    ),
-                ));
-            }
-        }
-        out
+            .collect()
     }
 }
 
 impl ProjectConfig {
-    /// Parses a file's text, naming any removed key.
+    /// Parses a file's text, naming any removed key and any key that would
+    /// grant a permission.
     pub fn parse(text: &str) -> Result<Self, String> {
-        if let Ok(table) = text.parse::<toml::Table>()
-            && let Some(why) = removed_key(&table)
-        {
-            return Err(why);
+        if let Ok(table) = text.parse::<toml::Table>() {
+            if let Some(why) = removed_key(&table) {
+                return Err(why);
+            }
+            if let Some(why) = repository_grant_key(&table) {
+                return Err(why);
+            }
         }
         toml::from_str(text).map_err(|e| explain_unknown(&e))
     }
 
     /// The compiled permission policy.
     pub fn policy(&self) -> crate::core::Policy {
-        crate::core::Policy::rules(&self.policy.never_auto, &self.policy.always_ask)
+        crate::core::Policy::rules(&self.policy.deny, &self.policy.ask)
     }
 
     pub fn has_gates(&self) -> bool {
@@ -482,24 +607,9 @@ impl ProjectConfig {
     }
 
     /// Everything in this file that parses but cannot do what it says. Checked
-    /// when a change starts and by `devplane check`, before an agent is paid.
+    /// when a change starts and by `devplane config check`, before an agent is paid.
     pub fn validate(&self) -> Vec<Problem> {
-        self.problems(None)
-    }
-
-    /// [`Self::validate`], also flagging a `deliver_from` naming an
-    /// unregistered project.
-    pub fn validate_against(&self, registered: &[String]) -> Vec<Problem> {
-        self.problems(Some(registered))
-    }
-
-    fn problems(&self, registered: Option<&[String]>) -> Vec<Problem> {
         let mut out = Vec::new();
-        for what in
-            crate::core::report::deliver_from_problems(&self.reports.deliver_from, registered)
-        {
-            out.push(Problem::error("[reports] deliver_from".into(), what));
-        }
 
         // An unparseable deadline is an error: the wait stays unbounded (the
         // safe direction) rather than guessing which duration was meant.
@@ -514,10 +624,34 @@ impl ProjectConfig {
             ));
         }
 
+        // A JUnit path is read inside the checkout only; one that could point
+        // anywhere else is refused before anything reads it.
+        let mut junit_seen: Vec<&str> = Vec::new();
+        for path in &self.gates.junit {
+            let p = std::path::Path::new(path);
+            if path.is_empty()
+                || p.is_absolute()
+                || path.starts_with('/')
+                || path.starts_with('\\')
+                || p.components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                out.push(Problem::error(
+                    "[gates] junit".into(),
+                    format!("`{path}` must be relative to the checkout and stay inside it"),
+                ));
+            } else if junit_seen.contains(&path.as_str()) {
+                out.push(Problem::warning(
+                    "[gates] junit".into(),
+                    format!("`{path}` is declared twice; it is read once"),
+                ));
+            }
+            junit_seen.push(path);
+        }
         for (name, gate) in &self.gates.named {
             if gate.run.is_empty() {
                 out.push(Problem::error(
-                    format!("[gates.named.{name}]"),
+                    format!("[gates.{name}]"),
                     "has no commands, and an empty gate is not a pass".into(),
                 ));
             }
@@ -536,7 +670,7 @@ impl ProjectConfig {
         if self.budget.is_set() && !self.budget.has_observable_bound() {
             out.push(Problem::warning(
                 "[budget]".into(),
-                "a `usd` ceiling only stops work whose agent reports what it spent, which \
+                "a `max_usd` ceiling only stops work whose agent reports what it spent, which \
                  the protocol makes optional and the GenAI telemetry conventions cannot \
                  express at all. Add `max_turns` or `max_runtime`, which are counted here \
                  and bind every agent"
@@ -648,7 +782,7 @@ fn human(d: Duration) -> String {
 
 impl ProjectConfig {
     /// This file read back: what it will do and what cannot work. One
-    /// derivation shared by `devplane check` and the board, so they agree.
+    /// derivation shared by `devplane config check` and the board, so they agree.
     /// Rules are in evaluation order, beside the findings reading the file
     /// cannot give: unused rules, overbroad ones, and half-protected paths.
     pub fn describe(&self) -> serde_json::Value {
@@ -663,28 +797,29 @@ impl ProjectConfig {
             "project": {
                 "name": self.project.name,
                 "base_branch": self.project.base_branch,
-                "default_agent": self.project.default_agent,
+            },
+            "agent": {
+                "default": self.agent.default,
+                "max_parallel": self.agent.max_parallel,
+                "stall_timeout": self.agent.stall_timeout.map(human),
+                "keep_transcripts": self.agent.keep_transcripts,
             },
             "gates": {
                 "check": self.gates.check,
                 "timeout": human(self.gates.timeout),
-                "on_fail": match self.gates.on_fail {
-                    OnFail::Feedback => "feedback",
-                    OnFail::Escalate => "escalate",
-                    OnFail::Ignore => "ignore",
-                },
                 "max_feedback_rounds": self.gates.max_feedback_rounds,
                 "named": self.gates.named.iter().map(|(name, g)| json!({
                     "name": name,
                     "run": g.run,
                     "timeout": g.timeout.map(human),
                 })).collect::<Vec<_>>(),
+                "junit": self.gates.junit,
+                "base_checks": self.gates.base_checks.as_str(),
+                "serial": self.gates.serial,
             },
             "policy": {
                 "deny": rules(policy.deny_rules()),
                 "ask": rules(policy.ask_rules()),
-                "max_parallel_runs": self.policy.max_parallel_runs,
-                "stall_timeout": self.policy.stall_timeout.map(human),
                 "unused": policy.redundancies(),
                 "overbroad": crate::core::policy::overbroad(&[]).into_iter().map(|o| json!({
                     "rule": o.rule, "why": o.why, "suggestion": o.suggestion,
@@ -692,21 +827,18 @@ impl ProjectConfig {
                 "half_protected": policy.half_protected_paths(),
             },
             "budget": {
-                "usd": self.budget.usd,
+                "max_usd": self.budget.max_usd,
                 "max_turns": self.budget.max_turns,
                 "max_runtime": self.budget.max_runtime.map(human),
                 "has_observable_bound": self.budget.has_observable_bound(),
             },
             "github": {
                 "pull_request": self.github.pull_request,
-                "draft": self.github.draft,
                 "ready_label": self.github.ready_label,
             },
             "workspace": {"setup": self.workspace.setup, "share": self.workspace.share},
             "spec": {"open_questions": self.spec.open_questions},
-            "transcripts": {"keep": self.transcripts.keep},
             "review": {"roles": self.review.roles, "covers": self.review.covers},
-            "reports": {"deliver_from": self.reports.deliver_from},
             "problems": self.validate(),
         })
     }
@@ -715,27 +847,55 @@ impl ProjectConfig {
 /// A removed key, named with what to do instead. `deny_unknown_fields` already
 /// refuses it, but an unknown-field error reads as a typo.
 fn removed_key(t: &toml::Table) -> Option<String> {
+    // Renamed to the words the vendors' own settings use: refused by name,
+    // with the new name, never read under the old one.
+    const MOVED: &[(&str, &str, &str)] = &[
+        ("policy", "never_auto", "`[policy] deny`"),
+        ("policy", "always_ask", "`[policy] ask`"),
+        ("policy", "max_parallel_runs", "`[agent] max_parallel`"),
+        ("policy", "stall_timeout", "`[agent] stall_timeout`"),
+        ("project", "default_agent", "`[agent] default`"),
+        ("transcripts", "keep", "`[agent] keep_transcripts`"),
+        ("budget", "usd", "`[budget] max_usd`"),
+    ];
+    for (section, key, now) in MOVED {
+        if t.get(*section)
+            .and_then(|s| s.as_table())
+            .is_some_and(|s| s.contains_key(*key))
+        {
+            return Some(format!("`[{section}] {key}` is gone: write {now}"));
+        }
+    }
+    if let Some(gates) = t.get("gates").and_then(|g| g.as_table()) {
+        for key in gates.keys() {
+            if let Some(why) = removed_gates_key(key) {
+                return Some(why);
+            }
+        }
+    }
+    if t.get("github")
+        .and_then(|g| g.as_table())
+        .is_some_and(|g| g.contains_key("draft"))
+    {
+        return Some(
+            "`[github] draft` is gone: a pull request Devplane opens is always a draft. \
+             Delete the key"
+                .into(),
+        );
+    }
+    if t.contains_key("reports") {
+        return Some(
+            "`[reports]` was removed: projects no longer file reports to each other, so there \
+             is nothing to deliver. Delete the section"
+                .into(),
+        );
+    }
     if t.contains_key("pipelines") {
         return Some(
             "`[pipelines]` was removed in 0.10: a change is one agent in its own tree and the \
              project's `[gates] check`. Delete the section"
                 .into(),
         );
-    }
-    if let Some(named) = t
-        .get("gates")
-        .and_then(|g| g.get("named"))
-        .and_then(|n| n.as_table())
-    {
-        for (name, gate) in named {
-            if gate.get("expect").is_some() {
-                return Some(format!(
-                    "`[gates.named.{name}] expect` was removed in 0.10: a named gate passes \
-                     when its commands exit zero, and reproduction gates are gone. Delete the \
-                     key, and write the command so that success means what you want"
-                ));
-            }
-        }
     }
     if let Some(budget) = t.get("budget").and_then(|b| b.as_table()) {
         for key in [
@@ -748,7 +908,7 @@ fn removed_key(t: &toml::Table) -> Option<String> {
             if budget.contains_key(key) {
                 return Some(format!(
                     "`[budget] {key}` was removed in 0.10: change kinds are gone, so there is \
-                     one ceiling — write `usd` instead"
+                     one ceiling — write `max_usd` instead"
                 ));
             }
         }
@@ -756,7 +916,39 @@ fn removed_key(t: &toml::Table) -> Option<String> {
     None
 }
 
-/// The parse error, with the retired `include` key pointed at its replacement.
+/// A key in a repository's `devplane.toml` that would widen a permission or
+/// set how soon one is offered. A repository is text anybody can send, so
+/// nothing read from one may grant.
+fn repository_grant_key(t: &toml::Table) -> Option<String> {
+    let refuse = |what: &str| {
+        Some(format!(
+            "{what} in devplane.toml is refused: a repository cannot grant a permission or \
+             decide how soon one is offered. A grant lives in your own \
+             ~/.devplane/policy.toml, under `[projects.\"<root>\"] allow`"
+        ))
+    };
+    if t.get("policy")
+        .and_then(|p| p.as_table())
+        .is_some_and(|p| p.contains_key("allow"))
+    {
+        return refuse("`[policy] allow`");
+    }
+    for section in ["grants", "projects"] {
+        if t.contains_key(section) {
+            return refuse(&format!("`[{section}]`"));
+        }
+    }
+    for (name, v) in t {
+        for key in ["offer_after", "offer_again_after"] {
+            if name == key || v.as_table().is_some_and(|s| s.contains_key(key)) {
+                return refuse(&format!("`{key}`"));
+            }
+        }
+    }
+    None
+}
+
+/// The parse error, pointing a `[workspace] include` key at `.worktreeinclude`.
 fn explain_unknown(e: &toml::de::Error) -> String {
     let text = e.to_string();
     if text.contains("unknown field `include`") {
@@ -770,7 +962,7 @@ fn explain_unknown(e: &toml::de::Error) -> String {
 /// Something in a configuration file that parses but cannot work.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Problem {
-    /// Where it is, in the file's own words: `[gates.named.slow]`.
+    /// Where it is, in the file's own words: `[gates.slow]`.
     #[serde(rename = "where")]
     pub where_: String,
     pub what: String,
@@ -834,16 +1026,11 @@ mod humantime_opt {
 
 /// Durations as people write them: `10m`, `90s`, `1h30m`.
 mod humantime {
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::Serializer;
     use std::time::Duration;
 
     pub fn serialize<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&format!("{}s", d.as_secs()))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
-        let raw = String::deserialize(d)?;
-        parse(&raw).ok_or_else(|| serde::de::Error::custom(format!("`{raw}` is not a duration")))
     }
 
     pub fn parse(s: &str) -> Option<Duration> {
@@ -885,42 +1072,6 @@ mod humantime {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_delivery_list_names_its_sources_or_is_refused() {
-        let off = ProjectConfig::default();
-        assert!(
-            off.reports.deliver_from.is_empty(),
-            "delivery is off by default"
-        );
-
-        let star: ProjectConfig = toml::from_str("[reports]\ndeliver_from = [\"*\"]\n").unwrap();
-        let p = star.validate();
-        let hit = p
-            .iter()
-            .find(|p| p.where_ == "[reports] deliver_from")
-            .expect("the wildcard is named");
-        assert!(hit.fatal && hit.what.contains("any project"), "{hit}");
-
-        let blank: ProjectConfig = toml::from_str("[reports]\ndeliver_from = [\"\"]\n").unwrap();
-        assert!(blank.validate().iter().any(|p| p.fatal));
-
-        let named: ProjectConfig =
-            toml::from_str("[reports]\ndeliver_from = [\"api\", \"billing\"]\n").unwrap();
-        assert!(
-            named.validate().is_empty(),
-            "without the registry, a name is a name"
-        );
-        let against = named.validate_against(&["api".into(), "web".into()]);
-        assert_eq!(against.len(), 1, "{against:?}");
-        assert!(against[0].what.contains("`billing`"), "{}", against[0]);
-
-        let typo = toml::from_str::<ProjectConfig>("[reports]\ndeliver_to = [\"api\"]\n");
-        assert!(
-            typo.is_err(),
-            "an unknown key fails the file rather than doing nothing"
-        );
-    }
 
     #[test]
     fn review_roles_and_covers_are_read_as_declared() {
@@ -991,7 +1142,7 @@ paths = ["src/auth/**"]
     fn a_named_gate_is_read_with_its_own_timeout() {
         let c: ProjectConfig = toml::from_str(
             r#"
-[gates.named.slow]
+[gates.slow]
 run = ["cargo test --test slow"]
 timeout = "90s"
 "#,
@@ -1010,9 +1161,33 @@ timeout = "90s"
                 "`[pipelines]` was removed",
             ),
             (
-                "[gates.named.repro]\nrun = [\"x\"]\nexpect = \"fail\"\n",
-                "`[gates.named.repro] expect` was removed",
+                "[gates.named.repro]\nrun = [\"x\"]\n",
+                "`[gates.named.<name>]` is `[gates.<name>]`",
             ),
+            ("[policy]\nnever_auto = []\n", "write `[policy] deny`"),
+            ("[policy]\nalways_ask = []\n", "write `[policy] ask`"),
+            (
+                "[policy]\nmax_parallel_runs = 2\n",
+                "write `[agent] max_parallel`",
+            ),
+            (
+                "[policy]\nstall_timeout = \"5m\"\n",
+                "write `[agent] stall_timeout`",
+            ),
+            (
+                "[project]\ndefault_agent = \"claude\"\n",
+                "write `[agent] default`",
+            ),
+            (
+                "[transcripts]\nkeep = false\n",
+                "write `[agent] keep_transcripts`",
+            ),
+            ("[budget]\nusd = 5\n", "write `[budget] max_usd`"),
+            (
+                "[gates]\non_fail = \"escalate\"\n",
+                "`[gates] on_fail` is gone",
+            ),
+            ("[github]\ndraft = false\n", "`[github] draft` is gone"),
             (
                 "[budget]\nfeature_usd = 5\n",
                 "`[budget] feature_usd` was removed",
@@ -1021,10 +1196,61 @@ timeout = "90s"
                 "[budget]\ndefault_usd = 5\n",
                 "`[budget] default_usd` was removed",
             ),
+            (
+                "[reports]\ndeliver_from = [\"api\"]\n",
+                "`[reports]` was removed",
+            ),
         ] {
             let err = ProjectConfig::parse(text).expect_err(text);
             assert!(err.contains(key), "{text}\n produced: {err}");
         }
+    }
+
+    #[test]
+    fn a_gate_run_by_name_is_a_table_under_gates_and_check_is_not_one() {
+        let c = parse("[gates]\ncheck = [\"t\"]\ntimeout = \"5m\"\n[gates.lint]\nrun = [\"l\"]\n");
+        assert_eq!(c.gates.check, ["t"]);
+        assert_eq!(c.gates.timeout, Duration::from_secs(300));
+        assert_eq!(
+            c.gate_named("lint").map(|g| g.1),
+            Some(Duration::from_secs(300))
+        );
+        for (text, says) in [
+            (
+                "[gates.check]\nrun = [\"x\"]\n",
+                "`check` is the definition of done",
+            ),
+            ("[gates]\nsmoke = \"x\"\n", "`[gates.smoke]`"),
+            (
+                "[gates.lint]\nrun = [\"x\"]\nexpect = 1\n",
+                "`[gates.lint]`",
+            ),
+        ] {
+            let err = ProjectConfig::parse(text).expect_err(text);
+            assert!(err.contains(says), "{text}\n produced: {err}");
+        }
+    }
+
+    /// `serial` is a flag of `[gates]`, off unless written; anything but a
+    /// boolean is refused, and a misspelling names a gate table, not a pass.
+    #[test]
+    fn serial_gates_are_a_flag_and_off_by_default() {
+        assert!(!parse("[gates]\ncheck = [\"t\"]\n").gates.serial);
+        assert!(
+            parse("[gates]\ncheck = [\"t\"]\nserial = true\n")
+                .gates
+                .serial
+        );
+        let err = ProjectConfig::parse("[gates]\nserial = \"yes\"\n").unwrap_err();
+        assert!(err.contains("`[gates] serial` is true or false"), "{err}");
+        let err = ProjectConfig::parse("[gates]\nserialise = true\n").unwrap_err();
+        assert!(err.contains("serial"), "the keys are listed: {err}");
+    }
+
+    #[test]
+    fn the_machine_wide_file_refuses_the_old_words_too() {
+        let err = GlobalConfig::parse("[policy]\nnever_auto = []\n").unwrap_err();
+        assert!(err.contains("`[policy] deny`"), "{err}");
     }
 
     fn parse(toml_text: &str) -> ProjectConfig {
@@ -1033,9 +1259,51 @@ timeout = "90s"
 
     #[test]
     fn an_empty_named_gate_is_named() {
-        let c = parse("[gates]\ncheck = [\"cargo test\"]\n[gates.named.empty]\nrun = []\n");
+        let c = parse("[gates]\ncheck = [\"cargo test\"]\n[gates.empty]\nrun = []\n");
         let all: Vec<String> = c.validate().iter().map(|p| p.to_string()).collect();
         assert!(all.join("\n").contains("empty"), "{all:?}");
+    }
+
+    #[test]
+    fn a_junit_path_stays_inside_the_checkout_or_is_refused_by_name() {
+        for bad in ["/tmp/r.xml", "../r.xml", "reports/../../r.xml"] {
+            let c = parse(&format!("[gates]\njunit = [\"{bad}\"]\n"));
+            let found = c.validate();
+            assert!(
+                found
+                    .iter()
+                    .any(|p| p.fatal && p.where_ == "[gates] junit" && p.what.contains(bad)),
+                "{bad}: {found:?}"
+            );
+        }
+        let twice = parse("[gates]\njunit = [\"r.xml\", \"r.xml\"]\n").validate();
+        assert!(
+            twice.iter().any(|p| !p.fatal && p.what.contains("twice")),
+            "{twice:?}"
+        );
+        assert!(
+            parse("[gates]\njunit = [\"reports/junit.xml\"]\n")
+                .validate()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn base_checks_takes_three_values_and_the_old_key_is_unknown() {
+        assert_eq!(parse("").gates.base_checks, BaseChecksWhen::Offer);
+        assert_eq!(
+            parse("[gates]\nbase_checks = \"auto\"\n").gates.base_checks,
+            BaseChecksWhen::Auto
+        );
+        let bad = ProjectConfig::parse("[gates]\nbase_checks = \"always\"\n").unwrap_err();
+        assert!(
+            bad.contains("offer") && bad.contains("auto") && bad.contains("off"),
+            "{bad}"
+        );
+        assert!(ProjectConfig::parse("[gates]\ncompare_base = true\n").is_err());
+        let d = parse("[gates]\njunit = [\"r.xml\"]\nbase_checks = \"off\"\n").describe();
+        assert_eq!(d["gates"]["base_checks"], "off");
+        assert_eq!(d["gates"]["junit"][0], "r.xml");
     }
 
     #[test]
@@ -1122,7 +1390,7 @@ timeout = "90s"
         let c = parse(
             r#"
 [policy]
-never_auto = ["Write(src/**)", "Bash(command:rm *)", "mcp__github(create_issue)"]
+deny = ["Write(src/**)", "Bash(command:rm *)", "mcp__github(create_issue)"]
 "#,
         );
         let said: Vec<String> = c.validate().iter().map(|p| p.to_string()).collect();
@@ -1146,7 +1414,7 @@ never_auto = ["Write(src/**)", "Bash(command:rm *)", "mcp__github(create_issue)"
         let c = parse(
             r#"
 [policy]
-never_auto = ["Bash(git push *)", "Read(./.env)", "Read(secrets/**)", "mcp__*"]
+deny = ["Bash(git push *)", "Read(./.env)", "Read(secrets/**)", "mcp__*"]
 "#,
         );
         assert_eq!(c.validate(), vec![]);
@@ -1154,11 +1422,11 @@ never_auto = ["Bash(git push *)", "Read(./.env)", "Read(secrets/**)", "mcp__*"]
 
     #[test]
     fn a_budget_is_one_ceiling() {
-        let c = parse("[budget]\nusd = 5\n");
+        let c = parse("[budget]\nmax_usd = 5\n");
         assert_eq!(c.budget.ceiling_usd(), Some(5.0));
         assert_eq!(ProjectConfig::default().budget.ceiling_usd(), None);
         // Zero means off.
-        assert_eq!(parse("[budget]\nusd = 0\n").budget.ceiling_usd(), None);
+        assert_eq!(parse("[budget]\nmax_usd = 0\n").budget.ceiling_usd(), None);
         assert!(
             c.validate()
                 .iter()
@@ -1169,7 +1437,7 @@ never_auto = ["Bash(git push *)", "Read(./.env)", "Read(secrets/**)", "mcp__*"]
 
     #[test]
     fn a_bound_that_always_fires_silences_the_warning_about_one_that_may_not() {
-        let money_only = parse("[budget]\nusd = 10\n");
+        let money_only = parse("[budget]\nmax_usd = 10\n");
         assert!(
             money_only
                 .validate()
@@ -1177,7 +1445,7 @@ never_auto = ["Bash(git push *)", "Read(./.env)", "Read(secrets/**)", "mcp__*"]
                 .any(|p| !p.fatal && p.what.contains("reports what it spent")),
             "a guard that may not fire must say so"
         );
-        let bounded = parse("[budget]\nusd = 10\nmax_turns = 60\n");
+        let bounded = parse("[budget]\nmax_usd = 10\nmax_turns = 60\n");
         assert!(
             !bounded
                 .validate()
@@ -1201,7 +1469,7 @@ never_auto = ["Bash(git push *)", "Read(./.env)", "Read(secrets/**)", "mcp__*"]
             r#"
 [gates]
 check = ["cargo test"]
-[gates.named.slow]
+[gates.slow]
 run = ["cargo test --test slow"]
 "#,
         );
@@ -1213,8 +1481,12 @@ run = ["cargo test --test slow"]
         let c = ProjectConfig::load(std::path::Path::new("/definitely/not/here")).unwrap();
         assert!(!c.has_gates());
         assert_eq!(c.gates.max_feedback_rounds, 2);
-        assert!(c.policy.never_auto.is_empty());
-        assert_eq!(c.policy.stall_timeout, None);
+        assert!(c.policy.deny.is_empty());
+        assert_eq!(c.agent.stall_timeout, None);
+        assert!(
+            c.agent.keep_transcripts,
+            "what a driven agent says is kept by default"
+        );
     }
 
     #[test]
@@ -1226,7 +1498,12 @@ run = ["cargo test --test slow"]
 [project]
 name = "saas"
 base_branch = "main"
-default_agent = "claude"
+
+[agent]
+default = "claude"
+max_parallel = 2
+stall_timeout = "12m"
+keep_transcripts = false
 
 [workspace]
 setup = "pnpm install --frozen-lockfile"
@@ -1235,16 +1512,16 @@ share = ["cargo"]
 [gates]
 check = ["pnpm typecheck", "pnpm test -- --run"]
 timeout = "10m"
-on_fail = "feedback"
 max_feedback_rounds = 3
 
+[gates.slow]
+run = ["pnpm test:e2e"]
+
 [policy]
-never_auto = ["Bash(git push *)"]
-max_parallel_runs = 2
+deny = ["Bash(git push *)"]
 
 [github]
 pull_request = true
-draft = true
 ready_label = "devplane:ready"
 "#,
         )
@@ -1255,6 +1532,14 @@ ready_label = "devplane:ready"
         assert_eq!(c.gates.check.len(), 2);
         assert_eq!(c.gates.timeout, Duration::from_secs(600));
         assert_eq!(c.gates.max_feedback_rounds, 3);
+        assert_eq!(c.agent.default.as_deref(), Some("claude"));
+        assert_eq!(c.agent.max_parallel, Some(2));
+        assert_eq!(c.agent.stall_timeout, Some(Duration::from_secs(720)));
+        assert!(!c.agent.keep_transcripts);
+        assert_eq!(
+            c.gate_named("slow").map(|g| g.0),
+            Some(vec!["pnpm test:e2e".into()])
+        );
         assert!(matches!(
             c.policy().restrictive(
                 &crate::core::policy::Context::at(&dir),
@@ -1270,7 +1555,6 @@ ready_label = "devplane:ready"
     fn github_is_off_until_it_is_asked_for() {
         let c = ProjectConfig::default();
         assert!(!c.github.pull_request);
-        assert!(c.github.draft, "and when it is on, it is a draft");
     }
 
     #[test]
@@ -1279,7 +1563,7 @@ ready_label = "devplane:ready"
         let dir = tempdir("typo");
         std::fs::write(
             dir.join(CONFIG_FILE),
-            "[policy]\nnever_autoo = [\"Bash(git push *)\"]\n",
+            "[policy]\ndenyy = [\"Bash(git push *)\"]\n",
         )
         .unwrap();
         let err = ProjectConfig::load(&dir).unwrap_err();
@@ -1292,11 +1576,11 @@ ready_label = "devplane:ready"
         let dir = tempdir("global");
         std::fs::write(
             dir.join("policy.toml"),
-            "[policy]\nnever_auto = [\n  \"Bash(rm -rf *)\",  # a comment\n  \"Read(.env)\",\n]\n",
+            "[policy]\ndeny = [\n  \"Bash(rm -rf *)\",  # a comment\n  \"Read(.env)\",\n]\n",
         )
         .unwrap();
         let g = GlobalConfig::load(&dir).unwrap();
-        assert_eq!(g.policy.never_auto, ["Bash(rm -rf *)", "Read(.env)"]);
+        assert_eq!(g.policy.deny, ["Bash(rm -rf *)", "Read(.env)"]);
         assert!(matches!(
             g.policy().restrictive(
                 &crate::core::policy::Context::at(&dir),
@@ -1311,8 +1595,8 @@ ready_label = "devplane:ready"
     #[test]
     fn a_missing_global_policy_decides_nothing() {
         let g = GlobalConfig::load(std::path::Path::new("/definitely/not/here")).unwrap();
-        assert!(g.policy.never_auto.is_empty());
-        assert!(g.policy.always_ask.is_empty());
+        assert!(g.policy.deny.is_empty());
+        assert!(g.policy.ask.is_empty());
     }
 
     #[test]
@@ -1399,5 +1683,55 @@ mod hold_tests {
             "the refusal does not say why"
         );
         assert_eq!(HOLD_CEILING_MS, Hold::CEILING.as_millis() as u64);
+    }
+
+    #[test]
+    fn a_repository_that_tries_to_grant_is_refused_by_name() {
+        for (text, names) in [
+            ("[policy]\nallow = [\"Bash(ls)\"]\n", "`[policy] allow`"),
+            ("[grants]\noffer_after = 2\n", "`[grants]`"),
+            (
+                "[projects.\"/r\"]\nallow = [\"Bash(ls)\"]\n",
+                "`[projects]`",
+            ),
+            ("[questions]\noffer_after = 2\n", "`offer_after`"),
+            ("offer_again_after = 3\n", "`offer_again_after`"),
+        ] {
+            let e = ProjectConfig::parse(text).unwrap_err();
+            assert!(e.contains(names), "{text}: {e}");
+            assert!(e.contains("a repository cannot grant"), "{e}");
+        }
+    }
+
+    #[test]
+    fn the_persons_file_refuses_a_global_switch_a_low_threshold_and_a_wildcard() {
+        for (text, says) in [
+            ("[policy]\nallow = [\"Bash(ls)\"]\n", "every project"),
+            ("[grants]\noffer_after = 1\n", "below 2"),
+            ("[grants]\noffer_again_after = 0\n", "below 2"),
+            ("[projects.\"/r\"]\noffer_after = 1\n", "below 2"),
+            ("[projects.\"/r\"]\nallow = [\"Bash(*)\"]\n", "wildcard"),
+            (
+                "[projects.\"/r\"]\nallow = [\"Bash(git push *)\"]\n",
+                "forge write",
+            ),
+            ("[projects.\"r\"]\nallow = [\"Bash(ls)\"]\n", "absolute"),
+            (
+                "[projects.\"/r\"]\nallow = [{ rule = \"Bash(ls)\", until = \"soon\" }]\n",
+                "not a date",
+            ),
+            ("[order]\ngrants = \"first\"\n", "unknown field"),
+        ] {
+            let e = GlobalConfig::parse(text).unwrap_err();
+            assert!(e.contains(says), "{text}: {e}");
+        }
+        let ok = GlobalConfig::parse(
+            "[policy]\ndeny = []\n[grants]\noffer_after = 3\n\
+             [projects.\"/r\"]\nallow = [\"Bash(cargo test)\", { rule = \"Edit(src/**)\", until = \"2026-12-01\" }]\n",
+        )
+        .unwrap();
+        let g = ok.grants().unwrap();
+        assert_eq!(g.all().count(), 2);
+        assert_eq!(g.thresholds(std::path::Path::new("/r")).0, 3);
     }
 }

@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  export type Target = { asked: string; name: string; root: string | null; refusal: string | null; says: string; notes: string[] };
+  export type Target = { asked: string; name: string; root: string | null; refusal: string | null; says: string; notes: string[]; no_check?: string | null };
 
   /// Whether Start can do what it says: the host answered for every project
   /// and refused none.
@@ -13,6 +13,7 @@
   // project. The live preflight sends the exact start body, writes nothing,
   // and lists every refusal by project; Start is enabled only when none is
   // refused. A fresh worktree's cost is said before you commit.
+  import Skeleton from "../../lib/Skeleton.svelte";
   import { api } from "../../lib/api";
   import { resource, failure } from "../../lib/resource.svelte";
   import { writer } from "../../lib/write.svelte";
@@ -20,10 +21,12 @@
   import { go } from "../../lib/route";
   import { run } from "../../lib/keys";
   import Icon from "../../lib/ui/Icon.svelte";
+  import { surfaces } from "../../lib/surfaces";
+  import Draft from "./Draft.svelte";
 
   type Project = { id: string; name: string; root: string; trusted: boolean; default_agent?: string | null };
   type Agent = { id: string; name?: string; command?: string };
-  type Plan = { plan: { path: string; progress?: { done: number; total: number } | null }; change_id: string | null };
+  type Plan = { plan: { path: string; progress?: { done: number; total: number } | null; no_progress?: string | null }; change_id: string | null };
   type SpecProject = { project_id: string; project: string; root: string; plans: Plan[] };
 
   let {
@@ -38,18 +41,37 @@
   // Three reads, each with its own failure: a host that did not answer is
   // never *No project is registered yet*.
   const projectsRead = resource<Project[]>(() => "/api/projects", { tell: () => "devplane doctor" });
-  const agentsRead = resource<Agent[]>(() => "/api/agents", { tell: () => "devplane agents" });
+  const agentsRead = resource<Agent[]>(() => "/api/agents", { tell: () => "devplane agent list" });
   const specsRead = resource<{ projects: SpecProject[] }>(() => "/api/specs", { tell: () => "devplane doctor" });
   const projects = $derived(Array.isArray(projectsRead.data) ? projectsRead.data : []);
   const agents = $derived(Array.isArray(agentsRead.data) ? agentsRead.data : []);
   const specs = $derived(specsRead.data?.projects ?? []);
 
   let chosen = $state<string[]>([]);
+  // Opened from the first-run checklist for one project, or with only one
+  // trusted project to choose: it is chosen, and shown chosen.
+  let prechosen = false;
+  $effect(() => {
+    if (prechosen || projects.length === 0) return;
+    prechosen = true;
+    let hint = "";
+    try {
+      hint = sessionStorage.getItem("vp-new-project") ?? "";
+      sessionStorage.removeItem("vp-new-project");
+    } catch {
+      /* no hint */
+    }
+    const trusted = projects.filter((p) => p.trusted);
+    const pick = projects.find((p) => p.id === hint) ?? (trusted.length === 1 && projects.length === 1 ? trusted[0] : null);
+    if (pick && chosen.length === 0) chosen = [pick.id];
+  });
   let title = $state("");
   let prompt = $state("");
   let agent = $state("");
   let spec = $state("");
   let worktree = $state(true);
+  /// Starting from a prompt, or drafting a specification by the project's own methodology.
+  let drafting = $state(false);
   let filter = $state("");
 
   const shownProjects = $derived(
@@ -131,12 +153,18 @@
     });
   }
   const close = () => run("leave", "new");
+  /// Whichever surface holds a project's gates, by the registry, not by name.
+  const gatesAt = surfaces().find((s) => s.holds === "gates")?.id ?? "";
 </script>
 
+{#if drafting}
+  <Draft {projects} {agents} {changeSurface} implement={() => (drafting = false)} {close} />
+{:else}
 <form class="new" onsubmit={start} aria-label="start a new change">
   <header>
     <Icon name="change" size={16} />
     <h1>New change</h1>
+    <button type="button" class="mode" onclick={() => (drafting = true)}>Draft a specification instead</button>
     <button type="button" class="x" aria-label="close" onclick={close}><Icon name="x" size={14} /></button>
   </header>
 
@@ -157,9 +185,9 @@
           {#if projectsRead.phase === "failed" && projectsRead.failure}
             <Failed what="the projects" failure={projectsRead.failure} />
           {:else if projectsRead.phase === "loading"}
-            <p class="quiet">Reading the projects…</p>
+            <Skeleton rows={2} />
           {:else}
-            <p class="quiet">No project is registered yet. <code>devplane trust &lt;path&gt;</code> adds one.</p>
+            <p class="quiet">No project is registered yet. <code>devplane project trust &lt;path&gt;</code> adds one.</p>
           {/if}
         {/each}
       </div>
@@ -174,7 +202,7 @@
         <select id="spec" bind:value={spec}>
           <option value="">none — just the words below</option>
           {#each plans as p (p.plan.path)}
-            <option value={p.plan.path} disabled={!!p.change_id}>{p.plan.path}{p.plan.progress ? ` · ${p.plan.progress.done} ticked · ${p.plan.progress.total} tasks` : ""}{p.change_id ? " · a change already works to it" : ""}</option>
+            <option value={p.plan.path} disabled={!!p.change_id}>{p.plan.path}{p.plan.progress ? ` · ${p.plan.progress.done} ticked · ${p.plan.progress.total} tasks` : p.plan.no_progress ? " · no task file, no progress claimed" : ""}{p.change_id ? " · a change already works to it" : ""}</option>
           {/each}
         </select>
       </section>
@@ -224,6 +252,9 @@
               <b>{t.name}</b>
               <span>{t.says}</span>
               {#each t.notes as n, i (i)}<span class="note">{n}</span>{/each}
+              {#if t.no_check}
+                <span class="note">{t.no_check}{#if t.root && gatesAt} · <a href={`#${gatesAt}/declare/${encodeURIComponent(projects.find((p) => p.root === t.root)?.id ?? t.root)}`}>Declare a check</a>{/if}</span>
+              {/if}
             </li>
           {/each}
         </ul>
@@ -240,6 +271,7 @@
     </button>
   </footer>
 </form>
+{/if}
 
 <style>
   .new {
@@ -258,8 +290,11 @@
     margin: 0;
     font-size: var(--t-md);
   }
-  .x {
+  .mode {
     margin-left: auto;
+    font-size: var(--t-xs);
+  }
+  .x {
     border: 0;
     background: none;
     color: var(--dim);

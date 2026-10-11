@@ -1,0 +1,4 @@
+registry.json: the ACP registry index, byte for byte as fetched from
+https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json
+on 2026-10-02T19:03Z with curl, by scripts/pins-check.sh --write.
+Replaced by running that again; never edited by hand.

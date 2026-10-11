@@ -110,22 +110,43 @@ pub struct AppState {
     /// Agents this machine can drive: built-ins with the user's `agents.toml`
     /// layered over them. Read once at start.
     pub agents: Vec<crate::acp::AgentSpec>,
+    /// Devplane's home, where the person's own files are read from: the
+    /// trusted repositories among them ([`crate::trust`]).
+    pub home: PathBuf,
     pub token: String,
     /// Accepted on the telemetry routes only; see [`crate::config::ingest_token`].
     pub ingest_token: String,
     /// Broadcasts state changes and driven agents' output, as separate frames.
     pub tx: broadcast::Sender<crate::core::Frame>,
-    /// Flipped by `POST /api/quit`, so `devplane quit` asks with the token
+    /// Flipped by `POST /api/quit`, so `devplane down` asks with the token
     /// rather than signalling a pid that may have been reused. A `watch`, not a
     /// `Notify`, so every open `/api/stream` ends when it flips, not only
     /// those already waiting.
     pub stopping: tokio::sync::watch::Sender<bool>,
     pub started_at: jiff::Timestamp,
+    /// The port this host listens on, set once bound: the challenge on
+    /// `/healthz` names it, so a proof relayed from another port fails.
+    pub port: std::sync::OnceLock<u16>,
     /// Set once by the app; absent in the CLI host. See [`Opener`].
     pub opener: std::sync::OnceLock<Opener>,
+    /// The window's key ([`crate::config::window_key`]), set once by the app
+    /// before it opens a window; absent in the CLI host, where no request can
+    /// prove it came from the window, so every answer is recorded `cli` and the
+    /// trust route refuses. In memory only: never in `host.json`, the store,
+    /// the log or a vendor's settings.
+    pub window_key: std::sync::OnceLock<String>,
+    /// What the app's notifications can do, for `devplane doctor`: set once by
+    /// the app; absent in the CLI host, which notifies through the system.
+    pub notifications: std::sync::OnceLock<NoticeLine>,
+    /// The window's last answer, waiting out its undo window. In memory
+    /// only: a stop drops it, and the ask stays open.
+    pub hold: crate::hold::Hold,
 }
 
 pub type Shared = Arc<AppState>;
+
+/// The app's one line about its notifications, read when asked.
+pub type NoticeLine = Box<dyn Fn() -> String + Send + Sync>;
 
 /// Where the change surface asks for a worktree to be opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -184,7 +205,7 @@ impl ForgeState {
             let snoozed = self.snoozed.get(&f.project_id).unwrap_or(&none);
             let d = crate::core::forge::items_for_forge(f, snoozed, &own, now);
             out.items.extend(d.items);
-            out.snoozed += d.snoozed;
+            out.snoozed.extend(d.snoozed);
         }
         out
     }
@@ -238,6 +259,16 @@ impl AppState {
         for p in store.load_projects().await? {
             world.upsert_project(p);
         }
+        // Trust is the person's file, not the store's. A file that cannot be
+        // read trusts nothing and says so, rather than refusing to start.
+        match crate::trust::Trusted::read(&home) {
+            Ok(t) => {
+                for p in t.projects() {
+                    world.upsert_project(p);
+                }
+            }
+            Err(e) => tracing::error!(error = format!("{e:#}"), "no repository is trusted"),
+        }
         let runs = store.load_runs().await?;
         let restored = runs.len();
         world.restore_runs(runs);
@@ -275,13 +306,19 @@ impl AppState {
             leaked_agents: Mutex::new(Vec::new()),
             forge: Mutex::new(ForgeState::default()),
             github: Arc::new(crate::github::GitHub::new(&home)),
-            policy: PolicyCache::new(policy, home, dirs::home_dir()),
+            policy: PolicyCache::new(policy, home.clone(), dirs::home_dir())
+                .with_grants_file(home.join("policy.toml")),
+            home,
             ingest_token: crate::config::ingest_token(&token),
             token,
             tx,
             stopping: tokio::sync::watch::Sender::new(false),
             started_at: jiff::Timestamp::now(),
+            port: std::sync::OnceLock::new(),
             opener: std::sync::OnceLock::new(),
+            window_key: std::sync::OnceLock::new(),
+            notifications: std::sync::OnceLock::new(),
+            hold: crate::hold::Hold::default(),
         }))
     }
 
@@ -472,6 +509,8 @@ impl AppState {
     /// Stops every agent Devplane started and waits for their processes, so
     /// none is re-parented to init and left running unseen.
     pub async fn shutdown(&self) {
+        // Before anything else: a held answer must not be sent on the way down.
+        self.hold.drop_on_stop();
         // Set first, so no `Ended` that follows reads as the agent finishing.
         self.tearing_down
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -518,6 +557,7 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
     let app: Router = crate::api::router(state.clone());
     let listener = bind(port).await?;
     let bound = listener.local_addr()?;
+    let _ = state.port.set(bound.port());
 
     crate::config::write_host(&crate::config::HostRecord {
         pid: std::process::id(),
@@ -552,6 +592,11 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
     let forge = tokio::spawn(crate::poller::forge_watch(state.clone()));
     // Each open change's tree, so a hand edit makes *verified* false.
     let trees = tokio::spawn(crate::poller::tree_watch(state.clone()));
+    // Throwaway base-checks checkouts a stopped host left behind.
+    {
+        let state = state.clone();
+        tokio::spawn(async move { crate::base_checks::sweep_all(&state).await });
+    }
 
     let asked = state.clone();
     let result = axum::serve(listener, app)
@@ -565,6 +610,8 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
                 }
                 _ = rx.wait_for(|stop| *stop) => tracing::info!("asked to stop"),
             }
+            // First on the way down: a held answer is dropped, never sent.
+            asked.hold.drop_on_stop();
         })
         .await;
 
@@ -606,6 +653,7 @@ pub fn secure_home(dir: &std::path::Path) -> std::io::Result<()> {
             let secret = name == "token"
                 || name == "host.json"
                 || name == "policy.toml"
+                || name == crate::trust::FILE
                 || name.starts_with("devplane.");
             // `symlink_metadata`: a link is left alone rather than followed to
             // a file this does not own.
@@ -641,7 +689,7 @@ pub async fn bind(port: u16) -> Result<tokio::net::TcpListener> {
             "port {port} on 127.0.0.1 is taken by another process{}, so the host did not start. \
              Devplane will not listen elsewhere: the agents' settings send the bearer token to \
              port {port}, and whatever holds it would receive the token. Stop that process, or \
-             pick a free port with `--port <n>` (or DEVPLANE_PORT) and run `devplane connect` \
+             pick a free port with `--port <n>` (or DEVPLANE_PORT) and run `devplane agent connect` \
              again so the settings follow.",
             holder_of(port)
                 .map(|h| format!(" ({h})"))

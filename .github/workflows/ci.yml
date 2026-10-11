@@ -18,6 +18,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The `rust-version` in Cargo.toml, checked rather than claimed.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the minimum Rust
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+          rustup toolchain install "$msrv" --profile minimal
+          rustup default "$msrv"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --lib --bins
+
   test:
     strategy:
       fail-fast: false
@@ -50,13 +63,15 @@ jobs:
       - name: Build the interface
         run: cd ui && npm ci && npm run build && git status --porcelain -- dist && test -z "$(git status --porcelain -- dist)"
 
-      # Fails when the checked-in wire types differ from what Rust generates —
-      # a new type included: `git diff` alone never sees an untracked file.
+      # Fails when the checked-in wire types differ from what Rust generates:
+      # a type missing, drifted, or checked in but no longer generated. The same
+      # diff as `just wire-check`; it is not part of `cargo test` because it
+      # compiles the crate a second time.
       - name: Check the generated wire types
         run: |
-          TS_RS_EXPORT_DIR=ui/src cargo test --features typescript --quiet export_bindings
-          git status --porcelain -- ui/src/wire
-          test -z "$(git status --porcelain -- ui/src/wire)"
+          tmp=$(mktemp -d)
+          TS_RS_EXPORT_DIR="$tmp" cargo test --locked --features typescript --quiet export_bindings
+          diff -r ui/src/wire "$tmp/wire"
 
       - name: Type-check the interface
         run: cd ui && npx svelte-check --tsconfig ./tsconfig.json
@@ -74,6 +89,84 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+  # `devplane verify` on this repository's own pull requests: the base's
+  # `check` from devplane.toml, the weakened checks first in the job summary.
+  # The binary and the action that runs it both come from the merge base —
+  # never from the pull request's own code, which would let it change the
+  # verifier that judges it — and the action runs with `install: "false"`.
+  verify:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the merge base must be in the checkout
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      # Before the cache: restoring the base's target/ creates the directory,
+      # and `git worktree add` refuses a path that already exists.
+      - name: Check out the merge base
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          from="$(git merge-base "origin/$BASE" HEAD)"
+          git worktree add --detach "$RUNNER_TEMP/devplane-base" "$from"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: verify
+          workspaces: |
+            . -> target
+            ${{ runner.temp }}/devplane-base -> target
+
+      - name: Install the app's Linux libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install the interface's dependencies
+        run: cd ui && npm ci
+
+      - name: Build devplane from the merge base
+        run: |
+          cd "$RUNNER_TEMP/devplane-base"
+          cargo build --release --locked --bin devplane
+          echo "$RUNNER_TEMP/devplane-base/target/release" >> "$GITHUB_PATH"
+
+      # A base built before `verify` existed has nothing to run.
+      - name: Does the base's build carry verify
+        id: carries
+        run: |
+          if devplane verify --help > /dev/null 2>&1 && [ -f "$RUNNER_TEMP/devplane-base/action.yml" ]; then
+            echo "verify=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::The base's build has no \`devplane verify\` yet; it runs from the next pull request."
+            echo "verify=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The merge base's action.yml, where `uses:` can reach it: inside the
+      # workspace, ignored by git so the checked tree stays the pull request's.
+      # `uses: ./` would run the pull request's own action.yml.
+      - name: The base's action
+        if: steps.carries.outputs.verify == 'true'
+        run: |
+          mkdir -p .devplane-base-action
+          cp "$RUNNER_TEMP/devplane-base/action.yml" .devplane-base-action/action.yml
+          echo "/.devplane-base-action/" >> .git/info/exclude
+
+      - uses: ./.devplane-base-action
+        if: steps.carries.outputs.verify == 'true'
+        with:
+          install: "false"
 
   # The `app` feature, on macOS (no display server needed; the tests open no window).
   app:
@@ -94,11 +187,81 @@ jobs:
         run: cargo build --locked --example echo_agent
       - name: Test the app's host
         run: cargo test --locked --features app --test app
+      # The app's notifications, through a recording notifier.
+      - name: Test the app's notifications
+        run: cargo test --locked --features app --test notify
+
+  # The desktop app's packages, built unsigned the way the release's
+  # `packages` job builds them, so a packaging break is found before a tag.
+  # No secrets and no `target` key (a test holds the `target` lines equal to
+  # the CLI's dist targets).
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            bundles: app,dmg
+          - os: windows-latest
+            bundles: nsis
+          - os: ubuntu-22.04
+            bundles: deb,appimage
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bundle
+      - name: The app's Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev patchelf file libfuse2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build the interface
+        run: cd ui && npm ci && npm run build
+      - name: Install the Tauri CLI
+        run: npm install --global @tauri-apps/cli@2.12.1
+      - name: Bundle, unsigned
+        run: tauri build --ci --features app --bundles ${{ matrix.bundles }} --no-sign
+      - name: What the scheme and the package declare
+        run: |
+          case "$RUNNER_OS" in
+            macOS)
+              plutil -extract CFBundleURLTypes xml1 -o - target/release/bundle/macos/Devplane.app/Contents/Info.plist | grep -q '<string>devplane</string>'
+              ;;
+            Linux)
+              dpkg-deb --field target/release/bundle/deb/*.deb Depends | grep -q libwebkit2gtk-4.1-0
+              dpkg-deb --ctrl-tarfile target/release/bundle/deb/*.deb | tar -t | grep -q postrm
+              ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.os }}
+          path: |
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+          retention-days: 7
 
   # Every target the release ships, built the way the release builds it, so a
   # tag is never the first build of anything. A test holds this matrix equal to
   # `[workspace.metadata.dist] targets`. Windows also runs clippy, which `test`
-  # does not cover there yet.
+  # does not cover there.
   build:
     # The vendored libdbus (the Linux credential store) is C. GCC on aarch64
     # calls atomics out of line in libgcc, which a static musl link lacks
@@ -147,11 +310,46 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo clippy --locked --target ${{ matrix.target }} -- -D warnings
 
-  # Separate so a failure reads as "a dependency arrived", not "this commit is wrong".
-  # Checks that need the gitignored concepts/ run via `just notes`, not here.
-  deps:
+  # The UX bars over the recorded fixtures, each against its own budget (bar 1
+  # over a real host and the echo agent). Only the bars on the blocking list
+  # in ui/tests/bars/budgets.mjs fail this job; the others are reported in
+  # full, as is the browser suite beside them. Latency (bar 3) runs nightly.
+  bars:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Dependency count
-        run: bash scripts/deps-count.sh
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bars
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # The CLI build links no GUI library; the echo agent is bar 1's agent.
+      - name: Build the host and the echo agent
+        run: cargo build --locked --example echo_agent && cargo build --locked
+      # playwright-core at an exact version, outside the lockfile, and the
+      # one browser it drives. Nothing is fetched once the bars start.
+      - name: Install the interface and a browser
+        run: |
+          cd ui
+          npm ci
+          npm install --no-save --save-exact playwright-core@1.62.1
+          npx playwright-core install --with-deps chromium
+      - name: The bars
+        run: cd ui && npm run bars
+      - name: The browser suite (reported, not blocking)
+        if: always()
+        continue-on-error: true
+        run: cd ui && npm run browser
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bars-report
+          path: ui/.bars/report.json
+          if-no-files-found: ignore
+

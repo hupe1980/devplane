@@ -1,15 +1,15 @@
 [package]
 name = "devplane"
-description = "Know when an agent's work is actually done. Run any ACP agent in its own worktree, verify its change with your own checks run outside the agent, see the weakened tests first, and keep the record of who decided what. Local-first, one binary, no account."
-version = "0.11.0"
+description = "The evidence for deciding whether an agent's change is safe to merge, produced by your own project's checks, and the record of how you know."
+version = "0.12.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.94"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/hupe1980/devplane"
 homepage = "https://hupe1980.github.io/devplane"
 authors = ["hupe1980"]
 readme = "README.md"
-keywords = ["ai", "agents", "claude-code", "developer-tools", "orchestration"]
+keywords = ["ai-agents", "code-review", "verification", "acp", "developer-tools"]
 categories = ["command-line-utilities", "development-tools"]
 # Explicit so the package leaves out the site, scripts, CI and `ui/node_modules`.
 include = [
@@ -24,6 +24,9 @@ include = [
   "/ui/dist/*.js",
   "/ui/dist/*.css",
   "/examples",
+  # `devplane gate install` embeds the Spec Kit extension and the gate skill.
+  "/extensions/speckit-devplane",
+  "/plugin/skills/devplane-gate",
   "/README.md",
   "/CHANGELOG.md",
   "/LICENSE-MIT",
@@ -54,24 +57,31 @@ typescript = ["dep:ts-rs"]
 app = [
   "dep:tauri",
   "dep:tauri-build",
-  "dep:tauri-plugin-notification",
+  "dep:mac-usernotifications",
+  "dep:notify-rust",
+  "dep:windows",
   "dep:tauri-plugin-global-shortcut",
   "dep:tauri-plugin-deep-link",
   "dep:tauri-plugin-single-instance",
   "dep:tauri-plugin-opener",
+  "dep:tauri-plugin-updater",
 ]
 
 [dependencies]
 ts-rs = { version = "12", optional = true, features = ["no-serde-warnings"] }
 # The window loads the host's page over loopback; no Tauri IPC on the data path.
 tauri = { version = "2.11", optional = true, features = ["tray-icon", "image-png"] }
-tauri-plugin-notification = { version = "2", optional = true }
 tauri-plugin-global-shortcut = { version = "2", optional = true }
 tauri-plugin-deep-link = { version = "2", optional = true }
 # `deep-link` so a second launch hands its URL to the app already running.
 tauri-plugin-single-instance = { version = "2", optional = true, features = ["deep-link"] }
 tauri-plugin-opener = { version = "2", optional = true }
-agent-client-protocol = "2.2"
+# The update check: off until the person switches it on in `app.toml`, run
+# only by the window's process, never by the CLI.
+tauri-plugin-updater = { version = "2", optional = true }
+# Session notices: the agent's advisory messages to the person, sent by both
+# driven adapters (an ACP RFD, behind the crate's feature).
+agent-client-protocol = { version = "2.2", features = ["unstable_session_notices"] }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "tokio", "http1"] }
 clap = { version = "4", features = ["derive", "env"] }
@@ -93,6 +103,9 @@ keyring = { version = "3", default-features = false, features = ["apple-native",
 rmcp = { version = "3.4.0", features = ["server", "transport-io"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The JUnit XML a project's `check` writes, read to name tests. Default
+# features off: no encoding tables, no serde; it depends only on `memchr`.
+quick-xml = { version = "0.42", default-features = false }
 # One-way derivation of the telemetry-only token from the control token.
 sha2 = "0.10"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "json"] }
@@ -103,9 +116,29 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 
+# The app's own notifications, driven from its process: answer actions, a
+# click target and withdrawal, which Tauri's notification plugin offers only
+# on mobile. One crate per platform, each already in the graph or the
+# platform's own API:
+# macOS — `UNUserNotificationCenter` (actions, a typed reply, taking a
+# delivered notification back); the deprecated `NSUserNotification` path has
+# no withdrawal. New to the graph, macOS only.
+[target.'cfg(target_os = "macos")'.dependencies]
+mac-usernotifications = { version = "0.3.1", optional = true }
+
+# Linux — the freedesktop notification service; already compiled for the app
+# through the notification plugin it replaces.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+notify-rust = { version = "4.18", optional = true }
+
+# Windows — the toast schema's buttons, text input, tag and group, built as an
+# XML document; the crate and these features are already compiled for the app.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", optional = true, features = ["Win32_Foundation", "Foundation", "Foundation_Collections", "Data_Xml_Dom", "UI_Notifications"] }
+
 # Used by `build.rs` only under the `app` feature.
 [build-dependencies]
-tauri-build = { version = "2", optional = true }
+tauri-build = { version = "2", optional = true , features = [] }
 
 [profile.release]
 lto = "thin"

@@ -1,16 +1,20 @@
 //! The app: the host with a window.
 //!
-//! `devplane app` runs the same host as `devplane serve`, in-process, and
+//! `devplane up --window` runs the same host as `devplane up --no-browser`, in-process, and
 //! opens a window on the page it serves; nothing crosses Tauri's IPC on the
-//! data path. Tauri supplies only native pieces: notifications, the tray
-//! count and dock badge, one global shortcut, deep links, and opening a
-//! worktree. Closing the window keeps hosting; quitting tears down like
-//! `devplane quit`. Nothing is installed and nothing starts at login.
+//! data path. Tauri supplies only native pieces: the tray count and dock
+//! badge, one global shortcut, deep links, and opening a worktree; the
+//! notifications are the platform's own, driven from this process
+//! ([`notice`]). Closing the window keeps hosting; quitting tears down like
+//! `devplane down`. Nothing is installed and nothing starts at login.
 
+pub mod elsewhere;
 pub mod links;
+pub mod notice;
 pub mod quit;
 pub mod shortcut;
 pub mod tray;
+pub mod update;
 pub mod window;
 
 use crate::host::Shared;
@@ -25,6 +29,8 @@ pub struct Hosted {
     pub token: String,
     pub tray: std::sync::Mutex<Option<tauri::tray::TrayIcon>>,
     pub shortcut: std::sync::Mutex<String>,
+    /// The notifier, once set up: quitting takes its notifications back.
+    pub notices: std::sync::OnceLock<std::sync::Arc<notice::Announcer>>,
 }
 
 impl Hosted {
@@ -44,7 +50,25 @@ impl Hosted {
 pub async fn run(port: Option<u16>) -> Result<()> {
     crate::cli::init_tracing();
     // Held for the app's whole life, like `serve`'s.
-    let _lock = crate::cli::refuse_if_hosting().await?;
+    let _lock = match crate::cli::refuse_if_hosting().await {
+        Ok(lock) => lock,
+        Err(refused) => {
+            // A second launch — on Linux and Windows a `devplane://` link
+            // starts one — hands its arguments to the app already running and
+            // exits there. Only when the holder is a plain `devplane up` does
+            // it come back here. From a terminal the refusal stands, said on
+            // stderr; started by the operating system there is no stderr to
+            // read, so a window says it and offers that host's page.
+            forward_to_running_app();
+            use std::io::IsTerminal;
+            if !std::io::stdin().is_terminal()
+                && let Some(host) = crate::config::read_host().ok().flatten()
+            {
+                return elsewhere::show(host.port);
+            }
+            return Err(refused);
+        }
+    };
     let (cfg, problems) = crate::config::app_config()?;
     for p in &problems {
         tracing::warn!(at = %p.where_, "{}", p.what);
@@ -60,12 +84,17 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // loop. The port is read back from `host.json`, like any client.
     let serving = tokio::spawn(crate::host::serve(state.clone(), port));
     let base = wait_for_host(&serving).await?;
+    // The window's key, minted before either window exists and held in
+    // memory only: the windows prove an answer or a trust came from them with
+    // it. Never written to `host.json`, the store or the log.
+    let _ = state.window_key.set(crate::config::window_key());
     let hosted = Hosted {
         state: state.clone(),
         base,
         token: state.token.clone(),
         tray: std::sync::Mutex::new(None),
         shortcut: std::sync::Mutex::new(cfg.shortcut.clone()),
+        notices: std::sync::OnceLock::new(),
     };
 
     let app = tauri::Builder::default()
@@ -74,15 +103,17 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             links::from_argv(app, &argv);
         }))
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        // Registered always, asked only by `update` once the person said so;
+        // the plugin itself contacts nothing.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(shortcut::plugin())
         .manage(hosted)
         .setup(move |app| {
-            setup(app.handle(), &cfg.shortcut);
+            setup(app.handle(), &cfg.shortcut, cfg.updates);
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(context())
         .context("building the window")?;
 
     // When the host finishes (`/api/quit`, a signal, a failure) the app
@@ -100,10 +131,18 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 1
             }
         };
+        // Stopped to install a verified update: install it and restart.
+        update::finish(&handle);
         handle.exit(code);
     });
 
     app.run(|app, event| {
+        // Whatever ends the app: no notification of ours is left to press.
+        if let tauri::RunEvent::Exit = &event
+            && let Some(n) = app.state::<Hosted>().notices.get()
+        {
+            n.withdraw_all();
+        }
         // ⌘Q, the tray's Quit, the dock: the person is asked first. A
         // programmatic exit carries a code and passes.
         if let tauri::RunEvent::ExitRequested {
@@ -115,6 +154,25 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         }
     });
     Ok(())
+}
+
+/// The app's configuration, embedded once: the macro defines a symbol and
+/// may be expanded only once per binary.
+fn context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
+/// Hands this process's arguments to an app instance already running, and
+/// exits the process when there is one. Builds nothing but the single-instance
+/// plugin, whose setup does the handing over; with no app instance to take
+/// them, it returns and the caller says why it cannot start.
+fn forward_to_running_app() {
+    let built = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|_, _, _| {}))
+        .build(context());
+    if let Err(e) = built {
+        tracing::debug!(error = %e, "no running app to hand the arguments to");
+    }
 }
 
 /// Blocks until `host.json` names this process, or the host gave up.
@@ -137,10 +195,12 @@ async fn wait_for_host(serving: &tokio::task::JoinHandle<Result<()>>) -> Result<
 }
 
 /// Everything the window needs once the host is up, in the order it needs it.
-fn setup(app: &tauri::AppHandle, shortcut: &str) {
+fn setup(app: &tauri::AppHandle, shortcut: &str, updates: Option<crate::config::UpdatePref>) {
     let hosted = app.state::<Hosted>();
-    // Notifications go through the app from here on, not `osascript`.
-    crate::notify::choose(crate::notify::Sink::Tauri(app.clone()));
+    // Notifications are the app's own from here on: the host's sweep sends
+    // none, so nothing is announced twice.
+    crate::notify::choose(crate::notify::Sink::App);
+    start_notices(app, &hosted);
 
     // A link the app was started with lands before the window shows.
     let first = links::startup_query(app);
@@ -158,6 +218,9 @@ fn setup(app: &tauri::AppHandle, shortcut: &str) {
         tracing::warn!(shortcut, "{why}");
     }
     links::install(app);
+    // After the window: the update check is off the startup path, and makes
+    // no request unless the person switched it on.
+    update::start(app, updates);
 
     // Opening a path is the app's; without it the route answers with the
     // path alone.
@@ -170,16 +233,54 @@ fn setup(app: &tauri::AppHandle, shortcut: &str) {
     tokio::spawn(shortcut::watch(app.clone()));
 }
 
-/// Keeps the tray's number and the badge at the inbox's *needs you* count.
+/// The app's windows, as a notification's press or click reaches them.
+struct AppSurfaces(tauri::AppHandle);
+
+impl notice::Surfaces for AppSurfaces {
+    fn raise_answer(&self, query: &str) {
+        let (app, query) = (self.0.clone(), query.to_string());
+        let _ = self
+            .0
+            .run_on_main_thread(move || window::raise_answer(&app, &query));
+    }
+
+    fn show_main(&self, query: &str) {
+        let (app, query) = (self.0.clone(), query.to_string());
+        let _ = self
+            .0
+            .run_on_main_thread(move || window::show_main(&app, &query));
+    }
+}
+
+/// Starts the notifier: the platform's own, driven from this process, unless
+/// `DEVPLANE_NOTIFY=0` switched notifications off.
+fn start_notices(app: &tauri::AppHandle, hosted: &Hosted) {
+    let sink = notice::platform_sink(&app.config().identifier);
+    let announcer = notice::Announcer::new(
+        hosted.state.clone(),
+        sink,
+        std::sync::Arc::new(AppSurfaces(app.clone())),
+    );
+    let line = std::sync::Arc::downgrade(&announcer);
+    let _ = hosted.state.notifications.set(Box::new(move || {
+        line.upgrade()
+            .map_or_else(|| "off".to_string(), |a| a.describe())
+    }));
+    let _ = hosted.notices.set(announcer.clone());
+    if std::env::var("DEVPLANE_NOTIFY").as_deref() == Ok("0") {
+        return;
+    }
+    tokio::spawn(announcer.run());
+}
+
+/// Keeps the tray's number and the badge at the inbox's one count
+/// ([`tray::count`]), the figure the window's badge and status bar show.
 ///
 /// Recomputed from the host's inbox at most four times a second, so a burst
 /// of events is one update.
 async fn count_loop(app: tauri::AppHandle, state: Shared) {
     let mut rx = state.tx.subscribe();
-    let apply = |items: Vec<crate::core::AttentionItem>| {
-        tray::apply(&app, tray::needs_you(&items));
-    };
-    apply(state.current_inbox().await);
+    tray::apply(&app, tray::count(&state).await);
     loop {
         match rx.recv().await {
             Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
@@ -187,6 +288,6 @@ async fn count_loop(app: tauri::AppHandle, state: Shared) {
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         while rx.try_recv().is_ok() {}
-        apply(state.current_inbox().await);
+        tray::apply(&app, tray::count(&state).await);
     }
 }

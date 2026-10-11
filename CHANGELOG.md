@@ -2,6 +2,145 @@
 
 Notable changes per release, in the style of [Keep a Changelog](https://keepachangelog.com/). Dates are UTC.
 
+## 0.12.0 — unreleased
+
+The verdict runs the base's tests against the change and runs in CI; the command line is a set of nouns.
+
+### Breaking
+
+- Commands are noun first. An old name is refused with the new one:
+
+  | Old | New |
+  | --- | --- |
+  | `ps` | `status` (`ls` stays an alias) |
+  | `open`, `serve`, `app` | `up`, `up --no-browser`, `up --window` |
+  | `quit` | `down` |
+  | `show`, `watch`, `attach` | `run show`, `run watch`, `run attach` |
+  | `answer`, `snooze` | `inbox answer`, `inbox snooze` |
+  | `forge prs`, `forge issues` | `pr list`, `issue list` |
+  | `speckit` | `gate install --speckit` |
+  | `check`, `explain` | `config check`, `config explain` |
+  | `trust` | `project trust` |
+  | `agents`, `connect`, `disconnect` | `agent list`, `agent connect`, `agent disconnect` |
+  | `login`, `logout` | `auth login`, `auth logout` |
+  | `diagnostics` | `doctor` |
+
+- Removed: `report` and `[reports]`, `rewind`, `modes` (use `status --modes`) and `attention` (in `doctor`).
+- `--json` is one global flag. Every change, run and ask id accepts a unique prefix.
+- `devplane.toml` keys, refused by name under the old spelling: `[policy] never_auto`/`always_ask` → `deny`/`ask`;
+  `[project] default_agent` → `[agent] default`; `[policy] max_parallel_runs`/`stall_timeout` → `[agent]
+  max_parallel`/`stall_timeout`; `[transcripts] keep` → `[agent] keep_transcripts`; `[gates.named.X]` →
+  `[gates.X]`; `[budget] usd` → `max_usd`. `[gates] on_fail` and `[github] draft` are gone.
+- Store schema 18: an older store is set aside, not migrated. Repository trust moves to `~/.devplane/trusted.toml`
+  and is carried over.
+- `change offer` commits the tree the last passing `check` ran on, then pushes; it refuses if the tree moved.
+  `archive` after an offer needs no `--discard-uncommitted`.
+- `devplane gate` reports `passed`, not `verified`. `gate install --speckit` needs a gate, unless `--anyway`.
+- `POST /api/projects/trust` needs the window's proof; the control token alone is refused.
+- The record names where an answer came from as `window`, `notification` or `cli`; `board` is no longer written.
+- Minimum Rust is 1.94.
+
+### Added
+
+**The verdict**
+
+- Base checks run the base's tests on the change and its new tests on the base. A base test failing on the change
+  holds the offer; new tests that fail on the base are named. `[gates] base_checks = "auto"` runs them after every pass.
+- Test counts beside *verified* (cargo, nextest, pytest, jest, vitest, go); `[gates] junit` names failing tests.
+- `[gates] serial = true` makes gates that share a database take turns across worktrees.
+- Edits to agent controls (hooks, settings, `CLAUDE.md`/`AGENTS.md`, skills, MCP), ownership (`CODEOWNERS`) or
+  dependencies (lockfiles, manifests) are shown with the weakened checks and hold the offer.
+- An agent can stop with `spec_and_tests_conflict` (MCP) when the specification and tests conflict; the claim is
+  shown on the change and never changes *verified*. `change claim-read` marks it read.
+- The offer names the files nobody opened, by path.
+
+**CI and the certificate**
+
+- `devplane verify` runs the base's `check` on a checkout with no host or network and writes a job summary led by
+  the weakened checks. Exit 0 passed, 1 failed, 2 could not run. `action.yml` wraps it.
+- On GitHub Actions, `verify` annotates weakened rows and failing tests on their lines; `--sarif <path>` writes SARIF.
+- `verify --approvals` (the action's `approvals` input) and the change say whether required approvals came from a
+  person, a vendor's review model or a bot.
+- The certificate uses the in-toto Test Result predicate; `change export --sign ssh` signs it with your SSH key.
+
+**Permissions and the record**
+
+- Grants: answer the same permission the same way several times and the inbox offers an allow rule for that project
+  in your `~/.devplane/policy.toml`. `config grants` lists them; `config revoke` removes one.
+- Claude Code sessions you start yourself record who decided each permission; what cannot be attributed is listed
+  by `audit --without-me`.
+- A driven session's permission mode is shown on the change; `mode` in `agents.toml` chooses one.
+
+**The inbox and notifications**
+
+- Answer from the notification: **Allow**/**Deny**, a question's options, or a typed reply (macOS, Windows).
+- Keys: `1`–`9` choose, `t` types an answer, `a`/`d` allow or deny, `s` snoozes, `o` opens, `r` reviews; `?` lists them.
+- An answer from the window waits 5 seconds before it is sent; `z` takes it back.
+- `s` snoozes until the next activity (`inbox snooze --until-activity`); snoozed items are listed with a way back.
+- The inbox, status bar and tray or dock badge show one count. `⌘K` over an item lists its actions first.
+- Each open question in a specification is its own inbox item; answer it in place with `change clarify`.
+
+**The review and the window**
+
+- The review reads in one scroll; `j`/`k` cross files. The line that weakened a check is marked in the gutter.
+- Review comments: press a line number or `f`; **Send N comments** (`⌘↵`) sends them to the agent as one turn.
+- A first-run checklist in Setup, from connecting an agent to a first *verified* change.
+- From the window: declare a check from the commands the repository already has, connect an agent, trust a repository.
+- One keyboard cursor on every list; the open view is kept in the address.
+
+**Agents**
+
+- `change draft <name> -- <intent>` drafts a specification with Spec Kit's or OpenSpec's own command;
+  `draft-accept`/`draft-reject` decide it.
+- `change resume <change> --agent <id>` continues a change with another agent in the same worktree.
+- `change login <change> --method <id>` signs in an agent that asked for it.
+- The diff an agent reported for an edit is shown on its permission request and decision.
+- Adapters pinned to claude-agent-acp 0.85.1, codex-acp 2.1.1, Copilot 1.0.91 and Gemini CLI 0.62.0.
+
+**Specifications**
+
+- GSD is read as a fourth layout (`.planning/`).
+- `gate install --skill` offers the gate as Claude Code's `verify` skill; the Spec Kit extension adds a workflow step.
+
+**The desktop app**
+
+- Packages for macOS (Apple Silicon), Windows, `.deb` and AppImage, each with a `.sha256`; unsigned ones say so.
+- Update checks, off until you turn them on; nothing is downloaded before **Install and restart**.
+- Launched from Finder, the Start menu or a launcher, the executable opens the window.
+- `devplane doctor` reports the window, signing, update checks, notifications and dangling hooks.
+
+### Changed
+
+- OpenSpec task counts match `openspec list --json`, and `config.yml` is read. Kiro is detected by `.kiro/specs/`.
+- *Seen* marks are kept by the host; a hunk the agent rewrites is unread again.
+- A failed read names `devplane doctor` and offers Retry. The forge offers *Sign in* when sign-in is missing.
+- A tool call reported in pieces is joined before a rule reads it.
+
+### Security
+
+- A weakened check could be hidden from the review (`assume-unchanged`, `-diff`, `info/exclude`, an embedded
+  repository, a truncated diff, runner configuration). The review now diffs the digested tree.
+- The policy reader catches prohibited commands run through `git config alias`, `tar --to-command`, `sed e`,
+  `zip -TT`, `less`, `man -P`, `tmux`, or a script run by path.
+- Agents are denied reading or writing Devplane's home, `trusted.toml` included, on every vendor's hook.
+- An answer counts as the window's only with the app's in-memory proof. `project trust` is refused inside an agent.
+- A telemetry event no longer clears a waiting permission.
+- CI judges a pull request with the base's `action.yml`, which installs a pinned, checksummed release.
+- Opening a worktree in an editor or terminal no longer goes through a shell.
+- A line in the change cannot forge or silence a `verify` annotation.
+
+### Fixed
+
+- An Alt shortcut typed in a text field (`⌥3` for `£`) switched the view and dropped the draft.
+- The command palette opened without focus, and listed some commands twice.
+- *Offer* was enabled while a weakened check was unread.
+- A `devplane://` link opened with the app closed was rejected on Linux and Windows.
+- On Linux, opening a terminal reported success when none had started.
+- An older run snapshot could overwrite a newer one and lose events.
+- A missing gate program read as a failing check; it now says *not on PATH*.
+- An uncommitted `devplane.toml` blocked a new change.
+- Claude Code telemetry events named by the bare `event.name` were not read.
+
 ## 0.11.0 — 2026-09-26
 
 Devplane signs in to GitHub itself, and this release closes the ways an agent could steer its own

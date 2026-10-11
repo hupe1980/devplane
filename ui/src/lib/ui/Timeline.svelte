@@ -17,7 +17,8 @@
   function clock(t: number): string {
     const d = new Date(t);
     const sameDay = new Date().toDateString() === d.toDateString();
-    return sameDay ? d.toTimeString().slice(0, 5) : `${d.toLocaleDateString()} ${d.toTimeString().slice(0, 5)}`;
+    const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    return sameDay ? d.toTimeString().slice(0, 5) : `${date} ${d.toTimeString().slice(0, 5)}`;
   }
   let hover = $state<Mark | null>(null);
 </script>

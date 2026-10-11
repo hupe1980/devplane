@@ -29,4 +29,25 @@ tool: string | null,
  * non-MCP tools and vendors or versions that do not report it — absent is
  * not unknown.
  */
-server_source: string | null, project_id: ProjectId | null, run_id: RunId | null, change_id: ChangeId | null, };
+server_source: string | null, project_id: ProjectId | null, run_id: RunId | null, change_id: ChangeId | null, 
+/**
+ * The tool call this decides, by the agent's own id: the protocol's id
+ * for a driven call (the key its reported edit is found by), the vendor's
+ * `tool_use_id` for a watched one. `None` where no channel named the call.
+ */
+call_id?: string | null, 
+/**
+ * The vendor whose own report this row was written from (`claude-code`).
+ * `None` on every decision Devplane itself took or enforced.
+ */
+vendor?: string | null, 
+/**
+ * The vendor's own word for who decided, verbatim (`user_reject`,
+ * `config`). Kept beside `authority`, never instead of it.
+ */
+vendor_source?: string | null, 
+/**
+ * The person's grant that allowed the call (`` `Bash(cargo test)` for
+ * /root ``), on every allow a grant made; what revoking it lists by.
+ */
+grant?: string | null, };

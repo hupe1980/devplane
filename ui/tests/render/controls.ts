@@ -5,7 +5,9 @@ import Grid, { nextSort, sorted, type Column } from "../../src/lib/ui/Grid.svelt
 import Tabs, { step } from "../../src/lib/ui/Tabs.svelte";
 import Pill, { tone } from "../../src/lib/ui/Pill.svelte";
 import Timeline from "../../src/lib/ui/Timeline.svelte";
-import Palette, { rank, score, type Entry } from "../../src/surfaces/palette/Palette.svelte";
+import Palette, { commands, rank, score, unique, type Entry } from "../../src/surfaces/palette/Palette.svelte";
+import { help, spell } from "../../src/lib/keys";
+import { landing, listed } from "../../src/lib/surfaces";
 import New, { startable, type Target } from "../../src/surfaces/new/New.svelte";
 import { fail, html, source, visible, walk } from "../harness";
 
@@ -71,7 +73,7 @@ import { fail, html, source, visible, walk } from "../harness";
   if (!out.includes("completed") || /class="pill done/.test(out)) fail("a pill for an agent's own word is green or wordless");
   // Green is spent only in the files that draw a verified or passed fact.
   const allowed = new Set(["lib/State.svelte", "lib/ui/Pill.svelte", "lib/ui/Props.svelte", "lib/ui/Tabs.svelte",
-    "lib/ui/Timeline.svelte", "surfaces/change/Stepper.svelte", "surfaces/change/Doc.svelte", "surfaces/change/Overview.svelte",
+    "lib/ui/Timeline.svelte", "surfaces/change/Stepper.svelte", "surfaces/change/Doc.svelte", "surfaces/change/Head.svelte", "surfaces/change/Overview.svelte",
     "surfaces/change/Tasks.svelte", "surfaces/change/Gates.svelte", "surfaces/why/Why.svelte"]);
   for (const f of walk("../src/").filter((x) => /\.(svelte|ts|css)$/.test(x) && !x.includes("/wire/"))) {
     const rel = f.replace("../src/", "");
@@ -83,15 +85,18 @@ import { fail, html, source, visible, walk } from "../harness";
 
 // ── The palette: fuzzy, in a stable order, and `>` narrows to actions ────
 {
-  const e = (kind: Entry["kind"], label: string): Entry => ({ kind, label, icon: "dot", go: () => {} });
+  const e = (kind: Entry["kind"], label: string): Entry => ({ id: `${kind}:${label}`, kind, label, icon: "dot", go: () => {} });
   const entries = [e("project", "saas"), e("action", "Start a new change"), e("change", "Rate-limit the login route"),
     e("surface", "Go to Sessions"), e("action", "Go to the changes"), e("change", "Retry only on 5xx")];
-  // Prefix beats word start beats inside beats scattered letters.
-  const s = [score("ret", "retry only"), score("onl", "retry only"), score("try", "retry only"), score("rty", "retry only")];
-  if (!(s[0]! < s[1]! && s[1]! < s[2]! && s[2]! < s[3]!)) fail(`the palette's match order is not prefix, word, inside, scattered: ${s}`);
+  // Prefix beats word start beats inside beats word initials.
+  const s = [score("ret", "retry only"), score("onl", "retry only"), score("try", "retry only"), score("ro", "retry only")];
+  if (!(s[0]! < s[1]! && s[1]! < s[2]! && s[2]! < s[3]!)) fail(`the palette's match order is not prefix, word, inside, initials: ${s}`);
+  // Letters scattered inside words are not a match.
+  if (score("rate", "Show or hide the activity panel") !== null) fail("the palette matches letters scattered inside words");
+  if (score("rlr", "Rate-limit the login route") === null) fail("the palette does not match word initials");
   if (score("zz", "retry") !== null) fail("the palette matches letters that are not there");
   const r = rank(entries, "re").map((x) => x.label);
-  if (r[0] !== "Retry only on 5xx" || r[1] !== "Rate-limit the login route") fail(`changes are not first, best match first: ${r}`);
+  if (r[0] !== "Retry only on 5xx" || r.includes("Rate-limit the login route")) fail(`changes are not first, or a scattered match is listed: ${r}`);
   const kinds = rank(entries, "").map((x) => x.kind);
   if (kinds.join() !== "change,change,surface,action,action,project") fail(`the palette's groups are out of order: ${kinds}`);
   const acts = rank(entries, "> go");
@@ -102,17 +107,51 @@ import { fail, html, source, visible, walk } from "../harness";
   if (!/role="listbox"/.test(out) || !/aria-label="find by name"/.test(out)) fail("the palette's field or list is unlabelled");
 }
 
+// ── The palette lists each command once, and a place carries its chord ───
+{
+  for (const over of ["inbox", "change", "board"]) {
+    const rows = commands({
+      here: [{ label: "Review", icon: "split", run: () => {} }, { label: "Run gates", icon: "gate", run: () => {} }],
+      changes: [{ id: "c9", title: "the route" }],
+      opensChange: "change",
+      places: listed(),
+      keys: help(over),
+      projects: [{ id: "p", name: "saas" }],
+      landing: landing()?.id,
+      over,
+      back: () => {},
+    });
+    const ids = rows.map((r) => r.id);
+    const twice = ids.filter((id, i) => ids.indexOf(id) !== i);
+    if (twice.length) fail(`the palette over ${over} lists a command twice: ${twice.join(", ")}`);
+    const labels = rows.map((r) => r.label.toLowerCase().replace(/^go to (the )?/, ""));
+    const said = labels.filter((l, i) => labels.indexOf(l) !== i);
+    if (said.length) fail(`the palette over ${over} names one destination twice: ${said.join(", ")}`);
+    const sessions = rows.filter((r) => /sessions$/i.test(r.label) && r.label.startsWith("Go to"));
+    if (sessions.length !== 1) fail(`the palette over ${over} has ${sessions.length} rows going to the sessions`);
+    else if (sessions[0].hint !== spell("g b")) fail(`"Go to Sessions" does not carry its chord: ${sessions[0].hint}`);
+    for (const b of help(over).filter((x) => x.surface === "global" && x.action.startsWith("go-")))
+      if (rows.some((r) => r.kind === "action" && r.label.toLowerCase() === b.label)) fail(`"${b.label}" is an action row beside its place`);
+  }
+  if (unique([{ id: "a", kind: "surface", label: "A", icon: "", go: () => {} }, { id: "a", kind: "action", label: "a", hint: "g a", icon: "", go: () => {} }])
+    .map((r) => `${r.kind}:${r.hint}`).join() !== "surface:g a") fail("two rows with one id are not merged into the first, with the key");
+  // The field takes focus once it is on the page: `autofocus` alone loses to
+  // whatever had focus when ⌘K was pressed.
+  const pal = source("../src/surfaces/palette/Palette.svelte");
+  if (!/<input\b(?:(?!\/>)[\s\S])*use:focusOnMount/.test(pal)) fail("the palette's field is not focused when it opens");
+}
+
 // ── A new change: Start is enabled only when nothing is refused ──────────
 {
   const ok = (name: string): Target => ({ asked: name, name, root: `/r/${name}`, refusal: null, says: "a worktree on its own branch", notes: [] });
-  const no = (name: string): Target => ({ ...ok(name), refusal: "untrusted", says: "not trusted — devplane trust /r/x" });
+  const no = (name: string): Target => ({ ...ok(name), refusal: "untrusted", says: "not trusted — devplane project trust /r/x" });
   if (!startable([ok("a"), ok("b")], false, "")) fail("two projects that can both start are not startable");
   if (startable([ok("a"), no("b"), ok("c")], false, "")) fail("Start is enabled with one project refused");
   if (startable(null, false, "") || startable([], false, "")) fail("Start is enabled before the host answered");
   if (startable([ok("a")], true, "") || startable([ok("a")], false, "timed out")) fail("Start is enabled while checking or after a failed check");
   const refused = html(New, { targets: [ok("a"), no("b")] });
   if (!/<button type="submit"[^>]*disabled/.test(refused)) fail("the Start button is enabled while a project is refused");
-  if (!refused.includes("not trusted — devplane trust /r/x")) fail("a refusal is not said by project");
+  if (!refused.includes("not trusted — devplane project trust /r/x")) fail("a refusal is not said by project");
   if (!/1 refused — nothing will be created/.test(refused)) fail("the form does not say that nothing will be created");
   if (/<button type="submit"[^>]*disabled/.test(html(New, { targets: [ok("a")] }))) fail("the Start button is disabled with nothing refused");
   if (!source("../src/surfaces/new/New.svelte").includes('"/api/changes/preflight"')) fail("the preflight is not the host's");

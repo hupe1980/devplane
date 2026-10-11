@@ -6,25 +6,28 @@ weight = 21
 group = "reference"
 +++
 
-`devplane.toml` lives at the repository root and is **committed**, so the definition of done is
-reviewed like any other file. A repository without one still works: no gates, no rules. Devplane
-reads this file and never writes it.
+`devplane.toml` sits at the repository root and is committed. Without one there are no gates and no
+rules. Devplane never writes it, except `[spec] open_questions` when you accept that offer.
 
 > [!IMPORTANT]
-> Every key below is read by the code, and there are no others. **An unknown key is a parse error.**
-> A file that will not load **fails closed**: every gated call in that repository goes to a person,
-> naming the file and the error.
+> **An unknown key is a parse error.** A file that will not load **fails closed**: every gated call in
+> that repository goes to a person.
 
-`devplane check [path]` prints what the file will do and exits non-zero on an error. It is offline,
-so it runs in CI.
+`devplane config check [path]` says what the file will do and exits non-zero on an error. It runs
+offline, so CI can run it.
 
 ## The complete file
 
 ```toml
 [project]
-name          = "saas"
-base_branch   = "main"      # discovered from the repository when unset
-default_agent = "claude"    # used by `change start` without --agent
+name        = "saas"
+base_branch = "main"        # discovered from the repository when unset
+
+[agent]
+default          = "claude" # used by `change start` without --agent
+max_parallel     = 2        # changes with an agent in them at once
+stall_timeout    = "12m"
+keep_transcripts = true
 
 [workspace]
 setup = "pnpm install --frozen-lockfile"   # run once in a new worktree
@@ -33,26 +36,23 @@ share = ["cargo"]                          # build caches shared by changes
 [gates]
 check   = ["pnpm typecheck", "pnpm lint", "pnpm test -- --run"]
 timeout = "10m"             # for the whole gate
-on_fail = "feedback"        # feedback | escalate | ignore
-max_feedback_rounds = 2
+max_feedback_rounds = 2     # then the change stops for a person
+junit       = ["reports/junit.xml"]   # JUnit files check writes; names tests
+base_checks = "offer"                 # offer | auto | off
+serial      = false                   # true: one gate at a time (a shared database)
 
-[gates.named.e2e]           # run by name; never what verifies a change
+[gates.e2e]                 # run by name; never what verifies a change
 run     = ["pnpm test -- --run tests/e2e"]
 timeout = "20m"
 
 [policy]                    # refuse and defer; Devplane never approves
-never_auto = ["Bash(rm *)", "Read(.env)"]
-always_ask = ["Bash(git push *)"]
-max_parallel_runs = 2
-stall_timeout     = "12m"
+deny = ["Bash(rm *)", "Read(.env)"]
+ask  = ["Bash(git push *)"]
 
 [budget]                    # per change
-usd         = 10
+max_usd     = 10
 max_turns   = 60
 max_runtime = "45m"
-
-[transcripts]
-keep = true
 
 [spec]
 plans          = "specs"
@@ -73,17 +73,12 @@ test  = "tests/auth.rs"
 paths = ["src/auth/**"]
 
 [github]
-pull_request = true         # lets `change offer` push and open the PR
-draft        = true
+pull_request = true         # lets `change offer` push and open the PR, as a draft
 ready_label  = "devplane:ready"
-
-[reports]
-deliver_from = ["api"]
 ```
 
-Durations are strings, written the way people say them: `"30s"`, `"10m"`, `"1h30m"`; `"600"` is
-seconds. A bare TOML number (`timeout = 600`) is a parse error. `[questions] deadline` takes one unit
-only (`"90s"`, `"30m"`, `"4h"`) or `"never"`.
+Durations are strings: `"30s"`, `"10m"`, `"1h30m"`; `"600"` is seconds. A bare number (`timeout =
+600`) is a parse error. `[questions] deadline` takes one unit (`"90s"`, `"30m"`, `"4h"`) or `"never"`.
 
 ## `[project]`
 
@@ -91,7 +86,18 @@ only (`"90s"`, `"30m"`, `"4h"`) or `"never"`.
 |---|---|---|---|
 | `name` | string | the directory name | what the workbench calls it |
 | `base_branch` | string | discovered from the repository | what worktrees branch from; must be a name git accepts |
-| `default_agent` | string | `claude` | the agent `devplane change start` uses when `--agent` is not given |
+
+## `[agent]`
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `default` | string | `claude` | the agent `devplane change start` uses when `--agent` is not given |
+| `max_parallel` | integer | unlimited | changes with an agent in them at once in this project; sessions you started yourself are not counted |
+| `stall_timeout` | duration | `10m` | how long a working run may produce nothing before it is called stalled |
+| `keep_transcripts` | bool | `true` | whether what a driven agent says in this repository is stored |
+
+`keep_transcripts = false` stores nothing a driven agent says, prompts included. Watched sessions
+carry no prose either way.
 
 ## `[workspace]`
 
@@ -100,16 +106,13 @@ only (`"90s"`, `"30m"`, `"4h"`) or `"never"`.
 | `setup` | string | none | a command run once in a new worktree, before the agent starts |
 | `share` | list of ecosystem names | empty | build caches shared between this project's changes |
 
-`setup` is not a gate. While it runs the change reads *installing · `<command>` · <elapsed>*.
-
-`share` is declared, never inferred. The known name is `cargo`: every isolated change's setup, gates
-and agent get `CARGO_TARGET_DIR` pointing at one directory under `.claude/worktrees/.shared/`.
-pnpm, npm, go and uv already share a store in your home directory and need no entry.
-
-Files to copy into a fresh tree (`.env`, local config) are listed in the repository's own
-`.worktreeinclude` (gitignore syntax, also read by Claude Code). Only gitignored files are copied; a
-symlink out of the repository is refused, nothing is written through a symlink, and nothing at the
-destination is overwritten.
+- `setup` is not a gate. While it runs, the change reads *installing · `<command>` · <elapsed>*.
+- `share` is never inferred, and an unknown name is refused. The one name is `cargo`: setup, gates
+  and agent get `CARGO_TARGET_DIR` under `.claude/worktrees/.shared/`. pnpm, npm, go and uv share a
+  home store without it.
+- Files to copy into a fresh tree (`.env`, local config) go in `.worktreeinclude` (gitignore syntax,
+  also read by Claude Code). Only gitignored files are copied, symlinks out are refused, and nothing
+  at the destination is overwritten.
 
 ## `[gates]`
 
@@ -117,99 +120,61 @@ destination is overwritten.
 |---|---|---|---|
 | `check` | list of commands | empty | the definition of done; all must succeed, in order |
 | `timeout` | duration | `10m` | for the whole gate |
-| `on_fail` | `feedback` · `escalate` · `ignore` | `feedback` | hand failures back to the agent, ask a person at once, or record and carry on |
-| `max_feedback_rounds` | integer | `2` | how many times failures go back before a person is asked |
+| `max_feedback_rounds` | integer | `2` | how many times failures go back to the agent before the change stops for a person; `0` stops at once |
+| `junit` | list of paths | empty | JUnit XML files `check` writes, relative to the checkout; read only when the run wrote them, inside the checkout, up to 16 MiB, to name tests. Git should ignore them: writing a tracked path moves the tree `check` is judged on |
+| `base_checks` | `offer` · `auto` · `off` | `offer` | when [base checks](@/docs/verified-done.md#base-checks) run: when you offer or ask, also after every passing `check`, or never |
+| `serial` | bool | `false` | run this repository's gates one at a time on this machine (`setup`, `check`, named gates, base checks, `devplane gate`), for checks that share a test database or a fixed port. The `timeout` starts when a gate's commands do. Not serialised across machines |
 
-### `[gates.named.<name>]`
+### `[gates.<name>]`
+
+Any other table under `[gates]` is a named gate. The keys above are reserved and cannot name one;
+any other key that is not a table is refused.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `run` | list of commands | required | the commands; an empty list is an error |
 | `timeout` | duration | the `[gates]` timeout | optional override |
 
-```toml
-[gates]
-check   = ["cargo test --locked"]
-timeout = "20m"
-on_fail = "escalate"
-
-[gates.named.bench]
-run     = ["cargo bench --no-run"]
-timeout = "5m"
-```
-
-A change is **verified** when the latest `check` report passed and its tree digest equals the working
-tree's. A `[gates.named]` gate is evidence you ask for (`devplane gate --name bench`) and never
-makes a change verified; an undeclared name is an error. See [Verified done](@/docs/verified-done.md).
+A named gate runs on request (`devplane gate --name e2e`) and never verifies a change. See
+[Verified done](@/docs/verified-done.md).
 
 ## `[policy]`
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `never_auto` | list of rules | empty | refused, without asking anybody |
-| `always_ask` | list of rules | empty | put in front of a person |
-| `max_parallel_runs` | integer | unlimited | changes with an agent in them at once in this project; sessions you started yourself are not counted |
-| `stall_timeout` | duration | `10m` | how long a working run may produce nothing before it is called stalled |
+| `deny` | list of rules | empty | refused, without asking anybody |
+| `ask` | list of rules | empty | put in front of a person |
 
-```toml
-[policy]
-never_auto = [
-  "Bash(rm *)",
-  "Read(./.env)",
-  "WebFetch(domain:pastebin.com)",
-]
-always_ask = ["Bash(git push *)", "Bash(npm publish *)"]
-max_parallel_runs = 3
-```
-
-Neither list grants anything; allow rules go in your agent's own `permissions.allow`. The rule syntax
-is on [Permissions](@/docs/permissions.md).
+Neither grants anything. Syntax: [Permissions](@/docs/permissions.md).
 
 ## `[budget]`
 
-One budget per change. A change that passes any bound stops and raises a `cost_spike` item naming
-which one. Zero means off.
+Per change. Passing a bound stops the change with a `cost_spike` item naming it. Unset means no bound;
+`max_usd = 0` also means no ceiling.
 
 | Key | Type | Meaning | Always fires? |
 |---|---|---|---|
-| `usd` | number | what one change may spend, as its agent reports it | **no** |
+| `max_usd` | number | what one change may spend, as its agent reports it | **no** |
 | `max_turns` | integer | agent turns one change may take | yes |
 | `max_runtime` | duration | how long one change may run, from when it started | yes |
 
-`usd` binds only an agent that reports its cost, which the Agent Client Protocol makes optional.
-Turns and runtime are counted by Devplane and bind every agent. `devplane check` warns when `usd` is
-the only bound, and `devplane change show` says *not reported* rather than `$0.00`.
-
-## `[transcripts]`
-
-| Key | Type | Default | Meaning |
-|---|---|---|---|
-| `keep` | bool | `true` | whether what a driven agent says in this repository is stored |
-
-Off stores nothing, including the prompts Devplane sent. Sessions Devplane only watches carry no prose
-either way.
+`max_usd` binds only agents that report cost (optional in ACP). `config check` warns when it is the
+only bound; `change show` says *not reported* rather than `$0.00`.
 
 ## `[spec]`
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `plans` | path | none | where this repository keeps its specifications |
+| `plans` | path | none | where this repository keeps its specifications (`specs`, Kiro's `.kiro/specs`, OpenSpec's `openspec/changes`) |
 | `open_questions` | list of strings | empty | words that mark a question a specification has not answered |
 | `tokens` | list of prefixes | `FR-` `NFR-` `SC-` `REQ-` `US-` `AC-` | the shapes of requirement ids; a prefix followed by digits |
 
-```toml
-[spec]
-plans          = "specs"   # Kiro ".kiro/specs", OpenSpec "openspec/changes"
-open_questions = ["NEEDS CLARIFICATION"]
-tokens         = ["REQ-"]  # REQ-3 in heading and task line: one edge
-```
-
-- `plans` has no default. Unset, the Specifications view says *not configured* for this project.
-- `open_questions` is matched per line, case-insensitively, outside code. Each project with an open
-  question in a specification under way gets one inbox item naming the count.
-- `tokens` replaces the default list. A prefix may not contain a digit; a repository that numbers
-  requirements bare writes the word in front (`tokens = ["Req "]` matches `Req 12`). An empty list is
-  an error.
+- `plans` unset: the Specifications view says *not configured*.
+- `open_questions` matches per line, case-insensitively, outside code; one inbox item per project
+  names the count.
+- `tokens` replaces the defaults and is case-sensitive. `REQ-3` in a heading and a task line links
+  them. No digits in a prefix; for bare numbers write the word (`tokens = ["Req "]` matches
+  `Req 12`). An empty list is an error.
 
 See [Specifications](@/docs/specs.md).
 
@@ -218,27 +183,18 @@ See [Specifications](@/docs/specs.md).
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `deadline` | `never` or a duration | `never` | how long an unanswered question or permission waits before the agent is told no |
-| `hold` | `true`, `false` or a duration | none | how long a permission on a **watched** session waits for an answer from Devplane before the agent's own dialog appears |
+| `hold` | `true`, `false` or a duration | none | how long a permission on a **watched** session waits for an answer from Devplane before the agent's own dialog appears. `true` is 30s; a duration is at most 120s |
 
-```toml
-[questions]
-deadline = "4h"
-hold     = true     # 30s; a duration names its own, up to 120s
-```
-
-By default only a person ends a question. A `deadline` that fires tells the agent no, and `devplane
-audit` names a `timer` as the authority, with the duration and this file. The clock runs only while a
-host is up. A value that will not parse fails `devplane check` and the wait stays unbounded.
-
-`hold` applies only to calls your `always_ask` rules matched; a `never_auto` refusal is never held.
-The permission becomes an ask that `devplane answer` or the workbench can answer, with no host
-needed. If nobody answers, the ask ends with `nobody` as the authority and the vendor's dialog
-appears. It does not fire in Claude Code's auto mode, where no dialog would appear.
+- Without `deadline`, only a person ends a question. A fired `deadline` tells the agent no, recorded
+  as `timer` with the duration and file. The clock runs only while a host is up. An unparsable value
+  fails `config check`, and the wait stays unbounded.
+- `hold` applies only to `ask` matches, never to `deny`, and not in auto mode. See
+  [answering a watched session's permission](@/docs/permissions.md#answering-a-watched-session-s-permission).
 
 ## `[review]`
 
-How `devplane change review` and the Review tab order a change. Nothing is inferred from file names.
-Checks weakened or changed always come first, before any role.
+How `devplane change review` and the Review tab order files after the weakened checks. Nothing is
+inferred from file names.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -265,46 +221,39 @@ test  = "tests/auth.rs"
 paths = ["src/core/auth.rs"]
 ```
 
-Patterns are gitignore syntax, relative to the repository. A file takes the first role that
-matches; unmatched files follow, in path order. Without `[review] roles` the review says it is
-unordered. Without any `[[review.covers]]` the coverage column is absent, which is different from
-*not covered*.
+- Patterns are gitignore syntax, repository-relative. First matching role wins; unmatched files follow
+  in path order.
+- Without roles the review says it is unordered. Without `[[review.covers]]` the coverage column is
+  absent (not *not covered*).
 
 ## `[github]`
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `pull_request` | bool | `false` | let `devplane change offer` push and open the pull request (or record the one already open for the branch); off, it prints the `git push` line and GitHub's address for opening it. Nothing opens a pull request when gates pass |
-| `draft` | bool | `true` | open it as a draft |
-| `ready_label` | string | none | issues with this label are offered as work — `devplane forge issues --ready`, `change start --issue` |
-
-## `[reports]`
-
-| Key | Type | Default | Meaning |
-|---|---|---|---|
-| `deliver_from` | list of project names | empty | projects whose reports about this one are also handed to its live agent |
-
-A report always reaches this project's person in the inbox. A report from a project named here is
-also handed to the latest open change's live agent, quoted and attributed, and recorded with
-authority `rule`. `"*"`, empty names and unregistered projects are refused by `devplane check`. See
-[Reports between projects](@/docs/reports.md).
+| `pull_request` | bool | `false` | let `devplane change offer` push and open a draft pull request; off, it prints the `git push` line and compare address. Passing gates never opens one |
+| `ready_label` | string | none | issues with this label are offered as work — `devplane issue list --ready`, `change start --issue` |
 
 ## Machine-wide files
 
 All under `~/.devplane/` (or `DEVPLANE_HOME`).
 
-**`policy.toml`**: `never_auto` and `always_ask` in a `[policy]` section, applied to every project.
-Only `[policy]` is allowed. `max_parallel_runs` and `stall_timeout` parse there but do nothing: they
-are read only from a project's `devplane.toml`. A file that will not load fails closed, like a broken
-`devplane.toml`.
+**`policy.toml`** holds your machine-wide rules and your grants. It fails closed.
 
-**`app.toml`**: the window of `devplane app`, and which GitHub this machine signs in to:
+- `[policy]` with `deny` and `ask`, applied to every project. `allow` is refused.
+- `[grants]` with `offer_after` and `offer_again_after` (default 5, at least 2): when a grant is offered.
+- `[projects."<root>"]` with `allow`, and its own `offer_after` and `offer_again_after`.
+
+A repository's `devplane.toml` with `[policy] allow`, `[grants]` or `[projects]` is refused. See
+[grants](@/docs/permissions.md#grants-your-own-rule-per-project).
+
+**`app.toml`** holds the window's settings and the GitHub this machine signs in to:
 
 ```toml
 # ~/.devplane/app.toml
 [app]
 shortcut = "CmdOrCtrl+Shift+Space"   # the one global shortcut
 port     = 47831                     # the host's port; 0 picks a free one
+updates  = "off"                     # "on" | "off"; absent, the app never checks
 
 [github]
 host      = "ghe.corp"               # the configured host; github.com unless set
@@ -314,31 +263,39 @@ client_id = "Iv1.…"                  # that host's OAuth App, for the device f
 client_id = "Iv1.…"                  # another Enterprise server's own app
 ```
 
-A client id is public (the device flow has no secret). A release build carries its own for
-`github.com` only; a host with none signs in with a token on stdin (`devplane login github
---with-token`).
+- A client id is public. Release builds carry one for `github.com` only; other hosts use
+  `devplane auth login --with-token`.
+- `updates` is read only by the window's process; the command line never checks for updates.
+- A missing file means defaults. `devplane doctor` reports a parse error or an unregistrable shortcut.
+- `port = 0` picks a new port each start, so agent telemetry (cost, context) does not arrive.
 
-A missing file means these defaults. A file that will not parse, or a shortcut that cannot be
-registered, is reported by `devplane doctor`. The default, 47831, is the port `devplane connect claude`
-writes into the telemetry settings. With `port = 0` the window's host picks a new port each start and
-agent telemetry (cost, context) no longer reaches it.
+**`agents.toml`** adds agents by name, or sets a built-in's `mode`. Keys per `[agents.<id>]`:
+`name`, `command` (optional for a built-in id) and `mode`. See
+[Driving agents](@/docs/agents.md#adding-an-agent).
 
-**`agents.toml`**: agents added by name, beside the built-in ones. See
-[Driving agents](@/docs/agents.md).
+**`trusted.toml`** lists the repositories you trusted, written by `devplane project trust` and the
+window. Its one key, `roots`, is a list of absolute paths; any other key is refused and trusts
+nothing. Delete a root to take its trust back; the host reads the file when it starts. The store
+never holds trust.
+
+```toml
+# ~/.devplane/trusted.toml
+roots = ["/Users/you/src/api"]
+```
 
 ## Environment
 
 | Variable | What |
 |---|---|
 | `DEVPLANE_HOME` | where the store, token and host record live (default `~/.devplane`) |
-| `DEVPLANE_PORT` | the port `devplane serve` binds (default `47831`) |
+| `DEVPLANE_PORT` | the port `devplane up` binds (default `47831`) |
 | `DEVPLANE_LOG` | the host's log filter, e.g. `devplane=debug` |
 | `DEVPLANE_NOTIFY` | `0` turns desktop notifications off |
 | `DEVPLANE_CLAUDE_BIN` | the `claude` binary, when it is not on `PATH` |
 | `DEVPLANE_UI` | serve the interface from this built directory instead of the embedded copy |
 | `DEVPLANE_OPENCODE_URL` | a running `opencode serve` to watch; see [Watching sessions](@/docs/observe.md#opencode) |
 | `VISUAL`, `EDITOR` | the editor the window's **Editor** button opens a worktree in |
-| `DEVPLANE_RUN` | set by Devplane on every agent it starts; read by `devplane report file` |
-| `CLAUDE_CONFIG_DIR` | which Claude Code configuration `devplane connect claude` writes to |
+| `DEVPLANE_RUN` | set by Devplane on every agent it starts, so `devplane inbox answer --allow` refuses inside it |
+| `CLAUDE_CONFIG_DIR` | which Claude Code configuration `devplane agent connect claude` writes to |
 | `CODEX_HOME`, `COPILOT_HOME` | where Codex and Copilot keep their configuration |
 | `NO_COLOR`, `CLICOLOR_FORCE` | colour off, or forced on |

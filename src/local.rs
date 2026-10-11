@@ -41,6 +41,12 @@ impl Local {
         for p in self.store.load_projects().await? {
             world.upsert_project(p);
         }
+        // Trust is the person's file; one that cannot be read trusts nothing.
+        if let Ok(t) = crate::trust::Trusted::read(&self.home) {
+            for p in t.projects() {
+                world.upsert_project(p);
+            }
+        }
         world.restore_runs(self.store.load_runs().await?);
         // Replay what hooks wrote past the host's mark, in memory only (the
         // mark is the host's to move). Paged to the end, and each event at
@@ -70,6 +76,7 @@ impl Local {
                 .or_else(|| world.project(&c.project_id).map(|p| p.root.clone()));
             if let Some(dir) = dir {
                 c.tree_now = crate::git::commit_stamp(&dir).await;
+                c.tree_as_of = Some(jiff::Timestamp::now());
             }
         }
         let open_asks = self.store.open_asks().await?;
@@ -115,11 +122,11 @@ impl Local {
                     project: q("project"),
                     needs_you: flag("needs_you"),
                 };
-                view::inbox(&snap, &self.store, &self.policy, &q).await
+                serde_json::to_value(view::inbox(&snap, &self.store, &self.policy, &q, None).await)?
             }
             ["api", "asks"] => {
                 let recent = self.store.asks(50).await.unwrap_or_default();
-                view::asks(&snap, &recent)
+                serde_json::to_value(view::asks(&snap, &recent))?
             }
             ["api", "runs", id] => {
                 let id = snap
@@ -143,13 +150,12 @@ impl Local {
                 serde_json::to_value(self.store.messages_for_run(&id, limit).await?)?
             }
             ["api", "modes"] => serde_json::to_value(view::modes(&snap))?,
-            ["api", "attention"] => {
-                let days = q("days").and_then(|d| d.parse().ok()).unwrap_or(7);
-                view::attention(&self.store, days).await?
-            }
             ["api", "search"] => {
                 view::search(&self.store, &q("q").unwrap_or_default(), limit).await?
             }
+            ["api", "decisions", "unattributed"] => serde_json::to_value(
+                view::unattributed(&self.store, q("about").as_deref(), limit).await?,
+            )?,
             ["api", "decisions"] => serde_json::to_value(
                 view::decisions(
                     &self.store,
@@ -187,25 +193,14 @@ impl Local {
                     .await
                     .context("no such change")?
             }
-            ["api", "reports"] => {
-                let rq = view::ReportQuery {
-                    to: q("to"),
-                    from: q("from"),
-                    all: flag("all"),
-                };
-                serde_json::to_value(view::reports(&snap, &self.store, &rq).await?)?
-            }
-            ["api", "reports", id] => serde_json::to_value(
-                view::report(&snap, &self.store, id)
-                    .await?
-                    .with_context(|| format!("no report `{id}`"))?,
-            )?,
             ["api", "specs"] => view::specs(&snap, &self.store).await,
             ["api", "projects"] => json!(view::projects(&snap)),
             ["api", "setup"] => view::setup(&snap),
             ["api", "quitting"] => serde_json::to_value(crate::core::reduce::facts::quitting(
                 snap.world.runs(),
                 &snap.open_asks,
+                // No host, so nothing is held.
+                None,
             ))?,
             _ => return Err(crate::client::needs_host(&format!("`{route}`"))),
         })
@@ -245,9 +240,13 @@ impl Reader {
         serde_json::from_value(v).with_context(|| format!("reading {path}"))
     }
 
-    /// Marks every current weakened row at `path` seen, as the person running
+    /// Marks every current hunk at `path` seen, as the person running
     /// this: through the host where one runs, otherwise straight into the store.
-    pub async fn mark_seen(&self, change: &str, path: &str) -> Result<Value> {
+    pub async fn mark_seen<T: serde::de::DeserializeOwned>(
+        &self,
+        change: &str,
+        path: &str,
+    ) -> Result<T> {
         match self {
             Reader::Host(c) => {
                 c.post_json(
@@ -261,18 +260,18 @@ impl Reader {
                 let id = snap
                     .resolve_change(change)
                     .map_err(|e| anyhow::anyhow!(e))?;
-                Ok(
+                Ok(serde_json::from_value(
                     match view::mark_seen(&snap, &l.store, &id, path, None).await {
-                        Ok(seen) => json!({ "seen": seen }),
+                        Ok(marked) => serde_json::to_value(marked)?,
                         Err(view::SeenRefusal::NoSuchChange) => {
                             json!({ "error": format!("no change `{change}`") })
                         }
-                        Err(view::SeenRefusal::NoSuchRow(rows)) => json!({
-                            "error": format!("`{path}` has no weakened row to mark seen"),
-                            "rows": rows,
+                        Err(view::SeenRefusal::NoSuchUnit(digests)) => json!({
+                            "error": format!("`{path}` has nothing in this change to mark seen"),
+                            "digests": digests,
                         }),
                     },
-                )
+                )?)
             }
         }
     }
@@ -306,41 +305,16 @@ impl Reader {
                     &answers,
                 )
                 .map_err(|e| anyhow::anyhow!(e))?;
-                let from = s("from").unwrap_or_else(|| "cli".into());
-                let done = crate::driven::answer_without_host(&l.store, ask, answer, &from).await?;
-                Ok(view::render_ask(&done))
+                // This process is the surface; the body's own claim is not asked.
+                let done = crate::driven::answer_without_host(
+                    &l.store,
+                    ask,
+                    answer,
+                    crate::core::ask::AnswerPath::Cli,
+                )
+                .await?;
+                Ok(serde_json::to_value(view::render_ask(&done))?)
             }
-        }
-    }
-
-    /// Files a report: through the host where one runs, so a live target agent
-    /// that named this source in `deliver_from` is handed it; else the store.
-    pub async fn file_report(&self, body: &Value) -> Result<Value> {
-        match self {
-            Reader::Host(c) => c.post_json("/api/reports", body).await,
-            Reader::Store(l) => {
-                let req: crate::reports::FileRequest = serde_json::from_value(body.clone())?;
-                let filed = crate::reports::file(&l.store, req)
-                    .await
-                    .map_err(|r| anyhow::anyhow!(r.says()))?;
-                Ok(crate::api::filed_json(filed))
-            }
-        }
-    }
-
-    pub fn from_host(&self) -> bool {
-        matches!(self, Reader::Host(_))
-    }
-
-    /// The sentence a command prints, dimly, when it read the store; shared
-    /// with the board.
-    pub fn limits(&self) -> Option<&'static str> {
-        match self {
-            Reader::Host(_) => None,
-            Reader::Store(_) => Some(
-                "read from the store — no host is running, so live sessions, GitHub and the \
-                 gate probe are not visible from here; `devplane open` starts one",
-            ),
         }
     }
 }

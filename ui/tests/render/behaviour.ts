@@ -1,19 +1,20 @@
 // What a server render cannot show but a function or the source can: how a
 // key event is read (a macOS ⌥ chord included), that a focused control keeps
-// its own Enter, which links are allowed, how a review mark is keyed, and the
+// its own Enter, which links are allowed, how a review mark is counted, and the
 // source shapes that keep a page's state through a poll. The browser check
 // (`tests/browser.mjs`) drives the same bugs in a real page.
-import { all, combo, dispatch, onAction, run, spell } from "../../src/lib/keys";
+import { all, bind, combo, dispatch, fromField, help, onAction, run, setMode, spell } from "../../src/lib/keys";
+import "../../src/surfaces/change/index";
 import "../../src/shell/keys";
 import { safeHref } from "../../src/lib/href";
-import { markKey } from "../../src/surfaces/review/marks";
+import { unread } from "../../src/surfaces/change/review/unread.svelte";
 import Failed from "../../src/lib/Failed.svelte";
 import { fail, html, source, visible, walk } from "../harness";
 
 type Ev = Parameters<typeof combo>[0];
 const key = (e: Partial<Ev>): Ev => ({ key: "", code: "", metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...e });
 
-// ── ⌥ chords are read from the physical key (spec 048 FR-004) ────────────
+// ── ⌥ chords are read from the physical key ──────────────────────────────
 {
   // What macOS Chrome and WKWebView send: Option composes a character.
   const mac: Array<[Ev, string]> = [
@@ -65,6 +66,53 @@ const key = (e: Partial<Ev>): Ev => ({ key: "", code: "", metaKey: false, ctrlKe
   declines();
 }
 
+// ── A text field owns its keys: no bare key and no ⌥ chord leaves it ─────
+//
+// On a Mac ⌥3 types `£` and ⌥W types `∑`; taken by the registry they would
+// switch to the review or close the tab under a half-typed draft.
+{
+  // The real ⌥3 and ⌥W, whose listeners live in components this render
+  // never mounts, and a scope of this check's own for the rest.
+  bind({ surface: "field-check", combo: "j", action: "field-check-bare", label: "a key a field must keep" });
+  bind({ surface: "field-check", combo: "Mod+e", action: "field-check-mod", label: "a command chord" });
+  const took: string[] = [];
+  const offs = ["view-review", "close-tab", "field-check-bare", "field-check-mod"].map((a) =>
+    onAction(a, () => (took.push(a), true)),
+  );
+  const ev = (e: Partial<Ev>, target: { tagName: string; isContentEditable?: boolean }) =>
+    ({
+      ...key(e),
+      isComposing: false,
+      target: { isContentEditable: false, closest: () => null, ...target },
+      preventDefault: () => {},
+    }) as unknown as KeyboardEvent;
+  const fields = [{ tagName: "INPUT" }, { tagName: "TEXTAREA" }, { tagName: "DIV", isContentEditable: true }];
+  const kept: Array<[string, string, Partial<Ev>]> = [
+    ["⌥3", "change", { altKey: true, key: "£", code: "Digit3" }],
+    ["⌥W", "change", { altKey: true, key: "∑", code: "KeyW" }],
+    ["j", "field-check", { key: "j", code: "KeyJ" }],
+  ];
+  for (const t of fields) {
+    const where = t.isContentEditable ? "a contenteditable" : t.tagName === "INPUT" ? "an input" : "a textarea";
+    for (const [name, surface, e] of kept) {
+      took.length = 0;
+      if (dispatch(surface, ev(e, t)) || took.length) fail(`${name} in ${where} was taken by the registry (${took.join()})`);
+    }
+    took.length = 0;
+    if (!dispatch("field-check", ev({ key: "e", code: "KeyE", metaKey: true }, t)) || !took.includes("field-check-mod"))
+      fail(`a bound ⌘ chord in ${where} does not fire`);
+  }
+  if (!fromField("Esc")) fail("Esc in a field no longer leaves");
+  if (!fromField("Mod+k")) fail("⌘K in a field no longer opens the palette");
+  // The same keys on the page still fire: the field is the only thing that
+  // keeps them.
+  for (const [name, surface, e] of kept) {
+    took.length = 0;
+    if (!dispatch(surface, ev(e, { tagName: "DIV" })) || took.length !== 1) fail(`${name} on the page does nothing`);
+  }
+  offs.forEach((off) => off());
+}
+
 // ── Host links: an allowlist of schemes, in one helper ───────────────────
 {
   for (const bad of ["javascript:alert(1)", " JavaScript:alert(1)", "data:text/html,x", "file:///etc/passwd", "vbscript:x", "//evil.example"])
@@ -76,17 +124,23 @@ const key = (e: Partial<Ev>): Ev => ({ key: "", code: "", metaKey: false, ctrlKe
     if (/href=\{(item\.(url|launch)|r\.url)\}|window\.open\(r\.url/.test(text)) fail(`${f} puts a host link in an href without safeHref`);
 }
 
-// ── A review mark is the hunk's content, not its header ──────────────────
+// ── A review mark is the host's, on the hunk's content ───────────────────
 {
-  const a = markKey("c-1", "src/a.ts", "@@ -1,2 +1,2 @@", [["added", "let x = 1;"]]);
-  const b = markKey("c-1", "src/a.ts", "@@ -1,2 +1,2 @@", [["added", "let x = 2;"]]);
-  if (a === b) fail("a rewritten hunk with the same header keeps its seen mark");
-  if (a !== markKey("c-1", "src/a.ts", "@@ -1,2 +1,2 @@", [["added", "let x = 1;"]])) fail("one hunk keys two ways");
+  // The host says which hunks are seen (by content digest): the window
+  // counts its words, keeps nothing of its own.
+  const file = (seen: boolean[]) => ({
+    path: "src/a.ts", status_says: "modified", added: 1, removed: 0, role: null, role_says: "", coverage: { coverage: "no_mapping" },
+    coverage_says: null, decisions: [], task_group: null, task_says: "", body_says: null, marker_commands: [],
+    hunks: seen.map((s, i) => ({ header: `@@ -${i} +${i} @@`, lines: [["added", `x${i}`]], formatter_only: false, digest: `d${i}`, seen: s })),
+  });
+  const r = (seen: boolean[]) => ({ change: "c-1", groups: [{ role: null, says: "", files: [file(seen)] }] }) as never;
+  if (unread(r([false, false])).hunks !== 2) fail("two unseen hunks are not two unread");
+  if (unread(r([true, false])).hunks !== 1) fail("a hunk the host marked seen still counts as unread");
 }
 
 // ── A failure says why and what tells more ───────────────────────────────
 {
-  const out = visible(html(Failed, { what: "the projects", failure: { says: "database is locked", tell: "devplane doctor" } }));
+  const out = visible(html(Failed, { what: "the projects", failure: { says: "database is locked", tell: "devplane doctor" } })).replace(/\s+/g, " ");
   if (!/Could not read the projects: database is locked/.test(out) || !out.includes("devplane doctor")) fail("a failed read does not say why and what tells more");
   const stale = visible(html(Failed, { what: "the projects", failure: { says: "x", tell: "y" }, at: Date.now() - 60_000, stale: true }));
   if (!/as read 1m ago/.test(stale)) fail("a stale region does not say when it was read");
@@ -115,4 +169,27 @@ const key = (e: Partial<Ev>): Ev => ({ key: "", code: "", metaKey: false, ctrlKe
     if (/await navigator\.clipboard\?\.writeText/.test(text)) fail(`${f} says copied when there is no clipboard`);
     if (/signal: AbortSignal\.timeout\(TIMEOUT_MS\)/.test(text)) fail(`${f} cuts every write off at the read timeout`);
   }
+}
+
+// ── ⌥3 opens the Review; the review's keys live only in its mode ─────────
+{
+  if (combo(key({ altKey: true, key: "£", code: "Digit3" })) !== "Alt+3") fail("⌥3 as macOS sends it does not spell Alt+3");
+  const b = all().find((x) => x.surface === "change" && x.combo === "Alt+3");
+  if (b?.action !== "view-review") fail("Alt+3 does not show the change's Review");
+  // On the Overview, no review key is listed; in the Review, they are.
+  const reviewKeys = ["s", "f", "n", "p", "x", "v", "1", "2", "Mod+Enter"];
+  if (help("change").some((x) => x.surface === "change:review")) fail("the change's other views list the review's keys");
+  const clear = setMode("change", "review");
+  const inReview = help("change").map((x) => x.combo);
+  clear();
+  for (const k of reviewKeys) if (!inReview.includes(k)) fail(`the Review does not list ${k}`);
+  if (!inReview.includes("Alt+1")) fail("the Review drops the change's own keys");
+  // A mode may take its surface's list keys, and nothing else of it.
+  let threw = false;
+  try {
+    bind({ surface: "change:review", combo: "Alt+1", action: "planted", label: "a planted collision" });
+  } catch {
+    threw = true;
+  }
+  if (!threw) fail("a mode binding one of its surface's own keys is not refused");
 }

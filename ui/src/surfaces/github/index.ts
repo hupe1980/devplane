@@ -1,5 +1,13 @@
 import { register } from "../../lib/surfaces";
-import Github from "./Github.svelte";
+import { bind, bindList, onAction } from "../../lib/keys";
+import { go } from "../../lib/route";
+
+bind({ surface: "global", combo: "g f", action: "go-forge", label: "go to the forge" });
+bindList("github", "open the issue or pull request on GitHub");
+onAction("go-forge", () => {
+  go("#github");
+  return true;
+});
 
 register({
   id: "github",
@@ -25,5 +33,5 @@ register({
       coverage: { projects: b.projects.length, configured: Object.keys(b.forge ?? {}).length },
     };
   },
-  component: Github,
+  page: () => import("./Github.svelte"),
 });

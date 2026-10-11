@@ -54,6 +54,15 @@ pub async fn decided(store: &Store, env: DecidedEnvelope) -> Result<()> {
         Some(dir) => project_of(store, dir).await?,
         None => None,
     };
+    // The vendor's id for the call (`PreToolUse` carries it, a
+    // `PermissionRequest` does not): what its telemetry report of a `hook`
+    // decision is joined to this row by.
+    let call = env
+        .payload
+        .as_ref()
+        .and_then(|p| p.get("tool_use_id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let late = if env.late {
         " (filed late: nothing was listening)"
     } else {
@@ -77,6 +86,7 @@ pub async fn decided(store: &Store, env: DecidedEnvelope) -> Result<()> {
         .by_tool(env.tool.clone())
         .from_server(env.server_source.clone())
         .for_run(&run)
+        .for_call(call.as_deref())
         .in_project(project.clone());
         if let Some(at) = env.at {
             d = d.at(at);
@@ -84,17 +94,50 @@ pub async fn decided(store: &Store, env: DecidedEnvelope) -> Result<()> {
         store.append_decision(&d).await?;
     }
     if let Some(rule) = env.rule.as_deref() {
+        // An allow is the person's own grant: the row names it, and says
+        // whether it widened the agent, never what the vendor would have done.
+        let because = match (env.verdict.as_str(), env.grant.as_deref()) {
+            ("allow", Some(name)) => {
+                let widens = cwd
+                    .as_deref()
+                    .and_then(crate::repo::governing_root)
+                    .map(|root| {
+                        crate::policy_cache::widens_the_agent(
+                            rule,
+                            &crate::policy_cache::agent_allow_rules(
+                                &root,
+                                dirs::home_dir().as_deref(),
+                            ),
+                        )
+                    })
+                    .unwrap_or(true);
+                let mut s = format!(
+                    "allowed by your grant {name} in {} — your rule permitted what the agent \
+                     asked about",
+                    crate::core::grant::FILE
+                );
+                if widens {
+                    s.push_str(", widening the agent: its own settings would have asked");
+                }
+                s
+            }
+            _ => rule.to_string(),
+        };
         let mut d = crate::core::Decision::new(
             crate::core::Authority::Rule,
             "agent:tool.use",
             subject,
             &env.verdict,
         )
-        .because(format!("{rule}{late}"))
+        .because(format!("{because}{late}"))
         .by_tool(env.tool.clone())
         .from_server(env.server_source.clone())
         .for_run(&run)
+        .for_call(call.as_deref())
         .in_project(project.clone());
+        if env.verdict == "allow" {
+            d.grant = env.grant.clone();
+        }
         if let Some(at) = env.at {
             d = d.at(at);
         }
@@ -118,11 +161,14 @@ pub async fn decided(store: &Store, env: DecidedEnvelope) -> Result<()> {
         "allow" | "deny" => events.push(Event::PermissionDecided {
             tool: env.tool.clone(),
             decision: env.verdict.clone(),
-            by: env
-                .rule
-                .as_deref()
-                .map(|r| format!("policy:{r}"))
-                .unwrap_or_else(|| "policy".into()),
+            by: match (&env.grant, env.verdict.as_str()) {
+                (Some(g), "allow") => format!("grant:{g}"),
+                _ => env
+                    .rule
+                    .as_deref()
+                    .map(|r| format!("policy:{r}"))
+                    .unwrap_or_else(|| "policy".into()),
+            },
             reason: env.why.clone(),
             context: context.clone(),
             call_id: None,
@@ -249,12 +295,16 @@ pub async fn end_orphaned_holds(store: &Store) {
 /// Writes the ask, notifies when no host is up to, and polls until an answer
 /// lands or the hold runs out. Returns `None` for everything but an answer: a
 /// lapse ends the row as `nobody` and the vendor's own dialog takes over.
+// The call is passed twice on purpose: as the words the inbox shows and as
+// the input a later grant offer counts by.
+#[allow(clippy::too_many_arguments)]
 pub async fn hold(
     store: &Store,
     session: &str,
     cwd: &Path,
     tool: &str,
     call: &str,
+    input: &serde_json::Value,
     wait: std::time::Duration,
     notify: bool,
 ) -> Option<String> {
@@ -273,6 +323,9 @@ pub async fn hold(
         payload: serde_json::json!({
             "tool": tool,
             "call": call,
+            // The call itself, so a person's repeated answer to it can be
+            // counted toward offering them a grant.
+            "input": input,
             "held_until": held_until.to_string(),
             "options": [
                 {"id": "allow", "label": "Allow"},
@@ -360,4 +413,149 @@ pub async fn hold(
             .await;
     }
     behavior
+}
+
+/// What a run tells a vendor's report of who decided: where it runs, its
+/// project, its launch surface, whether Devplane drives it. Read from the
+/// world before the report is applied.
+#[derive(Debug, Clone, Default)]
+pub struct ReportedRun {
+    pub cwd: Option<PathBuf>,
+    pub project: Option<crate::core::ProjectId>,
+    pub entrypoint: Option<String>,
+    pub driven: bool,
+}
+
+/// Fills a vendor's `tool_decision` report with what its attribution is
+/// computed from — the mode in force at the vendor's time, the session's
+/// kind, and the vendor's rule Devplane's reader names for the call — and
+/// returns the decision row it establishes, if any. Everything else stays an
+/// observation, with its reason computed when read.
+pub async fn vendor_report(
+    store: &Store,
+    run: &RunId,
+    facts: &ReportedRun,
+    event: Event,
+) -> (Event, Option<crate::core::Decision>) {
+    use crate::core::decision::{Attributed, ModeMark, SessionKind, attribute, mode_at};
+    let Event::VendorDecided {
+        vendor,
+        tool,
+        decision,
+        source,
+        call_id,
+        sequence,
+        at,
+        ..
+    } = event
+    else {
+        return (event, None);
+    };
+    let when = at.unwrap_or_else(jiff::Timestamp::now);
+
+    // The mode in force, by the vendor's own time; nothing seen is not known.
+    let marks: Vec<ModeMark> = store
+        .modes_seen(run, 256)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|e| match e.event {
+            Event::PermissionModeSeen { mode, at, sequence } => Some(ModeMark {
+                at: at.unwrap_or(e.at),
+                sequence,
+                mode,
+            }),
+            _ => None,
+        })
+        .collect();
+    let mode_in_force = mode_at(&marks, when, sequence);
+    let session = SessionKind::of(facts.entrypoint.as_deref(), facts.driven);
+
+    // The call as the hook saw it, which the vendor's settings are matched
+    // against; without it no rule can be named.
+    let started = match &call_id {
+        Some(id) => store.started_call(run, id).await.ok().flatten(),
+        None => None,
+    };
+    let matched = match (source.as_deref(), &started, &facts.cwd) {
+        (Some("config"), Some((hook_tool, input)), Some(cwd)) => {
+            let files = crate::observe::connect::vendor_rule_files(cwd);
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            crate::core::decision::vendor_rule_for(
+                &files,
+                cwd,
+                home.as_deref(),
+                hook_tool,
+                input,
+                decision == "accept",
+            )
+        }
+        _ => None,
+    };
+
+    let attributed = attribute(
+        source.as_deref(),
+        &decision,
+        &tool,
+        mode_in_force.as_deref(),
+        session,
+        matched.as_ref(),
+    );
+    let row = match (&attributed, source.as_deref()) {
+        (Attributed::Row(authority), Some(word)) => {
+            let call_tool = started.as_ref().map_or(tool.as_str(), |(t, _)| t.as_str());
+            let subject = started
+                .as_ref()
+                .and_then(|(t, input)| crate::core::policy::rule_content(t, input))
+                .unwrap_or_else(|| call_tool.to_string());
+            let outcome = match decision.as_str() {
+                "accept" => "allow",
+                "reject" => "deny",
+                other => other,
+            };
+            let mut d =
+                crate::core::Decision::new_at(*authority, "agent:tool.use", subject, outcome, when)
+                    .by_tool(call_tool)
+                    .for_run(run)
+                    .for_call(call_id.as_deref())
+                    .in_project(facts.project.clone())
+                    .reported_by(&vendor, word);
+            if let Some(r) = &matched {
+                d = d.because(r.named());
+            }
+            Some(d)
+        }
+        _ => None,
+    };
+    (
+        Event::VendorDecided {
+            vendor,
+            tool,
+            decision,
+            source,
+            call_id,
+            sequence,
+            at,
+            mode_in_force,
+            session,
+            matched,
+        },
+        row,
+    )
+}
+
+/// Appends a row written from a vendor's report, once per call: an exporter
+/// that retries a batch must not decide a call twice.
+pub async fn append_vendor_row(store: &Store, d: &crate::core::Decision) {
+    if let Some(call) = d.call_id.as_deref()
+        && store
+            .decisions_for_call(call)
+            .await
+            .is_ok_and(|rows| rows.iter().any(|r| r.vendor.is_some()))
+    {
+        return;
+    }
+    if let Err(e) = store.append_decision(d).await {
+        tracing::warn!(error = %e, "could not record a vendor's decision");
+    }
 }

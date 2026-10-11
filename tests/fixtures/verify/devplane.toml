@@ -1,0 +1,6 @@
+[gates]
+check = ["sh runner.sh"]
+timeout = "60s"
+
+[review.roles]
+tests = ["tests/**"]

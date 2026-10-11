@@ -1,6 +1,6 @@
 //! Seeing what is running: the board, a run, its transcript, and reaching it.
 
-use super::{fetch_run, raw, urlencode};
+use super::{fetch_run, ids, urlencode};
 use crate::render::{BOLD, DIM, ago, clip, paint, state_marker, surface};
 use crate::{client, render};
 use anyhow::{Context, Result};
@@ -134,22 +134,37 @@ fn session_label(run: &render::RunView, project: &str) -> String {
     clip(short, 10)
 }
 
-pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: bool) -> Result<()> {
+/// What `status` and `run list` narrow the board to. Never remembered.
+#[derive(Debug, Default)]
+pub struct Filter {
+    pub all: bool,
+    pub project: Option<String>,
+    pub needs_you: bool,
+}
+
+/// `devplane status` (and bare `devplane`): the machine's summary, then the
+/// sessions in play.
+pub async fn cmd_status(f: Filter, json: bool) -> Result<()> {
+    list(f, json, true).await
+}
+
+/// `devplane run list`: the sessions alone, grouped by project.
+pub async fn cmd_run_list(f: Filter, json: bool) -> Result<()> {
+    list(f, json, false).await
+}
+
+async fn list(f: Filter, json: bool, summary: bool) -> Result<()> {
+    let Filter {
+        all,
+        project,
+        needs_you,
+    } = f;
+    let project = project.as_deref();
     let c = crate::local::Reader::open().await?;
     // A filter may match dormant sessions, so it widens the fetch and narrows
     // here.
     let all = all || project.is_some() || needs_you;
-    let path = if all {
-        "/api/board?all=true"
-    } else {
-        "/api/board"
-    };
-    let mut board: render::BoardResponse = c.get_as(path).await?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&raw(&c, path).await?)?);
-        return Ok(());
-    }
+    let mut board = c.board(all).await?;
 
     if let Some(needle) = project {
         let needle = needle.to_lowercase();
@@ -158,11 +173,11 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
                 .as_deref()
                 .is_some_and(|p| p.to_lowercase().contains(&needle))
         });
-        if board.runs.is_empty() {
+        if board.runs.is_empty() && !json {
             println!(
                 "No session matches {}.\n\n{}",
                 paint(BOLD, needle.as_str()),
-                paint(DIM, "devplane ls --all lists every project.")
+                paint(DIM, "devplane status --all lists every project.")
             );
             return Ok(());
         }
@@ -171,10 +186,15 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
         board
             .runs
             .retain(|r| r.state == "waiting" || r.state == "failed");
-        if board.runs.is_empty() {
+        if board.runs.is_empty() && !json {
             println!("{}", paint(DIM, "Nothing is waiting on you."));
             return Ok(());
         }
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&board)?);
+        return Ok(());
     }
 
     if board.runs.is_empty() && board.summary.dormant > 0 {
@@ -187,7 +207,7 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
                     board.summary.dormant
                 )
             ),
-            paint(DIM, "devplane ls --all shows them.")
+            paint(DIM, "devplane status --all shows them.")
         );
         return Ok(());
     }
@@ -196,7 +216,7 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
         // Not Claude-only: any connected agent's session would be listed.
         println!(
             "No agent sessions are running.\n\n\
-             Start one — in Claude Code, Codex or Copilot after `devplane connect <agent>`, \n\
+             Start one — in Claude Code, Codex or Copilot after `devplane agent connect <agent>`, \n\
              or with `devplane change start` — and it appears here.{}",
             match crate::observe::locate::claude_binary() {
                 Some(_) => String::new(),
@@ -217,6 +237,10 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
 
     // A filtered view gets its own header, not the whole machine's.
     let filtered = project.is_some() || needs_you;
+    if !summary {
+        print_board(&board);
+        return Ok(());
+    }
     if filtered {
         let projects: std::collections::HashSet<&str> = board
             .runs
@@ -312,7 +336,7 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
             paint(
                 DIM,
                 &format!(
-                    "{} quiet (nothing heard for hours) — devplane ls --all",
+                    "{} quiet (nothing heard for hours) — devplane status --all",
                     s.dormant
                 )
             )
@@ -330,7 +354,7 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
             "{}",
             paint(
                 DIM,
-                "cost and context are blank — devplane connect claude adds them",
+                "cost and context are blank — devplane agent connect claude adds them",
             )
         );
     }
@@ -343,67 +367,67 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
 
 pub async fn cmd_show(run: &str, json: bool) -> Result<()> {
     let c = crate::local::Reader::open().await?;
-    let v = fetch_run(&c, run).await?;
+    let run = &ids::run(&c, run).await?;
+    let detail = fetch_run(&c, run).await?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&v)?);
+        // Through a `Value`, whose keys are sorted, as the host's own were.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::to_value(&detail)?)?
+        );
         return Ok(());
     }
+    let v = &detail.run;
 
-    let str_of = |k: &str| v[k].as_str().unwrap_or("-").to_string();
+    let or_dash = |s: Option<&str>| s.unwrap_or("-").to_string();
     println!(
         "{}  {}",
-        paint(BOLD, &str_of("name")),
-        paint(DIM, v["id"].as_str().unwrap_or(""))
+        paint(BOLD, &or_dash(v.name.as_deref())),
+        paint(DIM, v.id.as_str())
     );
-    println!("  state      {}", v["state"].as_str().unwrap_or("?"));
-    println!("  agent      {} ({})", str_of("agent"), str_of("mode"));
+    // A waiting run's state is an object on the wire, printed as `?`.
+    let state = match &v.state {
+        crate::core::RunState::Waiting(_) => "?",
+        s => s.as_str(),
+    };
+    println!("  state      {state}");
+    println!("  agent      {} ({})", v.agent, v.mode.as_str());
     // From the run's record, never parsed; a watched session says it carries
     // none rather than guessing from the diff.
-    println!("  tasks      {}", str_of("sent_says"));
-    for t in v["sent"].as_array().unwrap_or(&vec![]) {
-        println!(
-            "             {}",
-            paint(DIM, t["text"].as_str().unwrap_or(""))
-        );
+    println!("  tasks      {}", detail.sent_says);
+    for t in v.sent.iter().flatten() {
+        println!("             {}", paint(DIM, &t.text));
     }
-    println!("  where      {}", str_of("cwd"));
-    if let Some(w) = v["worktree"].as_str() {
-        println!("  worktree   {w}");
+    println!("  where      {}", v.cwd.display());
+    if let Some(w) = &v.worktree {
+        println!("  worktree   {}", w.display());
     }
-    println!("  model      {}", str_of("model"));
-    println!("  surface    {}", str_of("entrypoint"));
-    if let Some(pid) = v["pid"].as_u64() {
+    println!("  model      {}", or_dash(v.model.as_deref()));
+    println!("  surface    {}", or_dash(v.entrypoint.as_deref()));
+    if let Some(pid) = v.pid {
         println!("  pid        {pid}");
     }
 
-    let t = &v["totals"];
+    let t = &v.totals;
     println!(
         "  cost       ${:.4} over {} requests",
-        t["cost_usd"].as_f64().unwrap_or(0.0),
-        t["api_requests"].as_u64().unwrap_or(0)
+        t.cost_usd, t.api_requests
     );
-    println!(
-        "  tools      {} calls, {} errors",
-        t["tool_calls"].as_u64().unwrap_or(0),
-        t["errors"].as_u64().unwrap_or(0)
-    );
+    println!("  tools      {} calls, {} errors", t.tool_calls, t.errors);
     // What the session changed, as the status line reports it (or nothing).
-    let (added, removed) = (
-        t["lines_added"].as_u64().unwrap_or(0),
-        t["lines_removed"].as_u64().unwrap_or(0),
-    );
+    let (added, removed) = (t.lines_added, t.lines_removed);
     if added > 0 || removed > 0 {
         println!("  changed    +{added} −{removed} lines");
     }
     // A rate-limit percentage with no reset time is a number with no verb.
-    if let Some(pct) = t["rate_limit_percent"].as_f64() {
-        let window = match t["rate_limit_window"].as_str() {
+    if let Some(pct) = t.rate_limit_percent {
+        let window = match t.rate_limit_window.as_deref() {
             Some("five_hour") => "5-hour",
             Some("seven_day") => "7-day",
             Some("spend_limit") => "spend limit",
             other => other.unwrap_or("window"),
         };
-        let when = match t["rate_limit_resets_at"].as_i64() {
+        let when = match t.rate_limit_resets_at {
             Some(at) => match jiff::Timestamp::from_second(at) {
                 Ok(ts) => format!(", resets {}", render::until(ts)),
                 Err(_) => String::new(),
@@ -412,53 +436,44 @@ pub async fn cmd_show(run: &str, json: bool) -> Result<()> {
         };
         println!("  limits     {window} {pct:.0}% used{when}");
     }
-    if let Some(v) = v["claude_version"].as_str() {
+    if let Some(v) = &v.claude_version {
         println!("  harness    Claude Code {v}");
     }
 
-    if let Some(b) = v["blocked_on"].as_object() {
+    if let Some(b) = &v.blocked_on {
         println!("\n{}", paint(render::YELLOW, "blocked on"));
-        if let Some(m) = b.get("message").and_then(|m| m.as_str()) {
+        if let Some(m) = &b.message {
             println!("  {m}");
         }
-        for (n, o) in b
-            .get("options")
-            .and_then(|o| o.as_array())
-            .unwrap_or(&vec![])
-            .iter()
-            .enumerate()
-        {
-            println!("  {}. {}", n + 1, o.as_str().unwrap_or(""));
+        // Each option is an object on the wire, printed as an empty label.
+        for n in 0..b.options.len() {
+            println!("  {}. ", n + 1);
         }
     }
 
-    let empty = vec![];
     // What the agent says it is going to do, where it says anything.
-    let plan = v["plan"].as_array().unwrap_or(&empty);
-    if !plan.is_empty() {
+    if !v.plan.is_empty() {
         println!("\n{}", paint(BOLD, "plan"));
-        for step in plan {
-            let status = step["status"].as_str().unwrap_or("pending");
+        for step in &v.plan {
             println!(
                 "  {} {}",
-                match status {
+                match step.status.as_str() {
                     "completed" => paint(render::GREEN, "✓"),
                     "in_progress" => paint(render::BLUE, "▸"),
                     _ => paint(DIM, "·"),
                 },
-                clip(step["content"].as_str().unwrap_or(""), 74)
+                clip(&step.content, 74)
             );
         }
     }
 
-    let tools = v["recent_tools"].as_array().unwrap_or(&empty);
-    if !tools.is_empty() {
+    if !v.recent_tools.is_empty() {
         println!("\n{}", paint(BOLD, "recent tools"));
-        for t in tools.iter().rev().take(10) {
+        for t in v.recent_tools.iter().rev().take(10) {
             println!(
                 "  {:<14} {}",
-                t["tool"].as_str().unwrap_or("?"),
-                match t["ok"].as_bool() {
+                t.tool,
+                match t.ok {
                     Some(true) => paint(render::GREEN, "ok"),
                     Some(false) => paint(render::RED, "failed"),
                     None => paint(DIM, "running"),
@@ -467,8 +482,8 @@ pub async fn cmd_show(run: &str, json: bool) -> Result<()> {
         }
     }
 
-    // The tail of the conversation; `devplane watch <run>` is the live version.
-    if v["mode"] == "driven" {
+    // The tail of the conversation; `devplane run watch <run>` is the live version.
+    if v.mode == crate::core::RunMode::Driven {
         let said: Vec<render::Message> = c
             .get_as(&format!("/api/runs/{run}/messages?limit=6"))
             .await
@@ -492,7 +507,7 @@ pub async fn cmd_show(run: &str, json: bool) -> Result<()> {
                     clip(m.text.trim(), 70)
                 );
             }
-            println!("  {}", paint(DIM, &format!("devplane watch {run}")));
+            println!("  {}", paint(DIM, &format!("devplane run watch {run}")));
         }
     }
     Ok(())
@@ -520,16 +535,16 @@ fn print_message(role: &str, text: &str, thinking: bool) {
 /// Follows a driven run's conversation.
 async fn follow_run(run: &str, thinking: bool, history: i64) -> Result<()> {
     let c = client::Client::connect_running().await?;
+    let run = &ids::run(&crate::local::Reader::Host(c.clone()), run).await?;
 
     // Only a driven run has a conversation to follow; say so otherwise.
     let detail = fetch_run(&crate::local::Reader::Host(c.clone()), run).await?;
-    let mode = detail["mode"].as_str().unwrap_or("observed");
-    if mode != "driven" {
+    if detail.run.mode != crate::core::RunMode::Driven {
         anyhow::bail!(
             "that is a session Devplane watches, not one it drives, and the documented \
              channels carry no transcript: hooks report lifecycle and tool inputs, and \
              telemetry redacts prompts and responses.\n\n\
-             Its own window already has the conversation; resume it in a terminal:\n  devplane attach {run}"
+             Its own window already has the conversation; resume it in a terminal:\n  devplane run attach {run}"
         );
     }
 
@@ -564,17 +579,17 @@ async fn follow_run(run: &str, thinking: bool, history: i64) -> Result<()> {
             let Some(data) = line.strip_prefix("data: ") else {
                 continue;
             };
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+            let Ok(f) = serde_json::from_str::<StreamFrame>(data) else {
                 continue;
             };
-            match v["frame"].as_str() {
+            match f.frame.as_deref() {
                 Some("message") => print_message(
-                    v["role"].as_str().unwrap_or("agent"),
-                    v["text"].as_str().unwrap_or(""),
+                    f.role.as_deref().unwrap_or("agent"),
+                    f.text.as_deref().unwrap_or(""),
                     thinking,
                 ),
                 // The turn ending marks the answer complete, not paused.
-                Some("event") if v["event"]["type"] == "turn_ended" => {
+                Some("event") if f.event_type() == Some("turn_ended") => {
                     println!("{}", paint(DIM, "— turn ended —"));
                 }
                 _ => {}
@@ -588,13 +603,12 @@ async fn follow_run(run: &str, thinking: bool, history: i64) -> Result<()> {
 /// directory.
 pub async fn cmd_attach(run: &str) -> Result<()> {
     let c = client::Client::connect_running().await?;
+    let run = &ids::run(&crate::local::Reader::Host(c.clone()), run).await?;
     let v = fetch_run(&crate::local::Reader::Host(c.clone()), run).await?;
-    let dir = v["worktree"]
-        .as_str()
-        .or_else(|| v["cwd"].as_str())
-        .unwrap_or(".");
-    let session = v["session_id"].as_str().unwrap_or(run);
-    let mode = v["mode"].as_str().unwrap_or("observed");
+    let v = &v.run;
+    let dir = v.worktree.as_deref().unwrap_or(&v.cwd);
+    let session = v.session_id.as_str();
+    let mode = v.mode.as_str();
 
     let bin = crate::observe::locate::claude_binary()
         .context("no claude binary found; set DEVPLANE_CLAUDE_BIN")?;
@@ -611,7 +625,12 @@ pub async fn cmd_attach(run: &str) -> Result<()> {
         "{}",
         paint(
             DIM,
-            &format!("{} {} (in {dir})", bin.display(), args.join(" "))
+            &format!(
+                "{} {} (in {})",
+                bin.display(),
+                args.join(" "),
+                dir.display()
+            )
         )
     );
 
@@ -638,7 +657,7 @@ pub async fn cmd_attach(run: &str) -> Result<()> {
 
 /// The board in a browser. If no host is running, this process becomes the
 /// host in the foreground until ctrl-c.
-pub async fn cmd_open() -> Result<()> {
+pub async fn cmd_open(port: u16) -> Result<()> {
     if let Ok(c) = client::Client::connect_running().await {
         return open_browser(
             &format!("{}/?token={}", c.base_url(), c.token()),
@@ -666,7 +685,7 @@ pub async fn cmd_open() -> Result<()> {
             }
         }
     });
-    super::cmd_serve(crate::config::DEFAULT_PORT).await
+    super::cmd_serve(port).await
 }
 
 fn open_browser(url: &str, base: &str) -> Result<()> {
@@ -691,7 +710,7 @@ fn open_browser(url: &str, base: &str) -> Result<()> {
     Ok(())
 }
 
-/// `devplane watch [run]` — every event, or one driven run's conversation.
+/// `devplane run watch [run]` — every event, or one driven run's conversation.
 pub async fn cmd_watch(run: Option<&str>, thinking: bool, history: i64) -> Result<()> {
     if let Some(run) = run {
         return follow_run(run, thinking, history).await;
@@ -711,31 +730,23 @@ pub async fn cmd_watch(run: Option<&str>, thinking: bool, history: i64) -> Resul
             let Some(data) = line.strip_prefix("data: ") else {
                 continue;
             };
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+            let Ok(f) = serde_json::from_str::<StreamFrame>(data) else {
                 continue;
             };
             // Two kinds of frame, told apart on the wire rather than guessed at.
-            let (at, what) = match v["frame"].as_str() {
-                Some("message") => (
-                    v["at"].as_str().unwrap_or(""),
-                    format!(
-                        "{:<8} {}",
-                        v["role"].as_str().unwrap_or(""),
-                        clip(v["text"].as_str().unwrap_or("").trim(), 60)
-                    ),
+            let at = f.at.as_deref().unwrap_or("");
+            let what = match f.frame.as_deref() {
+                Some("message") => format!(
+                    "{:<8} {}",
+                    f.role.as_deref().unwrap_or(""),
+                    clip(f.text.as_deref().unwrap_or("").trim(), 60)
                 ),
-                _ => (
-                    v["at"].as_str().unwrap_or(""),
-                    v["event"]["type"].as_str().unwrap_or("?").to_string(),
-                ),
+                _ => f.event_type().unwrap_or("?").to_string(),
             };
             println!(
                 "{} {} {}",
                 paint(DIM, at.get(11..19).unwrap_or("")),
-                paint(
-                    render::MAGENTA,
-                    &clip(v["run_id"].as_str().unwrap_or(""), 8)
-                ),
+                paint(render::MAGENTA, &clip(f.run_id.as_deref().unwrap_or(""), 8)),
                 what
             );
         }
@@ -743,399 +754,53 @@ pub async fn cmd_watch(run: Option<&str>, thinking: bool, history: i64) -> Resul
     Ok(())
 }
 
-/// What GitHub says across every project: one answer, both halves.
-///
-/// Each list has its own row type: a PR row has every field an issue row
-/// needs, so a shared type would silently read one as the other.
-#[derive(Debug, serde::Deserialize)]
-struct ForgeList {
+/// One `data:` line of `/api/stream`: a [`crate::core::Frame`], read only as
+/// far as a terminal prints it. Every field is optional, so a line that is not
+/// a frame (a `resync`) still reads.
+#[derive(serde::Deserialize)]
+struct StreamFrame {
+    /// `message` or `event`.
     #[serde(default)]
-    viewer: Option<String>,
+    frame: Option<String>,
     #[serde(default)]
-    error: Option<String>,
+    at: Option<String>,
     #[serde(default)]
-    fetched_at: Option<String>,
-    /// The configured GitHub host's sign-in.
+    run_id: Option<String>,
     #[serde(default)]
-    github: serde_json::Value,
-    /// Every registered project and the state its GitHub is in.
+    role: Option<String>,
     #[serde(default)]
-    projects: Vec<ForgeProject>,
+    text: Option<String>,
     #[serde(default)]
-    issues: Vec<ForgeIssueRow>,
-    #[serde(default)]
-    pull_requests: Vec<ForgePrRow>,
+    event: Option<EventTag>,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct ForgeProject {
-    project_name: String,
-    #[serde(default)]
-    host: Option<String>,
-    #[serde(default)]
-    github: serde_json::Value,
-    /// Why the last poll failed; the rows are the last good ones.
-    #[serde(default)]
-    stale: Option<String>,
-    #[serde(default)]
-    issues_more: usize,
-    #[serde(default)]
-    pull_requests_more: usize,
+/// An event, by its `type` alone.
+#[derive(serde::Deserialize)]
+struct EventTag {
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct ForgeIssueRow {
-    project_name: String,
-    number: u64,
-    title: String,
-    url: String,
-    #[serde(default)]
-    labels: Vec<String>,
-    #[serde(default)]
-    assigned_to_me: bool,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct ForgePrRow {
-    project_name: String,
-    number: u64,
-    title: String,
-    url: String,
-    status: String,
-    #[serde(default)]
-    draft: bool,
-    #[serde(default)]
-    mine: bool,
-    #[serde(default)]
-    review_requested: bool,
-}
-
-/// What a sign-in state says instead of a list, if anything: not signed in,
-/// expired, rate limited or unreachable are never an empty list. `flag` is
-/// the `--host` a login for this host needs.
-fn sign_in_says(github: &serde_json::Value, flag: &str) -> Option<String> {
-    match github["state"].as_str()? {
-        "signed_out" => Some(format!(
-            "Not signed in to GitHub — run `devplane login github{flag}`, or sign in from Setup."
-        )),
-        "pending" => Some(format!(
-            "Signing in to GitHub — enter {} at {}.",
-            github["user_code"].as_str().unwrap_or("the code"),
-            github["verification_uri"]
-                .as_str()
-                .unwrap_or("GitHub's device page")
-        )),
-        "expired" => Some(format!(
-            "GitHub sign-in expired: GitHub no longer accepts the token — run `devplane login github{flag}`."
-        )),
-        "rate_limited" => Some(format!(
-            "GitHub's rate limit is spent; it resets at {} and the lists below are from before.",
-            github["until"]
-                .as_str()
-                .unwrap_or("a time GitHub did not say")
-        )),
-        "unreachable" => Some(format!(
-            "GitHub is unreachable ({}); the lists below are from the last read.",
-            github["why"].as_str().unwrap_or("no answer")
-        )),
-        _ => None,
+impl StreamFrame {
+    fn event_type(&self) -> Option<&str> {
+        self.event.as_ref()?.kind.as_deref()
     }
-}
-
-/// What the page as a whole says before any project: the configured host's
-/// sign-in, a failed poll, or nothing read yet. `false` when there is nothing
-/// to list below it.
-fn forge_preamble(list: &ForgeList) -> bool {
-    if let Some(says) = sign_in_says(&list.github, "") {
-        println!("{}\n", paint(render::YELLOW, &says));
-    }
-    if let Some(e) = &list.error {
-        println!(
-            "{}\n\n  {}\n",
-            paint(render::YELLOW, "GitHub could not be read."),
-            paint(DIM, e)
-        );
-        return false;
-    }
-    if list.fetched_at.is_none() {
-        println!(
-            "{}",
-            paint(
-                DIM,
-                "GitHub has not been read yet — the host polls it a few seconds after it starts."
-            )
-        );
-        return false;
-    }
-    if let Some(v) = &list.viewer {
-        println!("{}", paint(DIM, &format!("as {v} · what needs you first")));
-    }
-    true
-}
-
-/// What one project's heading says beside its name: why it has no rows, or
-/// why its rows might be old. `None` for a project read cleanly.
-fn project_says(p: &ForgeProject, default_host: Option<&str>) -> Option<String> {
-    let host = p.host.as_deref().unwrap_or("");
-    let flag = match (host, default_host) {
-        ("", _) => String::new(),
-        (h, Some(d)) if h == d => String::new(),
-        (h, _) => format!(" --host {h}"),
-    };
-    match p.github["state"].as_str() {
-        Some("not_github") => Some(format!(
-            "not a GitHub repository — {}",
-            p.github["why"].as_str().unwrap_or("no GitHub remote")
-        )),
-        Some("unknown") => Some("not read yet".into()),
-        Some("signed_in") | None => p.stale.as_ref().map(|e| format!("stale — {e}")),
-        Some(_) => sign_in_says(&p.github, &flag).map(|s| match &p.stale {
-            Some(e) => format!("{s} ({e})"),
-            None => s,
-        }),
-    }
-}
-
-/// Lists one half of the forge project by project: each heading with what
-/// its GitHub says, its rows, and how many GitHub counts past the page.
-fn print_by_project<R>(
-    list: &ForgeList,
-    rows: &[R],
-    name_of: impl Fn(&R) -> &str,
-    more_of: impl Fn(&ForgeProject) -> usize,
-    print_row: impl Fn(&R),
-    empty: &str,
-) {
-    let default_host = list.github["host"].as_str();
-    let mut printed = false;
-    let mut quiet = Vec::new();
-    for p in &list.projects {
-        let mine: Vec<&R> = rows
-            .iter()
-            .filter(|r| name_of(r) == p.project_name)
-            .collect();
-        let says = project_says(p, default_host);
-        // A project with no GitHub remote is named once at the end, not given
-        // a heading of its own.
-        if mine.is_empty() && p.github["state"] == "not_github" {
-            quiet.push(p.project_name.as_str());
-            continue;
-        }
-        if mine.is_empty() && says.is_none() && more_of(p) == 0 {
-            continue;
-        }
-        if printed {
-            println!();
-        }
-        printed = true;
-        match &says {
-            Some(s) => println!(
-                "{}  {}",
-                paint(BOLD, &p.project_name),
-                paint(render::YELLOW, s)
-            ),
-            None => println!("{}", paint(BOLD, &p.project_name)),
-        }
-        for r in &mine {
-            print_row(r);
-        }
-        if more_of(p) > 0 {
-            println!(
-                "  {}",
-                paint(
-                    DIM,
-                    &format!("… and {} more open at GitHub, not read", more_of(p))
-                )
-            );
-        }
-    }
-    if !printed {
-        println!("{}", paint(render::GREEN, empty));
-    }
-    if !quiet.is_empty() {
-        println!(
-            "\n{}",
-            paint(DIM, &format!("not on GitHub: {}", quiet.join(", ")))
-        );
-    }
-}
-
-/// One half of `/api/forge` under `--json`: the rows asked for, with the
-/// envelope that says how current they are — never the other half.
-fn forge_half(v: &serde_json::Value, rows: &str, more: &str) -> serde_json::Value {
-    let projects: Vec<serde_json::Value> = v["projects"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .map(|p| {
-                    serde_json::json!({
-                        "project": p["project"], "project_name": p["project_name"],
-                        "repo": p["repo"], "host": p["host"], "github": p["github"],
-                        "stale": p["stale"], "read_at": p["read_at"], more: p[more],
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    serde_json::json!({
-        "viewer": v["viewer"],
-        "error": v["error"],
-        "fetched_at": v["fetched_at"],
-        "github": v["github"],
-        "stale": v["stale"],
-        "projects": projects,
-        rows: v[rows],
-        more: v[more],
-    })
-}
-
-pub async fn cmd_forge_issues(json: bool) -> Result<()> {
-    let c = crate::local::Reader::open().await?;
-    let v = raw(&c, "/api/forge").await?;
-    if json {
-        return super::print_json(&forge_half(&v, "issues", "issues_more"));
-    }
-    let list: ForgeList = serde_json::from_value(v).context("reading /api/forge")?;
-    if !forge_preamble(&list) {
-        return Ok(());
-    }
-    print_by_project(
-        &list,
-        &list.issues,
-        |i| &i.project_name,
-        |p| p.issues_more,
-        |i| {
-            let mark = if i.assigned_to_me {
-                paint(render::YELLOW, "◆")
-            } else {
-                paint(DIM, "○")
-            };
-            let labels = if i.labels.is_empty() {
-                String::new()
-            } else {
-                format!("  [{}]", i.labels.join(", "))
-            };
-            println!(
-                "  {} #{:<5} {}{}",
-                mark,
-                i.number,
-                clip(&i.title, 64),
-                paint(DIM, &labels)
-            );
-            println!("    {}", paint(DIM, &i.url));
-        },
-        "No open issues on any registered project.",
-    );
-    println!(
-        "\n{}",
-        paint(
-            DIM,
-            "◆ assigned to you · devplane change start --issue <n> --project <project> turns one into a change"
-        )
-    );
-    Ok(())
-}
-
-pub async fn cmd_forge_prs(json: bool) -> Result<()> {
-    let c = crate::local::Reader::open().await?;
-    let v = raw(&c, "/api/forge").await?;
-    if json {
-        return super::print_json(&forge_half(&v, "pull_requests", "pull_requests_more"));
-    }
-    let list: ForgeList = serde_json::from_value(v).context("reading /api/forge")?;
-    if !forge_preamble(&list) {
-        return Ok(());
-    }
-    print_by_project(
-        &list,
-        &list.pull_requests,
-        |p| &p.project_name,
-        |p| p.pull_requests_more,
-        |p| {
-            let needs_me = p.review_requested
-                || (p.mine
-                    && matches!(
-                        p.status.as_str(),
-                        "failing" | "changes_requested" | "ready_to_merge"
-                    ));
-            let mark = if needs_me {
-                paint(render::YELLOW, "◆")
-            } else {
-                paint(DIM, "○")
-            };
-            let status = match p.status.as_str() {
-                "failing" => paint(render::RED, "red"),
-                "ready_to_merge" => paint(render::GREEN, "approved · green"),
-                "changes_requested" => paint(render::YELLOW, "changes requested"),
-                other => paint(DIM, &other.replace('_', " ")),
-            };
-            let who = if p.review_requested {
-                "  review asked of you"
-            } else if p.mine {
-                "  yours"
-            } else {
-                ""
-            };
-            println!(
-                "  {} #{:<5} {:<44} {}{}{}",
-                mark,
-                p.number,
-                clip(&p.title, 44),
-                status,
-                if p.draft {
-                    paint(DIM, " · draft")
-                } else {
-                    String::new()
-                },
-                paint(DIM, who)
-            );
-            println!("    {}", paint(DIM, &p.url));
-        },
-        "No open pull requests on any registered project.",
-    );
-    Ok(())
 }
 
 /// The sentence naming the vendors this machine cannot watch, composed from
-/// the table the board reads so `devplane ls` and the interface agree.
+/// the table the board reads so `devplane status` and the interface agree.
 fn unwatched_note() -> String {
     let w = crate::core::vendors::watching();
     if w.driven_only.is_empty() {
         return String::new();
     }
+    let (verb, them) = match w.driven_only.len() {
+        1 => ("appears", "it"),
+        _ => ("appear", "them"),
+    };
     format!(
-        "{} {} only when Devplane starts them.\nA session you opened yourself in one of those is not listed here.\n`devplane doctor` says what is watched, per channel.",
+        "{} {verb} only when Devplane starts {them}.\nA session you opened yourself in one of \
+         those is not listed here.\n`devplane doctor` says what is watched, per channel.",
         w.driven_only.join(", "),
-        if w.driven_only.len() == 1 {
-            "appears"
-        } else {
-            "appear"
-        }
     )
-}
-
-#[cfg(test)]
-mod forge_tests {
-    use super::forge_half;
-    use serde_json::json;
-
-    #[test]
-    fn each_forge_list_prints_its_own_half() {
-        let v = json!({
-            "viewer": "octocat", "fetched_at": "t", "github": {"state": "signed_in"},
-            "issues": [{"number": 7}], "pull_requests": [{"number": 2}],
-            "issues_more": 3, "pull_requests_more": 23,
-            "projects": [{"project_name": "app", "github": {"state": "signed_in"},
-                          "issues_more": 3, "pull_requests_more": 23}],
-        });
-        let issues = forge_half(&v, "issues", "issues_more");
-        let prs = forge_half(&v, "pull_requests", "pull_requests_more");
-        assert_ne!(issues, prs);
-        assert_eq!(issues["issues"][0]["number"], 7);
-        assert!(issues.get("pull_requests").is_none());
-        assert_eq!(prs["pull_requests_more"], 23);
-        assert!(prs.get("issues").is_none());
-        assert_eq!(prs["projects"][0]["pull_requests_more"], 23);
-        assert!(prs["projects"][0].get("issues_more").is_none());
-    }
 }

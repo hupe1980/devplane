@@ -1,16 +1,38 @@
 <script lang="ts">
   // What is configured on this machine: Devplane, its agent, the GitHub
-  // sign-in, your rules, and each project. Read-only but for the sign-in:
-  // each section names the file it read and the command that changes it.
+  // sign-in, your rules, and each project — with the first-run checklist on
+  // top while it has a step left, and *Declare a check* for a project with no
+  // gates. Every write here is a diff the person confirms.
   import { resource } from "../../lib/resource.svelte";
   import Failed from "../../lib/Failed.svelte";
   import Props from "../../lib/ui/Props.svelte";
   import Grid, { type Column } from "../../lib/ui/Grid.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
   import Pill from "../../lib/ui/Pill.svelte";
+  import Skeleton from "../../lib/Skeleton.svelte";
   import GitHubPanel, { type HostSignIn } from "./GitHubPanel.svelte";
   import { api } from "../../lib/api";
   import { copyText } from "../../lib/resource.svelte";
+  import { cursor } from "../../lib/cursor";
+  import { go } from "../../lib/route";
+  import Checklist from "./Checklist.svelte";
+  import Declare from "./Declare.svelte";
+  import Updates from "./Updates.svelte";
+
+  let {
+    focus = "",
+    view = "",
+    changeSurface = "",
+  }: {
+    /// `declare` opens Declare a check for the project named in `view`.
+    focus?: string;
+    view?: string;
+    changeSurface?: string;
+  } = $props();
+  const declaring = $derived(focus === "declare" && view ? view : "");
+  function toGitHub() {
+    document.getElementById("setup-github")?.scrollIntoView({ block: "center" });
+  }
 
   type ProjectRow = {
     id: string;
@@ -21,9 +43,9 @@
     declares_gates?: boolean;
     error?: string;
   };
+  const declareHref = (p: ProjectRow) => `#setup/declare/${encodeURIComponent(p.id)}`;
   type Setup = {
     machine?: { version?: string; home?: string; database?: string };
-    provider?: { name?: string; because?: string; vendor_supervision?: boolean };
     connect?: {
       settings_path?: string;
       hooks_installed?: string[];
@@ -79,9 +101,22 @@
   const hooks = $derived(data?.connect?.hooks_installed ?? []);
   const policy = $derived(data?.machine_policy ?? null);
   let selected = $state<string | null>(null);
+  let order = $state<string[]>([]);
+  $effect(() =>
+    cursor({
+      scope: "setup",
+      size: () => order.length,
+      at: () => order.indexOf(selected ?? ""),
+      go: (i) => (selected = order[i]),
+      open: (i) => {
+        const p = (data?.projects ?? []).find((x) => x.id === order[i]);
+        if (p) go(`#inbox/${encodeURIComponent(p.name)}`);
+      },
+    }),
+  );
   const columns: Column<ProjectRow>[] = [
     { key: "name", label: "Project", width: 180, sort: (r) => r.name },
-    { key: "trusted", label: "Trusted", width: 110, sort: (r) => (r.trusted ? 0 : 1) },
+    { key: "trusted", label: "Trusted", width: 140, sort: (r) => (r.trusted ? 0 : 1) },
     { key: "gates", label: "Gates", width: 130, sort: (r) => (r.declares_gates ? 0 : 1) },
     { key: "config", label: "devplane.toml", width: 150 },
     { key: "root", label: "Where", mono: true },
@@ -90,10 +125,18 @@
 
 <div class="page">
   <h1>Setup</h1>
+  {#if declaring}
+    <section class="card wide declare-at" aria-label="declare a check">
+      <h2><Icon name="gate" size={14} /> Declare a check</h2>
+      <Declare project={declaring} ondone={() => void read.reload()} />
+      <p><a href="#setup">Back to Setup</a></p>
+    </section>
+  {/if}
+  <Checklist {changeSurface} ongithub={toGitHub} />
   {#if read.phase === "failed" && read.failure}
     <Failed what="what is configured" failure={read.failure} />
   {:else if !data}
-    <p class="quiet">Reading the files…</p>
+    <Skeleton rows={5} />
   {:else}
     <div class="grid">
       <section class="card">
@@ -103,7 +146,6 @@
             { label: "Version", value: data.machine?.version ?? null, missing: "unknown" },
             { label: "Home", value: data.machine?.home ?? null, mono: true },
             { label: "Record", value: data.machine?.database ?? null, mono: true },
-            { label: "Sessions from", value: data.provider?.name ? `${data.provider.name}${data.provider.because ? ` — ${data.provider.because}` : ""}` : null },
           ]}
         />
       </section>
@@ -111,12 +153,12 @@
       <section class="card">
         <h2><Icon name="agent" size={14} /> Your agent</h2>
         {#if !data.connect}
-          <p class="quiet">No agent settings file was found. <code>devplane connect claude</code> writes the hooks, and <code>devplane disconnect claude</code> removes exactly what it wrote.</p>
+          <p class="quiet">No agent settings file was found. <code>devplane agent connect claude</code> writes the hooks, and <code>devplane agent disconnect claude</code> removes exactly what it wrote.</p>
         {:else}
           <Props
             rows={[
               { label: "Settings", value: data.connect.settings_path ?? null, mono: true },
-              { label: "Hooks", value: hooks.length ? hooks.join(", ") : null, missing: "none installed — devplane connect claude" },
+              { label: "Hooks", value: hooks.length ? hooks.join(", ") : null, missing: "none installed — devplane agent connect claude" },
               {
                 label: "Telemetry",
                 value: !data.connect.telemetry_endpoint ? "not exporting" : data.connect.telemetry_is_ours ? "to Devplane" : "to somebody else's collector — left alone",
@@ -126,9 +168,15 @@
         {/if}
       </section>
 
+      <section class="card" aria-label="update checks">
+        <h2><Icon name="refresh" size={14} /> Update checks</h2>
+        <Updates />
+      </section>
+
       {#if github.phase === "failed" && github.failure}
         <Failed what="the GitHub sign-in" failure={github.failure} />
       {:else}
+        <span id="setup-github" class="anchor"></span>
         <GitHubPanel hosts={github.data?.hosts ?? []} clientId={github.data?.client_id ?? true} {busy} {said} {signIn} {signOut} {copy} />
       {/if}
 
@@ -156,15 +204,18 @@
 
     <section class="projects">
       <h2><Icon name="folder" size={14} /> Projects <span>{data.projects?.length ?? 0}</span></h2>
+      {#each (data.projects ?? []).filter((p) => p.trusted && !p.error && !p.declares_gates) as p (p.id)}
+        <p class="nogates"><Icon name="alert" size={13} /> {p.name}: no gates declared — changes here cannot become verified. <a href={declareHref(p)}>Declare a check</a></p>
+      {/each}
       {#if (data.projects ?? []).length === 0}
-        <p class="quiet">None registered. A project is registered the first time an agent works in it, or with <code>devplane trust &lt;path&gt;</code>.</p>
+        <p class="quiet">None registered. A project is registered the first time an agent works in it, or with <code>devplane project trust &lt;path&gt;</code>.</p>
       {:else}
         <div class="frame">
-          <Grid id="setup-projects" {columns} rows={data.projects ?? []} key={(r) => r.id} bind:selected label="projects" dense>
+          <Grid id="setup-projects" {columns} rows={data.projects ?? []} key={(r) => r.id} bind:selected bind:order label="projects" dense>
             {#snippet cell(r, c)}
               {#if c.key === "name"}<b>{r.name}</b>
               {:else if c.key === "trusted"}<Pill word={r.trusted ? "trusted" : "not trusted"} as={r.trusted ? "none" : "wait"} />
-              {:else if c.key === "gates"}{#if r.error}<span class="fail">unreadable</span>{:else if r.declares_gates}<span class="ok">declared</span>{:else}<span class="quiet">none declared</span>{/if}
+              {:else if c.key === "gates"}{#if r.error}<span class="fail">unreadable</span>{:else if r.declares_gates}<span class="ok">check declared</span>{:else}<a href={declareHref(r)}>Declare a check</a>{/if}
               {:else if c.key === "config"}{r.config?.exists ? "present" : "absent"}
               {:else}{r.root}{/if}
             {/snippet}
@@ -191,7 +242,7 @@
   }
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(24rem, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(24rem, 100%), 1fr));
     gap: var(--s-3);
   }
   .card {
@@ -240,6 +291,7 @@
     flex-basis: 100%;
   }
   .rule {
+    overflow-wrap: anywhere;
     font-family: var(--mono);
     font-size: var(--t-xs);
     padding: 0.1rem 0.45rem;
@@ -252,6 +304,22 @@
   }
   .rule.ask {
     color: var(--wait);
+  }
+  .nogates {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem;
+    margin: 0;
+    color: var(--wait);
+    font-size: var(--t-sm);
+  }
+  .anchor {
+    display: none;
+  }
+  .declare-at p {
+    margin: 0;
+    font-size: var(--t-sm);
   }
   .projects {
     display: grid;
@@ -267,6 +335,11 @@
   code {
     font-family: var(--mono);
     font-size: var(--t-xs);
+    overflow-wrap: anywhere;
+  }
+  /* A state word is never cut: its pill keeps the width of its word. */
+  .page :global(.pill) {
+    min-width: max-content;
   }
   .file {
     margin: 0;

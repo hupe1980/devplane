@@ -1,13 +1,17 @@
 <script lang="ts">
   // The overview of a change: evidence in four cards, facts in a grid, history
   // on one axis. Each card states a fact and links the tab that holds the rest.
+  // An agent's stop claims are on the history's *agent* lane, open or closed;
+  // the open one is read in the header, above this.
   import { resource } from "../../lib/resource.svelte";
   import Failed from "../../lib/Failed.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
   import Props from "../../lib/ui/Props.svelte";
   import Timeline, { type Mark } from "../../lib/ui/Timeline.svelte";
   import { STATES } from "../../lib/State.svelte";
-  import { exit, ago, type Detail } from "./types";
+  import { weakLeads } from "../../lib/ChangeState.svelte";
+  import { exit, ago, taskLine, type Detail, type BearingReview } from "./types";
+  import Inline from "../../lib/ui/Inline.svelte";
 
   type Decision = { id: string; at: string; authority: string; action: string; outcome: string; subject: string };
   let { d, go }: { d: Detail; go: (view: string) => void } = $props();
@@ -31,8 +35,34 @@
       return { at: g.at, lane: "gates", label: `${g.gate} attempt ${g.attempt}: ${ok ? "passed" : "failed"}`, tone: ok ? ("done" as const) : ("fail" as const) };
     }),
     ...decisions.map((x) => ({ at: x.at, lane: "decisions", label: `${x.authority} · ${x.action} · ${x.outcome}`, tone: tone(x.authority) })),
+    // Every stop claim stays in the history under its run, open or closed:
+    // the agent's words, so the label says whose.
+    ...(d.claim_history ?? []).map((c) => ({
+      at: c.at,
+      lane: "agent",
+      label: `${c.says} — run ${c.run}${c.closed_says ? ` · closed: ${c.closed_says}` : ""}`,
+      tone: "wait" as const,
+    })),
     ...(d.archived_at ? [{ at: d.archived_at, lane: "change", label: STATES.archived.word, tone: "none" as const }] : []),
   ]);
+  // Who approved the pull request, as last read from the forge: the
+  // sentence as composed by the host, never reworded here.
+  const pr = $derived(d.pull_request ?? null);
+  const approvals = $derived(pr?.approvals ?? null);
+  const reading = $derived(approvals?.state === "current" ? approvals.reading : approvals?.state === "stale" ? approvals.last : null);
+  const kindWord = (b: BearingReview): string =>
+    b.kind === "person"
+      ? "a person's account"
+      : b.kind === "model"
+        ? reading?.modelWord === "model"
+          ? `${b.product ?? "a model"} (a model)`
+          : `could not be attributed (${b.product ?? "a model"})`
+        : b.kind === "bot"
+          ? "a bot account"
+          : `could not classify (type ${b.received ?? "?"})`;
+  const where = (b: BearingReview): string =>
+    b.onHead === "gone" || !b.commit ? "a commit that no longer exists" : `${b.commit.slice(0, 7)} · ${b.onHead === "head" ? "head" : "older"}`;
+  const decisionWord = (x?: string | null) => (x ? x.toLowerCase().replace(/_/g, " ") : null);
   const byAuthority = $derived(
     Object.entries(
       decisions.reduce<Record<string, number>>((m, x) => ((m[x.authority] = (m[x.authority] ?? 0) + 1), m), {}),
@@ -47,7 +77,7 @@
       {#if !d.gate}
         <span class="v quiet">No gate has run against this change.</span>
       {:else if d.gate.passed}
-        <span class="v" class:done={d.state === STATES.verified.word}>{d.gate.name} passed · attempt {d.gate.attempt}</span>
+        <span class="v" class:done={d.state === STATES.verified.word && !weakLeads(d.qualifier)}>{d.gate.name} exited zero · attempt {d.gate.attempt}</span>
       {:else}
         <span class="v fail">{d.gate.name} failed · {failing.length} of {d.gate.commands?.length ?? 0} commands</span>
         {#each failing.slice(0, 2) as c (c.command)}<code class="cmd">{c.command} — {exit(c.outcome)}</code>{/each}
@@ -56,20 +86,21 @@
     <button class="card" onclick={() => go("tasks")}>
       <span class="k"><Icon name="spec" size={14} /> Tasks</span>
       {#if d.counts}
-        <span class="v"><b>{d.counts.tasks}</b> tasks · <b>{d.counts.ticked}</b> ticked · {#if d.counts.seen_by_pass == null}no gates declared{:else}<b>{d.counts.seen_by_pass}</b> seen by a passing check{/if}</span>
-        {#if d.counts_says}<span class="s">{d.counts_says}</span>{/if}
+        <span class="v">{taskLine(d)}</span>
         {#if d.counts.ticked_unsent?.length}<span class="s wait">{d.counts.ticked_unsent.length} ticked that no run was sent</span>{/if}
       {:else}
-        <span class="v quiet">{d.spec ? "The specification has no tasks." : "No specification is attached."}</span>
+        <span class="v quiet">{#if d.plan?.no_progress}<Inline text={d.plan.no_progress} />{:else}{d.spec ? "The specification has no tasks." : "No specification is attached."}{/if}</span>
       {/if}
+      {#if d.planning_absent}<span class="s wait"><Inline text={d.planning_absent} /></span>{/if}
     </button>
     <button class="card" onclick={() => go("ledger")}>
       <span class="k"><Icon name="ledger" size={14} /> Decisions</span>
       {#if read.phase === "failed" && read.failure}
-        <span class="v fail">Not read: {read.failure.says}</span>
-        <span class="s"><code>{read.failure.tell}</code> tells more</span>
+        {#if read.failure.down}<span class="v quiet">Not read.</span>
+        {:else}<span class="v fail">Not read: <Inline text={read.failure.says} /></span>
+        <span class="s"><code>{read.failure.tell}</code> tells more</span>{/if}
       {:else if read.phase === "loading"}
-        <span class="v quiet">Reading…</span>
+        <span class="v quiet" aria-busy="true">…</span>
       {:else if decisions.length === 0}
         <span class="v quiet">Nothing has been decided about it.</span>
       {:else if decisions.length >= LIMIT}
@@ -78,6 +109,11 @@
       {:else}
         <span class="v"><b>{decisions.length}</b> recorded</span>
         <span class="s">{byAuthority.map(([a, n]) => `${n} by ${a}`).join(" · ")}</span>
+      {/if}
+      {#if d.mode_statement}
+        <!-- The session's mode, as text: a mode that decides without the
+             person is the sentence itself, never an icon or a count. -->
+        <span class="s" class:fail={d.mode_statement.reading === "decides_without_you"} title={d.mode_statement.mode ?? undefined}>{d.mode_statement.sentence}{#if d.mode_statement.at} · {ago(d.mode_statement.at)}{/if}</span>
       {/if}
     </button>
     <button class="card" onclick={() => go("agent")}>
@@ -92,9 +128,41 @@
       <Icon name="alert" size={16} />
       <div>
         <b>The specification moved under a run.</b>
-        {#each d.drifts ?? [] as x, i (i)}<p>{x.says}</p>{/each}
+        {#each d.drifts ?? [] as x, i (i)}<p><Inline text={x.says} /></p>{/each}
         <button onclick={() => go("tasks")}>Decide in Tasks</button>
       </div>
+    </section>
+  {/if}
+
+  {#if pr}
+    <section class="approvals" aria-label="Who approved the pull request">
+      <h2>Pull request approvals</h2>
+      {#if reading}
+        <p class="sentence">{reading.sentence}</p>
+        {#if reading.requiredSays}<p class="s">{reading.requiredSays}</p>{/if}
+      {:else if approvals?.state === "not_read"}
+        <p class="sentence quiet">Approvals not read: {approvals.why}</p>
+      {:else}
+        <p class="sentence quiet">Approvals not read yet.</p>
+      {/if}
+      {#if decisionWord(pr.review_decision)}<p class="s">GitHub says: {decisionWord(pr.review_decision)}</p>{/if}
+      {#if reading && reading.bearing.length > 0}
+        <ul class="reviewers">
+          {#each reading.bearing as b, i (i)}
+            <li>
+              <span class="who" title={b.account?.login ?? "no user"}>{b.account?.login ?? "no user"}</span>
+              <span class="kind" class:wait={b.kind === "model" && reading.modelWord === "unattributed"}>{kindWord(b)}</span>
+              <span class="state">{b.state.toLowerCase().replace(/_/g, " ")}</span>
+              <code class="at">{where(b)}</code>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      {#if approvals?.state === "stale"}
+        <p class="s wait">As of {ago(approvals.last.readAt)} — {approvals.why}</p>
+      {:else if reading}
+        <p class="s">Read {ago(reading.readAt)}{reading.afterMerge ? ", after the merge" : ""}</p>
+      {/if}
     </section>
   {/if}
 
@@ -120,21 +188,10 @@
     <h2>History</h2>
     <!-- The decisions lane is empty because it was not read, not because
          nothing was decided. -->
-    {#if read.failure}<Failed what="the decisions" failure={read.failure} at={read.at} stale={read.data !== null} />{/if}
-    <Timeline {marks} lanes={["change", "gates", "decisions"]} />
+    {#if read.failure && !(read.failure.down && read.data === null)}<Failed what="the decisions" failure={read.failure} at={read.at} stale={read.data !== null} />{/if}
+    <Timeline {marks} lanes={(d.claim_history ?? []).length ? ["change", "agent", "gates", "decisions"] : ["change", "gates", "decisions"]} />
   </section>
 
-  {#if (d.reports ?? []).length > 0}
-    <section class="reports">
-      <h2>Reports filed <span class="n">{d.reports?.length}</span></h2>
-      {#each d.reports ?? [] as r (r.id)}
-        <div class="report">
-          <span>to <b>{r.target_says}</b> — {r.state_says}</span> <span class="quiet">{r.age_says}</span>
-          <pre>{r.quoted}</pre>
-        </div>
-      {/each}
-    </section>
-  {/if}
 </div>
 
 <style>
@@ -146,13 +203,13 @@
   }
   .cards,
   .alert,
-  .history,
-  .reports {
+  .approvals,
+  .history {
     grid-column: 1;
   }
   .facts {
     grid-column: 2;
-    grid-row: 1 / span 3;
+    grid-row: 1 / span 4;
   }
   .cards {
     display: grid;
@@ -221,6 +278,46 @@
     border-radius: var(--radius-lg);
     background: var(--panel);
   }
+  .approvals {
+    padding: var(--s-3) var(--s-4);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    background: var(--panel);
+    min-width: 0;
+  }
+  .approvals p {
+    margin: 0 0 var(--s-2);
+  }
+  .sentence {
+    font-size: var(--t-sm);
+    color: var(--ink);
+    overflow-wrap: anywhere;
+  }
+  .reviewers {
+    list-style: none;
+    margin: 0 0 var(--s-2);
+    padding: 0;
+    display: grid;
+    gap: var(--s-1);
+  }
+  .reviewers li {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s-1) var(--s-3);
+    font-size: var(--t-xs);
+    color: var(--dim);
+    min-width: 0;
+  }
+  .who {
+    color: var(--ink);
+    max-width: 16rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .at {
+    font-family: var(--mono);
+  }
   .alert {
     display: flex;
     gap: var(--s-3);
@@ -238,22 +335,6 @@
   .alert button {
     margin-top: var(--s-2);
     font-size: var(--t-sm);
-  }
-  .report {
-    padding: var(--s-2) 0;
-    border-bottom: 1px solid var(--line);
-    font-size: var(--t-sm);
-  }
-  .report pre {
-    margin: var(--s-1) 0 0;
-    padding-left: var(--s-3);
-    border-left: 2px solid var(--line);
-    color: var(--dim);
-    font-size: var(--t-xs);
-    white-space: pre-wrap;
-  }
-  .n {
-    color: var(--faint);
   }
   @container (max-width: 70rem) {
     .grid {

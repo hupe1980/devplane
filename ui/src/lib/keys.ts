@@ -14,18 +14,32 @@ export type Binding = {
   action: string;
   /// What `?` prints. Never empty.
   label: string;
+  /// A key that acts on the item the surface has selected, not on the
+  /// surface: `?` lists these first, under *this item*.
+  item?: boolean;
 };
+
+/// Chords the browser or the window takes before the page sees them. A
+/// binding on one would be a key the help sheet lies about, so `bind()`
+/// refuses it.
+export const RESERVED = ["Mod+w", "Mod+t", "Mod+n", "Mod+l", "Mod+r", "Mod+q", "Mod+Tab"] as const;
 
 const bindings: Binding[] = [];
 /// A listener says whether it took the action: the first that does ends the
-/// dispatch, so a surface's own answer to `leave` beats the shell's.
-type Listener = (surface: string) => boolean | void;
+/// dispatch, so a surface's own answer to `leave` beats the shell's. It is
+/// told the combo that ran it, so one action can stand for a row of keys
+/// (`1`–`9` choose option N).
+type Listener = (surface: string, combo: string) => boolean | void;
 const listeners = new Map<string, Set<Listener>>();
 
 /// Registers one binding, or throws naming the pair it collides with.
 export function bind(b: Binding): void {
   if (!b.label.trim()) throw new Error(`${b.surface}: ${b.combo} (${b.action}) has no label`);
   const combo = normalise(b.combo);
+  const reserved = RESERVED.find((r) => r.toLowerCase() === combo.toLowerCase());
+  if (reserved) {
+    throw new Error(`${b.surface}: ${b.combo} ("${b.label}") takes ${reserved}, which the browser keeps for itself`);
+  }
   const same = bindings.find((x) => x.combo === combo && x.surface === b.surface);
   if (same) {
     throw new Error(
@@ -36,6 +50,17 @@ export function bind(b: Binding): void {
   if (global && b.surface !== "global") {
     throw new Error(
       `${b.surface} rebinds ${b.combo}, which is global: "${global.label}" (${global.action}) against "${b.label}" (${b.action})`,
+    );
+  }
+  // A mode (`change:review`) may rebind only its surface's list keys, which
+  // it does by design; any other key of the surface it takes is a collision.
+  const [parent, mode] = b.surface.split(":");
+  const over = mode
+    ? bindings.find((x) => x.surface === parent && x.combo === combo)
+    : bindings.find((x) => x.surface.startsWith(`${b.surface}:`) && x.combo === combo);
+  if (over && !LIST_COMBOS.includes(combo)) {
+    throw new Error(
+      `${b.combo} is bound in ${b.surface} ("${b.label}", ${b.action}) and in ${over.surface} ("${over.label}", ${over.action}); a mode may rebind only its surface's list keys`,
     );
   }
   const shadowed = b.surface === "global" ? bindings.find((x) => x.combo === combo) : undefined;
@@ -52,12 +77,63 @@ export function all(): readonly Binding[] {
   return bindings;
 }
 
-/// What `?` prints for a surface: the globals, then the surface's own.
+/// A surface's current mode, where one region of it takes keys the rest of
+/// it binds differently: a change's Review tab moves hunks with `j`/`k` while
+/// its list moves changes with them. A mode is a scope `<surface>:<mode>`
+/// whose bindings win over the surface's own while it is set.
+const modes = new Map<string, string>();
+
+/// Sets a surface's mode; returns the clear, for an `$effect`.
+export function setMode(surface: string, mode: string): () => void {
+  modes.set(surface, mode);
+  return () => {
+    if (modes.get(surface) === mode) modes.delete(surface);
+  };
+}
+
+/// The scopes a key on `surface` is looked up in, most specific first.
+function scopes(surface: string): string[] {
+  const m = modes.get(surface);
+  return [...(m ? [`${surface}:${m}`] : []), surface, "global"];
+}
+
+/// What `?` prints for a surface: the globals, then the surface's own, then
+/// its current mode's — a key the mode rebinds is listed once, as the mode's.
 export function help(surface: string): Binding[] {
+  const m = modes.get(surface);
+  const own = m ? bindings.filter((b) => b.surface === `${surface}:${m}`) : [];
+  const taken = new Set(own.map((b) => b.combo));
   return [
     ...bindings.filter((b) => b.surface === "global"),
-    ...bindings.filter((b) => b.surface === surface),
+    ...bindings.filter((b) => b.surface === surface && !taken.has(b.combo)),
+    ...own,
   ];
+}
+
+/// A row of the help sheet: one binding, or several that run the same action
+/// with the same label (`1`–`9`), listed once with every combo.
+export type SheetRow = Binding & { combos: string[] };
+
+/// What `?` prints for a surface, in the order a person reaches for it: the
+/// keys on the selected item, then the surface's (its current mode's first),
+/// then the keys that work everywhere. A group with nothing in it is left out.
+export function sheet(surface: string): { title: string; keys: SheetRow[] }[] {
+  const rows = (keys: Binding[]): SheetRow[] => {
+    const out: SheetRow[] = [];
+    for (const b of keys) {
+      const same = out.find((r) => r.surface === b.surface && r.action === b.action && r.label === b.label);
+      if (same) same.combos.push(b.combo);
+      else out.push({ ...b, combos: [b.combo] });
+    }
+    return out;
+  };
+  const keys = help(surface);
+  const groups = [
+    { title: "This item", keys: rows(keys.filter((b) => b.surface !== "global" && b.item)) },
+    { title: "This surface", keys: rows(keys.filter((b) => b.surface !== "global" && !b.item)) },
+    { title: "Everywhere", keys: rows(keys.filter((b) => b.surface === "global")) },
+  ];
+  return groups.filter((g) => g.keys.length > 0);
 }
 
 /// Subscribes to an action by name. Returns the unsubscribe.
@@ -74,11 +150,11 @@ export function onAction(action: string, fn: Listener): () => void {
 }
 
 /// Runs an action by name, as a key would; whether a listener took it.
-export function run(action: string, surface: string): boolean {
+export function run(action: string, surface: string, combo = ""): boolean {
   const set = listeners.get(action);
   if (!set || set.size === 0) return false;
   for (const fn of set) {
-    if (fn(surface) === true) return true;
+    if (fn(surface, combo) === true) return true;
   }
   return false;
 }
@@ -207,28 +283,36 @@ export function typing(e: KeyboardEvent): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable;
 }
 
-/// Whether a combo still fires while text is being typed: `Esc`, and a
-/// chord held with ⌘/Ctrl or ⌥/Alt, which types nothing. A bare key never
-/// does, and a modified one only when it is bound — ⌘C stays the field's.
-const fromField = (c: string) => c === "Esc" || c.startsWith("Mod+") || c.startsWith("Alt+");
+/// Whether a combo still fires while text is being typed: `Esc`, and a bound
+/// ⌘/Ctrl chord, which types nothing — ⌘C stays the field's because it is not
+/// bound. A bare key never does, and neither does an ⌥/Alt chord: on a Mac ⌥
+/// composes a character (⌥3 is `£`, ⌥W is `∑`), so the field owns it.
+export const fromField = (c: string): boolean => c === "Esc" || c.startsWith("Mod+");
 
 /// Dispatches one key event for the surface on screen; returns whether a
-/// binding took it. While an input has focus only `Esc` and bound ⌘/⌥
+/// binding took it. While an input has focus only `Esc` and bound ⌘/Ctrl
 /// chords fire.
 export function dispatch(surface: string, e: KeyboardEvent): boolean {
   // An IME is composing: the key belongs to the composition.
   if (e.isComposing) return false;
   const c = combo(e);
-  const scoped = (x: Binding) => x.surface === surface || x.surface === "global";
+  const within = scopes(surface);
+  /// Runs the combo in the most specific scope that binds it and takes it; a
+  /// mode's listener that declines falls through to the surface's key.
+  const fire = (k: string): boolean => {
+    for (const s of within) {
+      const hit = bindings.find((b) => b.surface === s && b.combo === k);
+      if (hit && run(hit.action, surface, k)) {
+        e.preventDefault();
+        return true;
+      }
+    }
+    return false;
+  };
   if (typing(e)) {
     if (!fromField(c)) return false;
     pending = null;
-    const hit = bindings.find((b) => scoped(b) && b.combo === c);
-    if (hit && run(hit.action, surface)) {
-      e.preventDefault();
-      return true;
-    }
-    return false;
+    return fire(c);
   }
   if (native(e, c)) return false;
 
@@ -236,23 +320,15 @@ export function dispatch(surface: string, e: KeyboardEvent): boolean {
   if (pending && now - pendingAt < CHORD_MS) {
     const chord = `${pending} ${c}`;
     pending = null;
-    const hit = bindings.find((b) => scoped(b) && b.combo === chord);
-    if (hit && run(hit.action, surface)) {
-      e.preventDefault();
-      return true;
-    }
+    if (fire(chord)) return true;
   }
   pending = null;
 
   // Only a key a listener took is kept from the page; one nobody answered
   // (a list key with no list on screen) scrolls or types as it would.
-  const hit = bindings.find((b) => scoped(b) && b.combo === c);
-  if (hit && run(hit.action, surface)) {
-    e.preventDefault();
-    return true;
-  }
+  if (fire(c)) return true;
   // The first half of a chord this surface knows.
-  if (bindings.some((b) => scoped(b) && b.combo.startsWith(`${c} `))) {
+  if (bindings.some((b) => within.includes(b.surface) && b.combo.startsWith(`${c} `))) {
     pending = c;
     pendingAt = now;
     e.preventDefault();
@@ -261,11 +337,15 @@ export function dispatch(surface: string, e: KeyboardEvent): boolean {
   return false;
 }
 
+
 // The keys every surface has. `?` and `Esc` are the shell's; the palette's
 // opener is bound here and answered by the palette, which subscribes to it.
 bind({ surface: "global", combo: "Mod+k", action: "open-palette", label: "command palette" });
 bind({ surface: "global", combo: "?", action: "help", label: "keys bound here" });
 bind({ surface: "global", combo: "Esc", action: "leave", label: "leave: close the help, the palette or the new-change form" });
+
+/// The keys `bindList` binds: the only ones a mode may take from its surface.
+export const LIST_COMBOS: readonly string[] = ["Down", "j", "Up", "k", "Enter", "g g", "G"];
 
 /// The list keys, for a surface that shows a list and answers them through
 /// `lib/cursor`. Bound per surface, so each is in exactly one scope and `?`

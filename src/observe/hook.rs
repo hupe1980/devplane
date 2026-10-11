@@ -32,6 +32,11 @@ pub struct HookPayload {
     pub tool_name: Option<String>,
     #[serde(default)]
     pub tool_input: Option<Value>,
+    /// `PreToolUse`, `PostToolUse`, `PermissionDenied`: the vendor's id for
+    /// the call, the same one its `tool_decision` telemetry carries.
+    /// `PermissionRequest` has none.
+    #[serde(default)]
+    pub tool_use_id: Option<String>,
     #[serde(default)]
     pub tool_response: Option<Value>,
     /// `PostToolUse` / `PostToolUseFailure`: how long the tool itself ran,
@@ -177,6 +182,8 @@ pub fn to_events(p: &HookPayload) -> HookOutcome {
     {
         out.events.push(Event::PermissionModeSeen {
             mode: raw.to_string(),
+            at: None,
+            sequence: None,
         });
     }
     out
@@ -231,7 +238,9 @@ fn to_events_inner(p: &HookPayload) -> HookOutcome {
                 // Under the parent's session id: only the main thread moving
                 // on ends a question the main thread asked.
                 agent_id: p.agent_id.clone().filter(|a| !a.is_empty()),
-                call_id: None,
+                // The vendor's id for the call, which its telemetry repeats:
+                // how a report of who decided finds what the call was.
+                call_id: p.tool_use_id.clone().filter(|c| !c.is_empty()),
             })
         }
 
@@ -504,6 +513,12 @@ impl PermissionResponse {
         Self::decide("allow", None)
     }
 
+    /// Carries the person's own grant to a dialog that was about to ask
+    /// them: their rule, written in their file, answering in advance.
+    pub fn by_the_persons_grant() -> Self {
+        Self::decide("allow", None)
+    }
+
     pub fn deny(reason: impl Into<String>) -> Self {
         Self::decide("deny", Some(reason.into()))
     }
@@ -554,8 +569,8 @@ impl PreToolUseResponse {
         Self::decide("deny", reason.into())
     }
 
-    /// Force a prompt, in every mode. The only way a project's `always_ask`
-    /// rule reaches a session running in auto mode.
+    /// Force a prompt, in every mode. The only way a project's `ask` rule
+    /// reaches a session running in auto mode.
     pub fn ask(reason: impl Into<String>) -> Self {
         Self::decide("ask", reason.into())
     }
@@ -611,15 +626,16 @@ pub fn describe_call(tool: &str, input: &serde_json::Value) -> String {
 
 /// Turns a verdict into what a Claude Code `PermissionRequest` hook returns.
 ///
-/// One place, so nothing answering beside the `command` hook can drift. There
-/// is no allow arm: Devplane prohibits, defers and reports; it never claims
-/// the vendor would have said yes.
+/// One place, so nothing answering beside the `command` hook can drift. The
+/// one allow is the person's own grant, answering a dialog that was about to
+/// ask them; Devplane never claims the vendor would have said yes.
 pub fn permission_reply(verdict: &crate::core::Verdict) -> PermissionResponse {
     use crate::core::Verdict;
     match verdict {
         Verdict::Deny { rule } => {
             PermissionResponse::deny(format!("denied by Devplane policy rule {rule}"))
         }
+        Verdict::Allow { .. } => PermissionResponse::by_the_persons_grant(),
         // The dialog is already on its way to a person, which is what `ask`
         // and `unresolved` want, so the reply equals `undecided`. The verdict
         // is still recorded: the three are different facts.
@@ -633,7 +649,7 @@ pub fn permission_reply(verdict: &crate::core::Verdict) -> PermissionResponse {
 ///
 ///
 /// Only ever a prohibition: an `allow` would skip the permission system,
-/// auto-mode classifier included.
+/// auto-mode classifier included — so even a person's grant is no answer here.
 pub fn pre_tool_use_reply(verdict: &crate::core::Verdict) -> PreToolUseResponse {
     use crate::core::Verdict;
     match verdict {
@@ -649,7 +665,7 @@ pub fn pre_tool_use_reply(verdict: &crate::core::Verdict) -> PreToolUseResponse 
         Verdict::Unresolved { why } => PreToolUseResponse::ask(format!(
             "Devplane cannot tell whether a prohibition covers this: {why}"
         )),
-        Verdict::Undecided => PreToolUseResponse::undecided(),
+        Verdict::Undecided | Verdict::Allow { .. } => PreToolUseResponse::undecided(),
     }
 }
 

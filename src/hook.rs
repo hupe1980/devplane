@@ -51,7 +51,7 @@ pub fn agent_session() -> Option<&'static str> {
 /// Why an allowing answer from inside an agent session is refused.
 ///
 ///
-/// This stops an agent approving its own permission via `devplane answer
+/// This stops an agent approving its own permission via `devplane inbox answer
 /// --allow` in its shell. It does not stop one that unsets these variables, nor
 /// a direct call to the HTTP API with the token in `~/.devplane/token`.
 pub fn refuse_self_answer(var: &str) -> String {
@@ -160,6 +160,22 @@ fn answer(text: &str) {
     let _ = out.flush();
 }
 
+/// A store written by another schema is state the gate cannot read. Where
+/// rules are in force the call is refused ([`fail`]), as for any unreadable
+/// state; the hook never sets the store aside, which only a person's own
+/// command or host does.
+fn refuse_on_skew(cache: &PolicyCache, dir: Option<&Path>) {
+    let skew = crate::config::db_path()
+        .ok()
+        .and_then(|p| crate::store::Store::schema_on_disk(&p))
+        .and_then(crate::store::Store::skew);
+    if let Some(why) = skew
+        && !cache.is_empty_at(dir)
+    {
+        fail(&why);
+    }
+}
+
 /// The store, opened with a short lock wait. `None` when it will not open.
 async fn open_store() -> Option<crate::store::Store> {
     let path = crate::config::db_path().ok()?;
@@ -196,6 +212,10 @@ async fn decide_claude(body: Option<&str>, source: crate::core::event::Source) -
         "PreToolUse" | "PermissionRequest"
     );
     DECIDING.store(deciding, std::sync::atomic::Ordering::SeqCst);
+    // `devplane doctor`'s probe asks about the policy path, which writes nothing.
+    if deciding && payload.session_id != crate::observe::hook::PROBE_SESSION {
+        refuse_on_skew(&cache, payload.cwd.as_deref());
+    }
     if !deciding {
         // An observation: written down, and the answer is silence.
         answer("{}");
@@ -208,7 +228,17 @@ async fn decide_claude(body: Option<&str>, source: crate::core::event::Source) -
     let tool = payload.tool_name.clone().unwrap_or_default();
     let input = payload.tool_input.clone().unwrap_or(Value::Null);
     let pre = payload.hook_event_name == "PreToolUse";
-    let verdict = judge(&cache, payload.cwd.as_deref(), &tool, &input);
+    let mut verdict = judge(&cache, payload.cwd.as_deref(), &tool, &input);
+    // A `PermissionRequest` means a person was about to be asked, so the
+    // person's own grant may answer — only there, only after every
+    // prohibition, question and doubt, and never for Codex.
+    if !pre
+        && verdict == Verdict::Undecided
+        && source == crate::core::event::Source::Hook
+        && let Some(dir) = payload.cwd.as_deref()
+    {
+        verdict = cache.decide(dir, &tool, &input);
+    }
 
     // `PreToolUse` fires on every call and carries only a prohibition or a
     // question; `PermissionRequest` means a person was about to be asked, so
@@ -322,6 +352,7 @@ async fn hold_for_a_person(
         dir,
         tool,
         &crate::observe::hook::describe_call(tool, input),
+        input,
         hold,
         !host_up,
     )
@@ -352,6 +383,7 @@ async fn decide_copilot(body: Option<&str>) -> Result<()> {
     };
     let tool = payload.tool();
     let dir = payload.cwd.as_deref();
+    refuse_on_skew(&cache, dir);
     // `toolArgs` is an object or a JSON string of one; anything else is a
     // question wherever a rule speaks about the tool.
     let (input, verdict) = match payload.readable_input() {
@@ -372,7 +404,8 @@ async fn decide_copilot(body: Option<&str>) -> Result<()> {
         Verdict::Ask { rule } => GateReply::ask(format!("{rule} asks that a person decides this")),
         // Never folded into `undecided`: unreadable means a person decides.
         Verdict::Unresolved { why } => GateReply::ask(format!("{why}; a person decides this")),
-        Verdict::Undecided => GateReply::undecided(),
+        // Copilot's hook fires on every call: a grant never answers there.
+        Verdict::Undecided | Verdict::Allow { .. } => GateReply::undecided(),
     };
     answer(&reply.to_json().to_string());
     report(
@@ -408,6 +441,7 @@ async fn report(
         source,
         verdict: verdict.as_str().to_string(),
         rule: verdict.rule().map(str::to_string),
+        grant: verdict.grant().map(|g| g.name()),
         server_source: None,
         why: verdict.why().map(str::to_string),
         subject,

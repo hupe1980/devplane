@@ -1,0 +1,80 @@
+{
+  "changes": [
+    {
+      "name": ".draft",
+      "completedTasks": 0,
+      "totalTasks": 1,
+      "status": "in-progress"
+    },
+    {
+      "name": "crlf",
+      "completedTasks": 1,
+      "totalTasks": 2,
+      "status": "in-progress"
+    },
+    {
+      "name": "custom-schema",
+      "completedTasks": 1,
+      "totalTasks": 2,
+      "status": "in-progress"
+    },
+    {
+      "name": "done-padded",
+      "completedTasks": 2,
+      "totalTasks": 3,
+      "status": "in-progress"
+    },
+    {
+      "name": "hidden-boxes",
+      "completedTasks": 2,
+      "totalTasks": 6,
+      "status": "in-progress"
+    },
+    {
+      "name": "link-bullet",
+      "completedTasks": 1,
+      "totalTasks": 2,
+      "status": "in-progress"
+    },
+    {
+      "name": "list-forms",
+      "completedTasks": 3,
+      "totalTasks": 5,
+      "status": "in-progress"
+    },
+    {
+      "name": "mobile",
+      "completedTasks": 0,
+      "totalTasks": 0,
+      "status": "no-tasks",
+      "nested": [
+        "mobile/refresh-token"
+      ]
+    },
+    {
+      "name": "no-tasks",
+      "completedTasks": 0,
+      "totalTasks": 0,
+      "status": "no-tasks"
+    },
+    {
+      "name": "open-markers",
+      "completedTasks": 1,
+      "totalTasks": 4,
+      "status": "in-progress"
+    }
+  ],
+  "warnings": [
+    {
+      "code": "nested_change_directory",
+      "name": "mobile",
+      "nested": [
+        "mobile/refresh-token"
+      ],
+      "message": "\"mobile\" is not a change: it is a folder wrapping openspec/changes/mobile/refresh-token/. A change must be a directory directly under openspec/changes/, so those nested directories are invisible to OpenSpec while the folder around them is reported as a change. Nested paths are supported under openspec/specs/ only. Rename each nested change to a flat name (for example \"mobile-refresh-token\")."
+    }
+  ],
+  "root": {
+    "source": "nearest"
+  }
+}

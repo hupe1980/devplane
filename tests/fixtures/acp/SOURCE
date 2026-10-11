@@ -1,0 +1,19 @@
+Adapter transcripts for the replay tests, one directory per pinned adapter
+version: <registry id>@<version>/ with session.jsonl (every JSON-RPC line,
+{"dir":"in"} from the client, {"dir":"out"} from the adapter), expect.json
+(the call the replay's rule must see, computed by merging the transcript's
+reports with scripts/acp-drive.py --expect) and SOURCE (how it was made).
+
+How each was made, as of 2026-10-02:
+- claude-acp@0.85.1: RECORDED live with scripts/record-acp.sh claude.
+- codex-acp@2.1.1: SYNTHETIC, from the adapter's own v2.1.1 scenario
+  baseline and its live initialize answer (it could not be signed in).
+- gemini@0.62.0: SYNTHETIC, from gemini-cli 0.62.0's published bundle and
+  its live initialize answer (it could not be signed in).
+- github-copilot-cli@1.0.91: SYNTHETIC, from the protocol documentation's
+  shapes (it could not be signed in, and ships as a binary).
+
+A recording is re-made with scripts/record-acp.sh, never edited; a synthetic
+directory is replaced by a recording as soon as its adapter can be run.
+registry.json is the ACP registry index as fetched (registry.SOURCE); the
+pins in src/acp/agent.rs must equal it, and `just pins` checks it live.

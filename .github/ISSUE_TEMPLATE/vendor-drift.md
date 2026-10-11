@@ -12,4 +12,4 @@ labels: vendor-drift
 **What Devplane does now** and what it should do:
 
 **How you noticed** — `devplane doctor` output, an inbox item that stopped appearing, a permission
-that started prompting again, a session missing from `devplane ls`:
+that started prompting again, a session missing from `devplane status`:

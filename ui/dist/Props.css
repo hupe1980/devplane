@@ -1,0 +1,31 @@
+
+  .props.svelte-1gth30k {
+    display: grid;
+    grid-template-columns: minmax(7rem, max-content) 1fr;
+    gap: 0.3rem var(--s-4);
+    margin: 0;
+    font-size: var(--t-sm);
+  }
+  dt.svelte-1gth30k {
+    color: var(--faint);
+    white-space: nowrap;
+  }
+  dd.svelte-1gth30k {
+    margin: 0;
+    color: var(--ink);
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .mono.svelte-1gth30k {
+    font-family: var(--mono);
+    font-size: var(--t-xs);
+    line-height: 1.7;
+  }
+  .missing.svelte-1gth30k {
+    color: var(--faint);
+    font-style: italic;
+  }
+  .work.svelte-1gth30k { color: var(--work); }
+  .wait.svelte-1gth30k { color: var(--wait); }
+  .fail.svelte-1gth30k { color: var(--fail); }
+  .done.svelte-1gth30k { color: var(--done); }

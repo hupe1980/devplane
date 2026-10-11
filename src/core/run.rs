@@ -85,6 +85,157 @@ impl PermissionMode {
     }
 }
 
+/// Whether a driven agent's mode asks the person, read from the recorded
+/// profile of that adapter's own advertisement. Never inferred from a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reading {
+    Asks,
+    DecidesWithoutYou,
+    NotKnown,
+}
+
+/// Why a driven session is in the mode its statement names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Why {
+    /// The person set none; Devplane asked the agent for its ask-first mode.
+    AskedForAskFirst,
+    /// The session opened in its ask-first mode; nothing was asked.
+    AsksAlready,
+    /// The person's own Devplane preference named this mode.
+    YouChose,
+    /// The person's preference named a mode the agent does not offer.
+    ChoseUnoffered,
+    /// The session opened in a mode other than the adapter's unconfigured
+    /// start, so the person configured it in the agent's own settings.
+    YouSetIt,
+    /// The agent (or another client) moved the session mid-way.
+    Moved,
+    /// Devplane asked for the ask-first mode and the agent refused.
+    Refused,
+    /// Devplane asked for the ask-first mode and the agent did not answer.
+    NoAnswer,
+    /// The agent advertises no mode Devplane knows asks first.
+    NoAskFirst,
+    /// The agent advertises no mode at all.
+    NoneStated,
+    /// No recorded profile for this agent and version.
+    Unprofiled,
+}
+
+/// What a driven change says about its session's permission mode: the mode
+/// in the agent's own words, whether it asks the person, and why it is the
+/// mode it is. A function of recorded data and what the agent reported.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModeStatement {
+    /// The agent's display name.
+    pub agent: String,
+    /// The agent's own id for the mode.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// The agent's own display name for the mode.
+    #[serde(default)]
+    pub name: Option<String>,
+    pub reading: Reading,
+    /// What the mode decides without the person, when it does.
+    #[serde(default)]
+    pub decides: Option<String>,
+    pub why: Why,
+    /// The refusal reason, or the preference the agent does not offer.
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+impl ModeStatement {
+    /// The sentence the change shows. Agent text is clipped to one line of 80
+    /// characters: it is data, not markup.
+    pub fn sentence(&self) -> String {
+        let agent = one_line(&self.agent);
+        let mode = one_line(
+            self.name
+                .as_deref()
+                .or(self.mode.as_deref())
+                .unwrap_or("an unnamed mode"),
+        );
+        let detail = one_line(self.detail.as_deref().unwrap_or(""));
+        let what = one_line(self.decides.as_deref().unwrap_or("what it decides"));
+        let deciding = self.reading == Reading::DecidesWithoutYou;
+        let tail = match deciding {
+            true => format!(" — decides without you: {what}"),
+            false => String::new(),
+        };
+        match self.why {
+            Why::AskedForAskFirst if self.reading == Reading::Asks => {
+                format!("asked {agent} to ask before acting — you set no mode")
+            }
+            // The agent answered with another value than the one asked for.
+            Why::AskedForAskFirst => {
+                format!("asked {agent} to ask before acting — it is in {mode}{tail}")
+            }
+            Why::AsksAlready => format!("asks you: {mode}"),
+            Why::YouChose => format!("you chose {mode}{tail}"),
+            Why::ChoseUnoffered => {
+                format!("you chose {detail}; {agent} does not offer it — it is in {mode}")
+            }
+            Why::YouSetIt if deciding => {
+                format!("decides without you: {mode} ({what}) — you set it")
+            }
+            Why::YouSetIt if self.reading == Reading::NotKnown => {
+                format!("{agent} is in {mode} — you set it; not known whether it asks you")
+            }
+            Why::YouSetIt => format!("{agent} is in {mode} — you set it"),
+            Why::Moved => match self.reading {
+                Reading::Asks => format!("{agent} moved to {mode} — asks you"),
+                Reading::DecidesWithoutYou => {
+                    format!("{agent} moved to {mode} — decides without you: {what}")
+                }
+                Reading::NotKnown => {
+                    format!("{agent} moved to {mode} — not known whether it asks you")
+                }
+            },
+            Why::Refused => format!(
+                "asked {agent} to ask before acting; it refused: {detail} — it is in {mode}{tail}"
+            ),
+            Why::NoAnswer => format!(
+                "asked {agent} to ask before acting; it did not answer — it is in {mode}{tail}"
+            ),
+            Why::NoAskFirst => format!(
+                "{agent} advertises no mode Devplane knows asks you first; it is in {mode}{tail}"
+            ),
+            Why::NoneStated => format!("{agent} states no permission mode"),
+            Why::Unprofiled => {
+                format!("{agent} is in {mode} — not known whether it asks you")
+            }
+        }
+    }
+
+    /// Whether a person is asked about an ordinary call; `None` is *not known*.
+    pub fn asks_a_person(&self) -> Option<bool> {
+        match (self.why, self.reading) {
+            (Why::NoneStated, _) => None,
+            (_, Reading::Asks) => Some(true),
+            (_, Reading::DecidesWithoutYou) => Some(false),
+            (_, Reading::NotKnown) => None,
+        }
+    }
+}
+
+/// Agent text on one line, at most 80 characters.
+fn one_line(s: &str) -> String {
+    let flat: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    crate::core::text::clip(
+        flat.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .as_str(),
+        80,
+    )
+}
+
 /// How much control Devplane has over a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -387,6 +538,12 @@ pub struct Run {
     /// `permission_mode`, a documented vendor mode: no spec makes them equivalent.
     pub agent_mode: Option<String>,
     pub agent_mode_seen: Option<Timestamp>,
+    /// What a driven change says about its session's mode, and when it was
+    /// last said; earlier statements stay in the event log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_statement: Option<ModeStatement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_statement_at: Option<Timestamp>,
     /// OpenTelemetry's `app.entrypoint`: which surface started this session.
     pub entrypoint: Option<String>,
     /// A name the provider gave the session, when it has one.
@@ -452,10 +609,53 @@ pub struct Run {
     /// first-seen order. Read as calls start, so refused edits are included.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wrote: Vec<String>,
+    /// The edits the agent reported, by call and path, newest last and
+    /// bounded by [`EDITS_KEPT`]: an index of the log's `EditReported`
+    /// events, whose diffs stay in the log. The agent's claim, never evidence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edits_reported: Vec<ReportedEdit>,
+    /// How the agent's session ended: `Some(true)` closed over the protocol,
+    /// `Some(false)` ended without a close, `None` while it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_closed: Option<bool>,
+    /// The notices the agent addressed to the person, newest last, bounded
+    /// by [`NOTICES_KEPT`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<Notice>,
+    /// The sign-in methods the agent offered when it said it needs signing
+    /// in; cleared when a session opens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<Vec<crate::core::event::SignInMethod>>,
+    /// Set when Devplane's MCP server could not be offered to the session.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tools_not_offered: bool,
     /// The `seq` of the last stored event folded into this run. Projection is
     /// at-least-once and reducers count, so events at or below it are skipped.
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub last_seq: i64,
+}
+
+/// How many reported edits a run indexes; older ones stay in the log.
+pub const EDITS_KEPT: usize = 512;
+
+/// How many notices a run keeps; older ones stay in the log.
+pub const NOTICES_KEPT: usize = 20;
+
+/// One edit an agent reported for one tool call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportedEdit {
+    pub call_id: String,
+    pub path: PathBuf,
+}
+
+/// A notice an agent addressed to the person: its own words, advisory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Notice {
+    pub severity: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub at: Timestamp,
 }
 
 fn is_zero_i64(n: &i64) -> bool {
@@ -479,7 +679,6 @@ pub struct Observed {
 /// is over, so the type has nowhere to put an answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub struct AbandonedQuestion {
     /// As the agent wrote it. Rendered, never summarised.
     pub question: String,
@@ -501,7 +700,6 @@ pub struct AbandonedQuestion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub enum EndedBy {
     /// Derived: another tool call started while the question stood.
     MovedOn,
@@ -585,6 +783,8 @@ impl Run {
             abandoned_dropped: 0,
             agent_mode: None,
             agent_mode_seen: None,
+            mode_statement: None,
+            mode_statement_at: None,
             cwd,
             worktree: None,
             branch: None,
@@ -611,6 +811,11 @@ impl Run {
             sent: None,
             observed: None,
             wrote: Vec::new(),
+            edits_reported: Vec::new(),
+            session_closed: None,
+            notices: Vec::new(),
+            sign_in: None,
+            tools_not_offered: false,
             last_seq: 0,
         }
     }
@@ -798,4 +1003,117 @@ pub struct AgentCapabilityRecord {
     /// Whether the agent advertised any authentication method.
     pub needs_auth: bool,
     pub measured_at: Timestamp,
+}
+
+#[cfg(test)]
+mod mode_statement_tests {
+    use super::{ModeStatement, Reading, Why};
+
+    fn s(why: Why, reading: Reading) -> ModeStatement {
+        ModeStatement {
+            agent: "Codex".into(),
+            mode: Some("agent".into()),
+            name: Some("Auto review".into()),
+            reading,
+            decides: (reading == Reading::DecidesWithoutYou)
+                .then(|| "a reviewer model decides".into()),
+            why,
+            detail: Some("locked".into()),
+        }
+    }
+
+    /// One sentence per row of the statement table.
+    #[test]
+    fn every_row_reads_as_written() {
+        use Reading::*;
+        use Why::*;
+        let rows = [
+            (
+                s(AskedForAskFirst, Asks),
+                "asked Codex to ask before acting — you set no mode",
+            ),
+            (s(AsksAlready, Asks), "asks you: Auto review"),
+            (s(YouChose, Asks), "you chose Auto review"),
+            (
+                s(YouChose, DecidesWithoutYou),
+                "you chose Auto review — decides without you: a reviewer model decides",
+            ),
+            (
+                s(ChoseUnoffered, NotKnown),
+                "you chose locked; Codex does not offer it — it is in Auto review",
+            ),
+            (s(YouSetIt, Asks), "Codex is in Auto review — you set it"),
+            (
+                s(YouSetIt, DecidesWithoutYou),
+                "decides without you: Auto review (a reviewer model decides) — you set it",
+            ),
+            (s(Moved, Asks), "Codex moved to Auto review — asks you"),
+            (
+                s(Moved, DecidesWithoutYou),
+                "Codex moved to Auto review — decides without you: a reviewer model decides",
+            ),
+            (
+                s(Moved, NotKnown),
+                "Codex moved to Auto review — not known whether it asks you",
+            ),
+            (
+                s(Refused, DecidesWithoutYou),
+                "asked Codex to ask before acting; it refused: locked — it is in Auto review — decides without you: a reviewer model decides",
+            ),
+            (
+                s(NoAnswer, Asks),
+                "asked Codex to ask before acting; it did not answer — it is in Auto review",
+            ),
+            (
+                s(NoAskFirst, NotKnown),
+                "Codex advertises no mode Devplane knows asks you first; it is in Auto review",
+            ),
+            (s(NoneStated, NotKnown), "Codex states no permission mode"),
+            (
+                s(Unprofiled, NotKnown),
+                "Codex is in Auto review — not known whether it asks you",
+            ),
+        ];
+        for (statement, want) in rows {
+            let said = statement.sentence();
+            assert_eq!(said, want);
+            for word in ["safe", "recommended", "risky", "verified"] {
+                assert!(!said.contains(word), "{said}");
+            }
+        }
+    }
+
+    /// The agent's words are data: one line, at most 80 characters.
+    #[test]
+    fn agent_text_is_clipped_to_one_line() {
+        let mut st = s(Why::Refused, Reading::Asks);
+        st.detail = Some(format!("**bold**\nsecond line {}", "x".repeat(500)));
+        st.name = Some("Mode\r\nwith a break".into());
+        let said = st.sentence();
+        assert!(!said.contains('\n') && !said.contains('\r'), "{said}");
+        assert!(said.contains("Mode with a break"));
+        let reason = said
+            .split("it refused: ")
+            .nth(1)
+            .unwrap()
+            .split(" — it is in")
+            .next()
+            .unwrap();
+        assert_eq!(reason.chars().count(), 80, "{reason}");
+    }
+
+    #[test]
+    fn whether_a_person_is_asked_follows_the_reading() {
+        assert_eq!(s(Why::YouSetIt, Reading::Asks).asks_a_person(), Some(true));
+        assert_eq!(
+            s(Why::YouSetIt, Reading::DecidesWithoutYou).asks_a_person(),
+            Some(false)
+        );
+        assert_eq!(s(Why::Unprofiled, Reading::NotKnown).asks_a_person(), None);
+        assert_eq!(
+            s(Why::NoneStated, Reading::Asks).asks_a_person(),
+            None,
+            "states nothing, never *asks you*"
+        );
+    }
 }

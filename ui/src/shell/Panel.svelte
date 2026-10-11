@@ -3,6 +3,7 @@
   // each. Sight: which vendors are watched end to end, read but unproved, or
   // seen only when Devplane drives them — said once here, not in every empty
   // list.
+  import Skeleton from "../lib/Skeleton.svelte";
   import Icon from "../lib/ui/Icon.svelte";
   import Pill from "../lib/ui/Pill.svelte";
 
@@ -61,7 +62,7 @@
       {#if !board && error}
         <p class="quiet fail">The sessions could not be read: {error}</p>
       {:else if !board}
-        <p class="quiet">Reading the sessions…</p>
+        <Skeleton rows={2} />
       {:else if runs.length === 0}
         <p class="quiet">No session has reported anything yet.</p>
       {:else}

@@ -1,10 +1,9 @@
-import { bind, onAction } from "../../lib/keys";
+import { bind, bindList, onAction } from "../../lib/keys";
 import { go } from "../../lib/route";
 import { register } from "../../lib/surfaces";
-import List from "./List.svelte";
-import Doc from "./Doc.svelte";
 
 bind({ surface: "global", combo: "g s", action: "go-specs", label: "go to the specifications" });
+bindList("plan", "open the specification as a tab of its own");
 onAction("go-specs", () => {
   go("#plan");
   return true;
@@ -21,6 +20,7 @@ register({
   reads: ["/api/specs"],
   tab: (_feed, focus) => focus.split("/").filter(Boolean).pop() ?? "Specification",
   select: () => ({}),
-  side: List,
-  component: Doc,
+  side: () => import("./List.svelte"),
+  document: true,
+  page: () => import("./Doc.svelte"),
 });

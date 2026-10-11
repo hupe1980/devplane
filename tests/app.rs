@@ -14,54 +14,25 @@ use std::path::{Path, PathBuf};
 const SETTLE: std::time::Duration = std::time::Duration::from_secs(90);
 const POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
-fn scratch_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "vp-app-{tag}-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
+use common::{echo_agent, get, post, trust};
 
 /// A trusted repository with one gate.
 fn scratch_repo(tag: &str) -> PathBuf {
-    let dir = scratch_dir(&format!("repo-{tag}"));
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&dir)
-            .output()
-            .expect("git");
-    };
-    git(&["init", "-q", "-b", "main"]);
-    git(&["config", "user.email", "t@example.com"]);
-    git(&["config", "user.name", "Test"]);
-    std::fs::write(
-        dir.join("devplane.toml"),
-        "[gates]\ncheck = [\"true\"]\ntimeout = \"30s\"\n",
-    )
-    .unwrap();
-    git(&["add", "-A"]);
-    git(&["commit", "-qm", "init"]);
-    dir.canonicalize().unwrap()
-}
-
-fn echo_agent() -> Option<String> {
-    let exe = std::env::current_exe().ok()?;
-    let bin = exe.parent()?.parent()?.join("examples").join("echo_agent");
-    bin.exists().then(|| bin.to_string_lossy().to_string())
+    common::scratch_repo(tag, common::PASSING)
 }
 
 async fn state_in(home: &Path) -> devplane::host::Shared {
-    AppState::new(
+    let state = AppState::new(
         home.join("devplane.db"),
         "tok".into(),
         Policy::default(),
         home.to_path_buf(),
     )
     .await
-    .unwrap()
+    .unwrap();
+    // The app's host holds the window's key.
+    common::as_the_app(&state);
+    state
 }
 
 /// The host as a router on a port, with no `host.json`.
@@ -78,40 +49,6 @@ async fn boot(
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.ok() });
     (addr, reqwest::Client::new(), state)
-}
-
-async fn post(c: &reqwest::Client, addr: &std::net::SocketAddr, path: &str, body: Value) -> Value {
-    c.post(format!("http://{addr}{path}"))
-        .bearer_auth("tok")
-        .json(&body)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap()
-}
-
-async fn get(c: &reqwest::Client, addr: &std::net::SocketAddr, path: &str) -> Value {
-    c.get(format!("http://{addr}{path}"))
-        .bearer_auth("tok")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap()
-}
-
-async fn trust(c: &reqwest::Client, addr: &std::net::SocketAddr, repo: &Path) {
-    let res = post(
-        c,
-        addr,
-        "/api/projects/trust",
-        serde_json::json!({ "path": repo.to_string_lossy() }),
-    )
-    .await;
-    assert_eq!(res["trusted"], true, "{res}");
 }
 
 /// Polls the *needs you* list for a row.
@@ -134,12 +71,16 @@ async fn await_needs_you(
     None
 }
 
-fn echo_pids() -> std::collections::HashSet<u32> {
-    devplane::observe::procs::snapshot()
-        .into_iter()
-        .filter(|p| p.command.contains("echo_agent"))
-        .map(|p| p.pid)
-        .collect()
+/// The pids of the fixture agents that opened a session in `repo` (each
+/// writes `.devplane/pids/<pid>` there). Per repository, because other tests'
+/// agents run concurrently in this same process.
+fn echo_pids(repo: &Path) -> std::collections::HashSet<u32> {
+    std::fs::read_dir(repo.join(".devplane/pids"))
+        .map(|d| {
+            d.filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Waiting time is measured from the question, not from when the app opened.
@@ -148,7 +89,7 @@ async fn a_question_asked_an_hour_ago_reads_as_an_hour_old_not_as_new() {
     use devplane::core::ask::{Ask, Asked, Deadline, Kind};
     use devplane::core::ids::{AskId, RunId};
 
-    let home = scratch_dir("since");
+    let home = common::scratch("since");
     let an_hour_ago = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1);
     {
         let store = devplane::store::Store::open(&home.join("devplane.db"))
@@ -189,8 +130,7 @@ async fn a_question_asked_an_hour_ago_reads_as_an_hour_old_not_as_new() {
 #[tokio::test]
 async fn answering_through_the_answer_surface_names_the_person_and_releases_the_run() {
     let Some(agent) = echo_agent() else { return };
-    let _serial = common::one_agent_at_a_time();
-    let home = scratch_dir("answer");
+    let home = common::scratch("answer");
     let repo = scratch_repo("answer");
     let (addr, c, state) = boot(&home).await;
     trust(&c, &addr, &repo).await;
@@ -267,8 +207,7 @@ async fn answering_through_the_answer_surface_names_the_person_and_releases_the_
 #[tokio::test]
 async fn the_browser_is_handed_the_path_to_open_itself() {
     let Some(agent) = echo_agent() else { return };
-    let _serial = common::one_agent_at_a_time();
-    let home = scratch_dir("open");
+    let home = common::scratch("open");
     let repo = scratch_repo("open");
     let (addr, c, state) = boot(&home).await;
     trust(&c, &addr, &repo).await;
@@ -364,9 +303,8 @@ fn autostart_listing() -> Vec<String> {
 #[tokio::test]
 async fn quitting_from_the_app_names_the_agent_leaves_nothing_and_installs_nothing() {
     let Some(agent) = echo_agent() else { return };
-    let _serial = common::one_agent_at_a_time();
     let autostart_before = autostart_listing();
-    let home = scratch_dir("quit");
+    let home = common::scratch("quit");
     let repo = scratch_repo("quit");
     let state = state_in(&home).await;
     let (serving, port) = serve_in(&home, &state).await;
@@ -374,7 +312,7 @@ async fn quitting_from_the_app_names_the_agent_leaves_nothing_and_installs_nothi
     let c = reqwest::Client::new();
     trust(&c, &addr, &repo).await;
 
-    let before = echo_pids();
+    let before = echo_pids(&repo);
     let spec = devplane::acp::resolve(&agent, &state.agents).expect("the echo agent resolves");
     let run =
         devplane::driven::dispatch(&state, &spec, repo.clone(), Some("slow".into()), Vec::new())
@@ -384,7 +322,7 @@ async fn quitting_from_the_app_names_the_agent_leaves_nothing_and_installs_nothi
     let mut agent_pid = None;
     for _ in 0..100 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        if let Some(new) = echo_pids().difference(&before).copied().next() {
+        if let Some(new) = echo_pids(&repo).difference(&before).copied().next() {
             agent_pid = Some(new);
             break;
         }
@@ -475,4 +413,68 @@ fn the_app_never_names_an_autostart_mechanism() {
         !manifest.contains("tauri-plugin-autostart"),
         "the autostart plugin is a dependency"
     );
+    // Nor can the bundle's configuration add one.
+    let conf =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json"))
+            .unwrap()
+            .to_lowercase();
+    for word in ["autostart", "launchagents", "runatload", "login"] {
+        assert!(
+            !conf.contains(word),
+            "tauri.conf.json names `{word}`; the app installs nothing that starts at login"
+        );
+    }
+}
+
+/// The command line never checks for updates: the updater is named only
+/// under `src/app/`, which only the window's build compiles, and the plugin is
+/// a dependency of that build alone.
+#[test]
+fn only_the_window_can_check_for_updates() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&root.join("src"), &mut files);
+    let app = root.join("src/app");
+    let mut in_app = 0;
+    for f in &files {
+        let text = std::fs::read_to_string(f).unwrap();
+        let names = text.contains("tauri_plugin_updater") || text.contains(".updater()");
+        if f.starts_with(&app) {
+            in_app += usize::from(names);
+        } else {
+            assert!(
+                !names,
+                "{} names the updater; only the window's process may check for updates",
+                f.display()
+            );
+        }
+    }
+    assert!(
+        in_app > 0,
+        "the guard found the updater nowhere, so it checks nothing"
+    );
+    let manifest: toml::Value =
+        toml::from_str(&std::fs::read_to_string(root.join("Cargo.toml")).unwrap()).unwrap();
+    assert_eq!(
+        manifest["dependencies"]["tauri-plugin-updater"]["optional"].as_bool(),
+        Some(true),
+        "the updater must be optional, so the command line's build has none"
+    );
+    let app_feature: Vec<&str> = manifest["features"]["app"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(app_feature.contains(&"dep:tauri-plugin-updater"));
 }

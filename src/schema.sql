@@ -1,12 +1,16 @@
 -- Devplane's store: what it observed, and what it was told.
 --
 -- Rebuildable: `runs`, `events`, `events_fts`, `messages`, `channel_health`,
--- `attention_log`, and `projects` except its `trusted` flag. Each is an
--- observation or a projection of one; losing it costs history.
+-- `attention_log`, and `projects`. Each is an observation or a projection of
+-- one; losing it costs history.
 --
--- The record: `changes`, `asks`, `decisions`, `agent_capabilities`, `looks`,
--- `reports`, and the `trusted` flag. Nothing can say these again, so the
--- schema is versioned and an old file is moved aside rather than dropped.
+-- The record: `changes`, `asks`, `decisions`, `agent_capabilities`, `looks`.
+-- Nothing can say these again, so the schema is versioned and an old file is
+-- moved aside rather than dropped.
+--
+-- No preference lives here: which repositories a person trusted is
+-- `trusted.toml` beside this file, and a store from before is read once for
+-- its trusted roots before it is moved aside.
 --
 -- `events` and `decisions` are append-only; tables updated in place say how.
 
@@ -15,7 +19,6 @@ CREATE TABLE IF NOT EXISTS projects (
     id           TEXT PRIMARY KEY,
     name         TEXT NOT NULL,
     root         TEXT NOT NULL,
-    trusted      INTEGER NOT NULL DEFAULT 0,
     repo_url     TEXT,
     auto_discovered INTEGER NOT NULL DEFAULT 1
 );
@@ -23,11 +26,15 @@ CREATE TABLE IF NOT EXISTS projects (
 -- A projection of the event log, stored so the board renders before a replay
 -- finishes. `payload` is the whole Run; the other columns are the ones a query
 -- reads (probe cleanup, rule scope, inbox vendors, order and retention).
+-- `last_seq` is the payload's own mark of the last stored event folded in: a
+-- snapshot is written only over one that folded no more, so an older snapshot
+-- saved late cannot drop events the projection mark has already passed.
 CREATE TABLE IF NOT EXISTS runs (
     id           TEXT PRIMARY KEY,
     agent        TEXT NOT NULL,
     cwd          TEXT NOT NULL,
     last_event_at TEXT NOT NULL,
+    last_seq     INTEGER NOT NULL DEFAULT 0,
     payload      TEXT NOT NULL
 );
 
@@ -92,8 +99,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     subject      TEXT NOT NULL,
     outcome      TEXT NOT NULL,
     reason       TEXT,
-    -- The tool the call was, recorded rather than inferred from `subject` so
-    -- `devplane rewind` can tell exactly which calls wrote through a shell.
+    -- The tool the call was, recorded rather than inferred from `subject`.
     tool         TEXT,
     -- Where the MCP server behind `tool` came from, as the vendor reported it
     -- (`plugin`, `sdk`, `user`, `project`, or an unseen value stored as is).
@@ -102,7 +108,20 @@ CREATE TABLE IF NOT EXISTS decisions (
     server_source TEXT,
     project_id   TEXT,
     run_id       TEXT,
-    change_id      TEXT
+    change_id      TEXT,
+    -- The tool call this decides, by the agent's own id: the protocol's for a
+    -- driven call (the key its `edit_reported` is found by), the vendor's
+    -- `tool_use_id` for a watched one.
+    call_id      TEXT,
+    -- Set only on a row written from a vendor's own report of who decided:
+    -- the vendor (`claude-code`) and its word verbatim (`user_reject`,
+    -- `config`). NULL on everything Devplane itself took or enforced.
+    vendor        TEXT,
+    vendor_source TEXT,
+    -- The person's grant that allowed the call, as `` `<rule>` for <root> ``:
+    -- set on every allow a grant in ~/.devplane/policy.toml made, and what
+    -- revoking that grant lists its decisions by. NULL on every other row.
+    grant_name    TEXT
 );
 
 -- Ties on `at` are common (a gate finishing as its run ends), so readers
@@ -111,6 +130,8 @@ CREATE TABLE IF NOT EXISTS decisions (
 CREATE INDEX IF NOT EXISTS decisions_by_time ON decisions(at DESC);
 CREATE INDEX IF NOT EXISTS decisions_by_run ON decisions(run_id, at DESC);
 CREATE INDEX IF NOT EXISTS decisions_by_change ON decisions(change_id, at DESC);
+CREATE INDEX IF NOT EXISTS decisions_by_call ON decisions(call_id);
+CREATE INDEX IF NOT EXISTS decisions_by_grant ON decisions(grant_name);
 
 -- What a driven agent said. Kept out of `events` because run state is a
 -- reduction over events and a sentence reduces to nothing. Pruned with the
@@ -208,30 +229,44 @@ CREATE TABLE IF NOT EXISTS projection (
     through   INTEGER NOT NULL
 );
 
--- A finding one project filed about another. `payload` is the whole report,
--- with provenance the host resolved from a run. `target_project` is NULL for
--- a GitHub draft or a report kept on its own change. Rewritten whole on every
--- state change; the resolution itself is a decision on the source change.
-CREATE TABLE IF NOT EXISTS reports (
-    id             TEXT PRIMARY KEY,     -- rp-<uuid7>
-    filed_at       TEXT NOT NULL,
-    source_project TEXT NOT NULL,
-    target_project TEXT,
-    state          TEXT NOT NULL,        -- open | accepted | fixed | rejected | deferred | drafted | opened | discarded
-    payload        TEXT NOT NULL
+-- A person marked one unit of a change's review seen: a hunk, keyed by its
+-- content, so a hunk the agent rewrites is a new, unseen unit; or a file with
+-- no hunks. That it was seen, never when or by whom — a time beside the
+-- change's ready time would record how long somebody spent reviewing. A
+-- weakened-check row is seen when its hunks are. Guards the offer.
+CREATE TABLE IF NOT EXISTS seen (
+    change_id    TEXT NOT NULL,
+    path         TEXT NOT NULL,
+    hunk_digest  TEXT NOT NULL,
+    PRIMARY KEY (change_id, path, hunk_digest)
 );
 
-CREATE INDEX IF NOT EXISTS reports_by_target ON reports(target_project, state);
-CREATE INDEX IF NOT EXISTS reports_by_source ON reports(source_project, state);
+-- A person's comment on one line of a change's review, kept until sent and
+-- after: sent as one prompt with every other unsent comment. Carries what the
+-- line and its hunk were when written, and the tree, so the agent and the
+-- review can tell a comment the code has since moved past. The times are
+-- facts about the comment; nothing derives a duration from them.
+CREATE TABLE IF NOT EXISTS review_comments (
+    id           TEXT PRIMARY KEY,
+    change_id    TEXT NOT NULL,
+    path         TEXT NOT NULL,
+    line         INTEGER NOT NULL,
+    side         TEXT NOT NULL CHECK (side IN ('new', 'old')),
+    hunk_header  TEXT NOT NULL,
+    hunk_digest  TEXT NOT NULL,
+    line_text    TEXT NOT NULL,
+    body         TEXT NOT NULL,
+    tree         TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    sent_at      TEXT,
+    run_id       TEXT
+);
+CREATE INDEX IF NOT EXISTS review_comments_change ON review_comments (change_id, created_at);
 
--- A person read a weakened-check row of a change's review: that the row was
--- seen, and by whom, never when — a time beside the change's ready time would
--- record how long somebody spent reviewing. Keyed by the row's matched text,
--- so a different skip marker is a different, unseen row. Guards the offer.
-CREATE TABLE IF NOT EXISTS weakened_seen (
-    change_id  TEXT NOT NULL,
-    path       TEXT NOT NULL,
-    matched    TEXT NOT NULL,
-    authority  TEXT NOT NULL CHECK (authority = 'person'),
-    PRIMARY KEY (change_id, path, matched)
+-- Which inbox items a desktop notification has already announced, by the
+-- item's ask id (else its inbox id), so a restart does not announce one again.
+-- A row is deleted when its item leaves the inbox. Deliberately no time: an
+-- announcement time beside an answer's would make a time-to-answer derivable.
+CREATE TABLE IF NOT EXISTS announced (
+    key  TEXT PRIMARY KEY
 );

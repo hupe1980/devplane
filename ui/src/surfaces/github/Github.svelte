@@ -22,7 +22,7 @@
     fetched_at?: string | null;
   }>(() => "/api/forge", {
     every: 30_000,
-    tell: () => "devplane forge issues",
+    tell: () => "devplane issue list",
   });
   const issues = $derived(read.data?.issues ?? []);
   const pulls = $derived(read.data?.pull_requests ?? []);
@@ -30,7 +30,7 @@
   /// that is not data (not signed in, expired, …) is said by the list in its
   /// own words; a host that could not be read is a failure.
   const loaded = $derived(read.phase !== "loading");
-  const failed = $derived(read.data?.error ?? (read.phase === "failed" ? (read.failure?.says ?? "") : ""));
+  const failed = $derived(read.data?.error ?? (read.phase === "failed" ? (read.failure?.down ? "Not read — Devplane is not answering." : (read.failure?.says ?? "")) : ""));
 </script>
 
 {#if read.phase === "stale" && read.failure}

@@ -1,10 +1,15 @@
 <script lang="ts">
   // The topmost thing that needs you, answerable, and nothing else — what the
   // shortcut raises. The inbox's first row (same `Item.svelte`, same routes);
-  // `Esc` gives focus back.
+  // `Esc` gives focus back. Opened from a notification (`ask`), it shows that
+  // one ask instead: waiting, focused on its first answer; or settled, saying
+  // who answered it, from where and when; or no longer answerable here.
+  import Inline from "../../lib/ui/Inline.svelte";
+  import Skeleton from "../../lib/Skeleton.svelte";
   import { ago } from "../../lib/text";
   import { hideWindow } from "../../lib/frame";
   import { onAction } from "../../lib/keys";
+  import { cursor } from "../../lib/cursor";
   import { resource } from "../../lib/resource.svelte";
   import { writer } from "../../lib/write.svelte";
   import Failed from "../../lib/Failed.svelte";
@@ -13,21 +18,109 @@
   import type { Answer, Item } from "../inbox/Item.svelte";
   import * as actions from "../inbox/actions";
 
+  /// One ask as the host records it (`/api/asks`), as much as is shown.
+  type AskRow = {
+    id: string;
+    message: string;
+    open: boolean;
+    outcome: string;
+    answered_at?: string | null;
+    payload?: { held_until?: string } | null;
+  };
+
   let {
     /// A planted list, for a harness; otherwise read from the host.
     items = null,
-  }: { items?: Item[] | null } = $props();
+    blind = "",
+    /// The ask a notification opened this window on; empty for the shortcut.
+    ask = "",
+    /// That ask's record, planted for a harness; otherwise read from the host.
+    asked = null,
+  }: { items?: Item[] | null; blind?: string; ask?: string; asked?: AskRow | null } = $props();
 
-  /// The host's needs-you list (as `devplane inbox --needs-you`), so this
-  /// window agrees with the tray's number.
-  const read = resource<{ items?: Item[] }>(() => "/api/inbox?needs_you=true", {
+  /// The host's needs-you list (as `devplane inbox --needs-you`): only what
+  /// can be answered in this window. The tray's number is the whole inbox's.
+  const read = resource<{ items?: Item[]; held?: actions.Held | null; landed?: actions.Landed | null }>(() => "/api/inbox?needs_you=true", {
     every: 2_000,
     tell: () => "devplane inbox --needs-you",
   });
   let said = $state("");
   let commands = $state<string[]>([]);
   const shown = $derived(read.data?.items ?? items ?? []);
-  const first = $derived(shown[0] ?? null);
+  /// Which waiting item is on screen: the first, until `j`/`k` move. Kept by
+  /// id, so an answered item leaving puts the next one here.
+  let at = $state("");
+  /// Whether `j`/`k` moved off the ask a notification opened.
+  let moved = $state(false);
+  /// The ask a notification named, while it is still waiting here.
+  const pinned = $derived(ask ? (shown.find((x) => x.ask === ask) ?? null) : null);
+  const index = $derived(Math.max(0, shown.findIndex((x) => x.id === at)));
+  const first = $derived(ask && !moved ? pinned : (shown[index] ?? shown[0] ?? null));
+  /// The named ask's record, read only once it is not waiting here.
+  const record = resource<{ open?: AskRow[]; settled?: AskRow[] }>(
+    () => (ask && !pinned && asked === null ? "/api/asks" : null),
+    { every: 2_000, tell: () => "devplane inbox --all" },
+  );
+  const recorded = $derived(
+    asked ?? [...(record.data?.open ?? []), ...(record.data?.settled ?? [])].find((a) => a.id === ask) ?? null,
+  );
+  /// Opened on a waiting ask: its first answer has the focus, once.
+  let focusedFor = "";
+  $effect(() => {
+    if (!pinned || moved || focusedFor === pinned.id) return;
+    focusedFor = pinned.id;
+    at = pinned.id;
+    queueMicrotask(() => (document.querySelector(".answer .one button") as HTMLElement | null)?.focus());
+  });
+  const held = $derived(read.data?.held ?? null);
+  const landed = $derived(read.data?.landed ?? null);
+  $effect(() =>
+    cursor({
+      scope: "answer",
+      size: () => shown.length,
+      at: () => index,
+      go: (i) => {
+        moved = true;
+        at = shown[i].id;
+      },
+      open: () => (document.querySelector(".answer .one") as HTMLElement | null)?.focus(),
+    }),
+  );
+  /// The ask to put back on screen once the undo returns it to the list.
+  let returning = $state("");
+  $effect(() => {
+    if (!returning) return;
+    const back = shown.find((x) => x.ask === returning || x.request_id === returning);
+    if (back) {
+      returning = "";
+      at = back.id;
+    }
+  });
+  async function takeBack() {
+    const h = held;
+    if (!h) return;
+    const r = await pending.run("undo", () => actions.takeBack({ where: h.undo }));
+    if (r) said = r.said;
+    returning = h.ask;
+    await read.reload();
+  }
+  // `z` takes back the answer the host is holding; nothing else here is
+  // reversible, and it says so.
+  $effect(() =>
+    onAction("item-undo", (surface) => {
+      if (surface !== "answer") return false;
+      if (held) void takeBack();
+      else said = landed?.ok ? "that answer was already sent — it can no longer be taken back" : "nothing to undo";
+      return true;
+    }),
+  );
+  let tick = $state(Date.now());
+  $effect(() => {
+    if (!held) return;
+    const id = setInterval(() => (tick = Date.now()), 250);
+    return () => clearInterval(id);
+  });
+  const left = $derived(held ? Math.max(0, Math.ceil((Date.parse(held.until) - tick) / 1000)) : 0);
   /// Nothing was read and the read failed: not *Nothing needs you*.
   const failed = $derived(read.phase === "failed" && items === null);
   const loaded = $derived(read.data !== null || items !== null);
@@ -49,11 +142,15 @@
     await read.reload();
   }
   const answer = (item: Item, what: Answer) => report(() => actions.answer(item, what));
-  const act = (item: Item, action: string, reason?: string) => report(() => actions.act(item, action, reason));
+  const act = (item: Item, action: string) => report(() => actions.act(item, action));
   const snooze = (item: Item) => report(() => actions.snooze(item));
+  const snoozeHour = (item: Item) => report(() => actions.snoozeHour(item));
   async function copyRule(rule: string) {
     said = (await actions.copyRule(rule)).said;
   }
+
+  /// A time of day, as the person's clock reads it.
+  const clock = (t: string) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
   let now = $state(Date.now());
   $effect(() => {
@@ -64,16 +161,45 @@
 
 <section class="answer" aria-labelledby="answer-head">
   <h2 id="answer-head">The one thing that needs you</h2>
-  <p class="said" role="status" aria-live="polite">{said}</p>
+  <p class="said" role="status" aria-live="polite"><Inline text={said} /></p>
   {#if commands.length}<Commands {commands} />{/if}
-  {#if failed && read.failure}
+  {#if held}
+    <p class="held" role="status">
+      <b>{held.title}</b>: {held.says} · {left > 0 ? `sending in ${left} s` : "sending now"} · <kbd>z</kbd> to undo
+      <button onclick={takeBack} disabled={!!pending.busy}>take it back <kbd>z</kbd></button>
+    </p>
+  {:else if landed && !landed.ok}
+    <p class="held failed" role="status"><b>{landed.title}</b>: {landed.says}</p>
+  {/if}
+  {#if ask && !pinned && !moved}
+    <!-- The ask a notification named is not waiting here: say what became
+         of it, never show another item in its place. -->
+    {#if recorded}
+      <p class="settled" role="status">
+        <b>{recorded.message}</b><br />
+        {#if !recorded.open}
+          Already answered or ended — {recorded.outcome}{#if recorded.answered_at}, {clock(recorded.answered_at)}{/if}. Nothing more is recorded from here.
+        {:else if recorded.payload?.held_until && Date.parse(recorded.payload.held_until) <= now}
+          The hold ran out, so the agent is asking in its own window now. Nothing was decided here.
+        {:else}
+          Waiting, and not answerable from this window — the inbox says why.
+        {/if}
+      </p>
+    {:else if record.phase === "failed" && record.failure}
+      <Failed what="that question" failure={record.failure} />
+    {:else if loaded && (asked !== null || record.data !== null)}
+      <p class="settled" role="status">That question is no longer waiting, and no record of it was found.</p>
+    {:else}
+      <Skeleton rows={2} />
+    {/if}
+  {:else if failed && read.failure}
     <Failed what="what needs you" failure={read.failure} />
   {:else if !loaded}
-    <p class="dim">reading…</p>
+    <Skeleton rows={2} />
   {:else if first}
     {#if read.phase === "stale" && read.failure}<Failed what="what needs you" failure={read.failure} at={read.at} stale />{/if}
     <fieldset class="bare" disabled={!!pending.busy}>
-      <ul role="list">
+      <ul role="list" class="one" tabindex="-1" aria-label="the item: {first.title}">
         <!-- Keyed: a reply typed for one item never carries to the next. -->
         {#key first.id}
           <Row
@@ -83,14 +209,16 @@
             {answer}
             {act}
             {snooze}
+            {snoozeHour}
             {copyRule}
             say={(s) => (said = s)}
+            keys="answer"
           />
         {/key}
       </ul>
     </fieldset>
     {#if shown.length > 1}
-      <p class="dim more">{shown.length - 1} more after this one</p>
+      <p class="dim more">item {index + 1} of {shown.length} · <kbd>j</kbd> <kbd>k</kbd> move between them</p>
     {/if}
   {:else}
     <!-- Zero, said as a fact: the list was read and it is empty — and, if
@@ -99,9 +227,10 @@
       <Failed what="what needs you" failure={read.failure} at={read.at} stale />
     {:else}
       <p class="dim">Nothing needs you.</p>
+      {#if blind}<p class="dim"><Inline text={blind} /></p>{/if}
     {/if}
   {/if}
-  <p class="hint dim">Esc hides this</p>
+  <p class="hint dim">Esc hides this · ? lists every key</p>
 </section>
 
 <style>
@@ -114,4 +243,9 @@
   fieldset.bare { border: 0; margin: 0; padding: 0; min-width: 0; }
   .more { font-size: var(--t-xs); margin: var(--s-2) 0 0; }
   .hint { font-size: var(--t-xs); margin: var(--s-3) 0 0; }
+  .held { font-size: var(--t-xs); margin: var(--s-2) 0 0; padding: var(--s-1) var(--s-2); border-left: 2px solid var(--wait); color: var(--dim); font-variant-numeric: tabular-nums; }
+  .held.failed { border-left-color: var(--fail); color: var(--ink); }
+  .settled { font-size: var(--t-sm); margin: var(--s-2) 0 0; color: var(--dim); }
+  .settled b { color: var(--ink); font-weight: 600; }
+  kbd { font-family: var(--mono); font-size: 0.625rem; border: 1px solid var(--line); border-radius: 3px; padding: 0 0.25rem; }
 </style>

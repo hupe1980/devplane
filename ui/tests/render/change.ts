@@ -51,9 +51,23 @@ const doc = (d: Record<string, unknown>) => html(Doc, { id: d.id, detail: d, loa
   if (flight.includes("Offer as pull request")) fail("a change that is not verified offers itself as a pull request");
   if (flight.includes("Pick it back up")) fail("a change that is not stopped offers to be picked back up");
   if (!flight.includes("Run gates")) fail("a change with a worktree cannot have its gates run");
-  const verified = doc({ ...stale, state: "verified", standing_says: "verified · every declared gate exited zero" });
+  // Every weakened row read: the state and its green sentence are shown.
+  const verified = doc({ ...stale, state: "verified", qualifier: { ...rate.qualifier, unseen: 0 }, standing_says: "verified · every declared gate exited zero" });
   if (!verified.includes("Offer as pull request")) fail("a verified change is not offered as a pull request");
   if (!/class="standing done/.test(verified)) fail("a verified standing is not the verified green");
+  // A weakened row unread: Offer is held, and says why beside it. The
+  // recording has one such row; the host refuses that offer. The button is
+  // found by its label (held) or its words (live).
+  const offer = (markup: string) =>
+    markup.match(/<button[^>]*aria-label="Offer as pull request"[^>]*>|<button[^>]*>(?:(?!<\/button>)[\s\S])*?Offer as pull request/)?.[0] ?? "";
+  if (rate.qualifier?.unseen !== 1) fail("the recorded change no longer has one unread weakened row, so this check guards nothing");
+  const held = doc(rate);
+  if (!offer(held)) fail("a verified change with an unread weakened row has no Offer at all");
+  if (!/\bdisabled\b/.test(offer(held).split(">")[0])) fail("Offer is live while a weakened row is unread");
+  if (!visible(held).includes("Read the weakened check first")) fail("a held Offer does not say why beside it");
+  if (!/aria-describedby="offer-held"/.test(offer(held))) fail("a held Offer's reason is not tied to the button");
+  if (!offer(verified) || /\bdisabled\b/.test(offer(verified).split(">")[0])) fail("Offer is held with every weakened row read");
+  if (visible(verified).includes("weakened check first")) fail("Offer gives a reason to wait with nothing unread");
   const stopped = doc({ ...stale, stopped: { at: "x" }, can_retry: true });
   if (!stopped.includes("Pick it back up") || !stopped.includes("Try again")) fail("a stopped change cannot be resumed or retried");
   if (doc({ ...stale, worktree: null }).includes("Run gates")) fail("a change with no worktree offers to run gates");
@@ -67,15 +81,17 @@ const doc = (d: Record<string, unknown>) => html(Doc, { id: d.id, detail: d, loa
   if (!/role="tablist"/.test(flight) || !/role="tabpanel"/.test(flight)) fail("the six views are not a tab strip over a panel");
 }
 
-// ── The stepper places the host's state; it spells nothing ───────────────
+// ── The stepper is one line: where the change is, and the step after it ──
 {
-  const out = html(Stepper, { state: "in flight" });
-  for (const w of LIFE) if (!out.includes(`>${STATES[w].word}<`)) fail(`the stepper lacks the state word ${w}`);
-  if (!/aria-current="step"[^>]*>[\s\S]{0,120}in flight/.test(out)) fail("the stepper does not mark in flight as where the change is");
-  const odd = html(Stepper, { state: "gates failing" });
-  if (!odd.includes("gates failing")) fail("a state outside the six is not said in its own word");
-  if (/class="[^"]*verified/.test(odd) || /class="[^"]*verified/.test(out)) fail("the stepper is verified-green on an unverified change");
-  if (!/class="[^"]*verified/.test(html(Stepper, { state: "verified" }))) fail("a verified change is not marked verified on the stepper");
+  const line = (props: Record<string, unknown>) => visible(html(Stepper, props)).replace(/\s+/g, " ").trim();
+  if (line({ state: "verified" }) !== "verified → next: offer") fail(`the stepper does not read "verified → next: offer": ${line({ state: "verified" })}`);
+  if (line({ state: "in flight" }) !== "in flight → next: run the gates") fail(`the stepper misplaces in flight: ${line({ state: "in flight" })}`);
+  if (!/aria-current="step"[^>]*>in flight</.test(html(Stepper, { state: "in flight" }))) fail("the stepper does not mark where the change is");
+  if (!line({ state: "gates failing" }).startsWith("gates failing")) fail("a state outside the six is not said in its own word");
+  if (!/next: read 1 weakened check/.test(line({ state: "verified", weakUnread: 1 }))) fail("an unread weakened check is not the next step");
+  if (line({ state: "offered", archived: true }) !== STATES.archived.word) fail("an archived change has a next step");
+  for (const w of LIFE) if (!line({ state: w }).startsWith(STATES[w].word)) fail(`the stepper does not say ${w}`);
+  if (/var\(--done\)/.test(source("../src/surfaces/change/Stepper.svelte"))) fail("the stepper spends the verified green");
 }
 
 // ── Counts are counts: no percentage, no fraction, no n of m ─────────────
@@ -95,7 +111,7 @@ const doc = (d: Record<string, unknown>) => html(Doc, { id: d.id, detail: d, loa
   for (const [name, markup] of [["overview", over], ["tasks", tasks]] as const) {
     const text = visible(markup);
     if (/\d\s*%/.test(text)) fail(`the ${name} view renders a percentage`);
-    if (/\d+\s*\/\s*\d+/.test(text)) fail(`the ${name} view renders a fraction`);
+    if (/\d+\s*\/\s*\d+/.test(text)) fail(`the ${name} view renders a fraction: ${text.match(/.{0,40}\d+\s*\/\s*\d+.{0,20}/)?.[0]}`);
     if (/\d+ of \d+(?! commands)/.test(text)) fail(`the ${name} view renders an "n of m"`);
     if (/<progress|<meter/.test(bare(markup))) fail(`the ${name} view renders a bar`);
   }
@@ -156,11 +172,70 @@ const doc = (d: Record<string, unknown>) => html(Doc, { id: d.id, detail: d, loa
   if (!/waiting on you — question/.test(agent) || !/"waiting" in s/.test(agent))
     fail("a waiting run's state object is not mapped to words, so it prints as [object Object]");
   if (/Commands run/.test(agent)) fail("the agent tab claims a list of finished commands it cannot see");
-  // The review: marking a hunk reads only the weakened rows inside it.
-  const pane = source("../src/surfaces/review/Pane.svelte");
-  if (!/markRead\(\(weakRows\.get\(file\.path\) \?\? \[\]\)\.filter\(\(w\) => inHunk\(h, w\)\)\)/.test(pane))
-    fail("marking one hunk records every weakened row in its file as read");
+  // The review: `s` marks the one hunk under the cursor, by its digest, in
+  // the host; a weakened row is read when its hunks are, never by a mark of
+  // its own.
+  const pane = source("../src/surfaces/change/review/Pane.svelte");
+  if (!/markSeen\(change, x\.file\.path, x\.h\.digest\)/.test(pane)) fail("marking a hunk does not send that hunk's digest to the host");
+  if (/matched:/.test(pane)) fail("the review still marks a weakened row by its matched text");
   // No count before the list is read.
   const unread = html(ChangeList, { open: () => {} });
   if (/class="n[^"]*">0</.test(unread)) fail("the changes sidebar prints 0 before it has read anything");
+}
+
+// ── The agent's stop claim: its words, after the weakened checks, before the gates ─
+//
+// Quoted under the agent's name, never markup and never a link; read after
+// the state and its weakened checks, never first; and it moves neither the
+// state nor the host's sentence about the check.
+{
+  const claim = {
+    id: "sc-1",
+    says: "the agent says the spec and the tests conflict",
+    reason: "The spec says 30 days; <script>alert(1)</script> [see](https://x.example) **now**",
+    paths: ["specs/043-sessions/spec.md", "tests/session_test.rs"],
+    agent: "echo",
+    run: "acp-claimed",
+    at: "2026-09-27T10:02:00Z",
+    origin_says: "saas — echo, run acp-claimed, change c-1, 2026-09-27 10:02 UTC",
+    quoted: "",
+    ending: "the agent stopped: it says the spec and the tests conflict",
+    state: "open",
+    can_tell: true,
+  };
+  const d = { ...stale, stop_claim: claim, claim_history: [claim] };
+  const out = doc(d);
+  // What a person reads: tags gone, entities read back, spaces collapsed.
+  const words = (m: string) =>
+    visible(m)
+      .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&")
+      .replace(/\s+/g, " ");
+  const text = words(out);
+  const at = (s: string) => text.indexOf(s);
+  if (at(claim.says) < 0) fail("the change document does not carry the agent's claim");
+  if (at(claim.says) < at(d.title)) fail("the claim is read before the change's title");
+  const qualifier = rate.qualifier?.says ?? "";
+  if (qualifier && at(qualifier) > at(claim.says)) fail("the claim is read before the weakened checks");
+  const standing = "passed against tree 327517c";
+  if (at(standing) < 0 || at(standing) < at(claim.says)) fail("the gates' sentence is read before the claim");
+  if (/<script>alert/.test(out) || /href="https:\/\/x\.example"/.test(out) || /<strong>now/.test(out))
+    fail("the agent's reason is rendered as markup");
+  if (!text.includes("<script>alert(1)</script> [see](https://x.example) **now**")) fail("the agent's reason is not shown as its own text");
+  if (!text.includes("specs/043-sessions/spec.md")) fail("the claim's paths are not shown");
+  if (!/echo, run acp-claimed/.test(text)) fail("the claim is not attributed to its agent and run");
+  if (!out.includes("Mark read") || !out.includes("Tell the agent")) fail("the claim offers no way out");
+  if (doc({ ...d, stop_claim: { ...claim, can_tell: false } }).includes("Tell the agent")) fail("Tell the agent is offered where the run cannot be resumed");
+  // The verdict is the gate's: the state and its sentence are the same with and without it.
+  const without = words(doc(stale));
+  if (!without.includes(standing) || !text.includes(standing)) fail("the claim moved the host's sentence about the check");
+  const code = source("../src/surfaces/change/Claim.svelte");
+  if (/\{@html|<Inline|<Md\b/.test(code)) fail("the claim is rendered through markup");
+  // The list row: after the state, as the agent's.
+  const list = words(html(ChangeList, { open: () => {}, rows: [{ id: "c-1", title: "Keep sessions for 30 days", state: "in flight", project_id: "/p/saas", stop_claim: { says: claim.says } }] }));
+  if (!list.includes(claim.says)) fail("the change list does not carry the agent's claim");
+  if (list.indexOf(claim.says) < list.indexOf("in flight")) fail("the change list reads the claim before the state");
+  // The overview keeps every claim in its history, under its run.
+  const over = html(Overview, { d: { ...d, claim_history: [{ ...claim, state: "closed", closed_says: "a person marked it read" }] }, go: () => {} });
+  if (!/aria-label="the agent says the spec and the tests conflict — run acp-claimed · closed: a person marked it read/.test(over))
+    fail("a closed claim is not kept in the change's history");
 }

@@ -6,20 +6,35 @@
 // empty or calm. `lib/Failed.svelte` draws the failed and stale phases.
 
 import { untrack } from "svelte";
-import { api, Unauthorised, Unreachable } from "./api";
+import { api, Refused, Unauthorised, Unreachable } from "./api";
 
 export type Phase = "loading" | "ok" | "stale" | "failed";
 
 /// Why a read or a write did not land, and the command to run for more.
-export type Failure = { says: string; tell: string };
+export type Failure = {
+  says: string;
+  tell: string;
+  /// The host itself did not answer: the shell's one banner names that, so
+  /// a region only says it was not read.
+  down?: boolean;
+  /// The host's answer as it came, for a disclosure: the route, the status
+  /// and the body.
+  raw?: string;
+  /// Reads again; set by a resource, so every failed region offers it.
+  retry?: () => Promise<void>;
+};
 
 /// The failure a thrown error is. `tell` is the surface's own command for
 /// more (`devplane change show <id>`); a host that is down or a tab without
 /// a token has a better one, whatever was being read.
 export function failure(e: unknown, tell = "devplane doctor"): Failure {
-  if (e instanceof Unauthorised) return { says: "this tab has no token", tell: "devplane open" };
+  if (e instanceof Unauthorised) return { says: "this tab has no token", tell: "devplane up", down: true };
   if (e instanceof Unreachable) {
-    return { says: e.message, tell: e.kind === "refused" ? "devplane serve" : "devplane doctor" };
+    return { says: e.message, tell: e.kind === "refused" ? "devplane up --no-browser" : "devplane doctor", down: true };
+  }
+  if (e instanceof Refused) {
+    const body = typeof e.body === "string" ? e.body : e.body === null ? "" : JSON.stringify(e.body);
+    return { says: e.message, tell, raw: `${e.path ? `${e.path} → ` : ""}${e.status}${body ? ` ${body}` : ""}` };
   }
   return { says: e instanceof Error ? e.message : String(e), tell };
 }
@@ -82,7 +97,7 @@ export function resource<T>(
     } catch (e) {
       if (mine !== gen || n < landed) return;
       landed = n;
-      fail = failure(e, opts.tell?.());
+      fail = { ...failure(e, opts.tell?.()), retry: reload };
     } finally {
       if (mine === gen) pending = Math.max(0, pending - 1);
     }
@@ -108,6 +123,11 @@ export function resource<T>(
     return () => clearInterval(t);
   });
 
+  async function reload() {
+    const want = untrack(() => key);
+    if (want) await read(want, gen);
+  }
+
   return {
     get phase(): Phase {
       return data !== null ? (fail ? "stale" : "ok") : fail ? "failed" : "loading";
@@ -121,10 +141,7 @@ export function resource<T>(
     get at() {
       return at;
     },
-    async reload() {
-      const want = untrack(() => key);
-      if (want) await read(want, gen);
-    },
+    reload,
   };
 }
 

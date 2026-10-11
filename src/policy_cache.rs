@@ -74,7 +74,22 @@ pub struct PolicyCache {
     home: Option<PathBuf>,
     /// `~/.devplane`, whose files no agent call may change.
     devplane_home: Option<PathBuf>,
+    /// The same, as it was given, when that differs (`/var` for `/private/var`).
+    devplane_home_given: Option<PathBuf>,
     projects: Mutex<HashMap<PathBuf, Entry>>,
+    /// The person's own `policy.toml`, where their grants are; `None` holds none.
+    grants_file: Option<PathBuf>,
+    grants: Mutex<GrantsEntry>,
+}
+
+/// The person's grants as their file last said them.
+#[derive(Debug, Default)]
+struct GrantsEntry {
+    grants: crate::core::grant::Grants,
+    /// Why the file would not load; it then holds no grants.
+    error: Option<String>,
+    text: Option<Vec<u8>>,
+    checked: Option<Instant>,
 }
 
 impl PolicyCache {
@@ -84,13 +99,123 @@ impl PolicyCache {
             global_root,
             home,
             devplane_home: None,
+            devplane_home_given: None,
             projects: Mutex::new(HashMap::new()),
+            grants_file: None,
+            grants: Mutex::new(GrantsEntry::default()),
         }
+    }
+
+    /// Reads grants from the person's own file at `path` (their
+    /// `~/.devplane/policy.toml`), re-read when its bytes change.
+    pub fn with_grants_file(mut self, path: PathBuf) -> Self {
+        self.grants_file = Some(path);
+        self
+    }
+
+    /// The person's grants now, and why the file would not load if it would
+    /// not (it then holds none).
+    pub fn grants(&self) -> (crate::core::grant::Grants, Option<String>) {
+        let mut entry = self.grants.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(path) = &self.grants_file else {
+            return (Default::default(), None);
+        };
+        if entry.checked.is_some_and(|c| c.elapsed() < RECHECK) {
+            return (entry.grants.clone(), entry.error.clone());
+        }
+        let text = std::fs::read(path).ok();
+        if entry.checked.is_none() || entry.text != text {
+            let parsed = match &text {
+                None => Ok(Default::default()),
+                Some(bytes) => crate::core::GlobalConfig::parse(&String::from_utf8_lossy(bytes))
+                    .and_then(|g| g.grants()),
+            };
+            match parsed {
+                Ok(g) => {
+                    entry.grants = g;
+                    entry.error = None;
+                }
+                Err(e) => {
+                    entry.grants = Default::default();
+                    entry.error = Some(format!("{}: {e}", path.display()));
+                }
+            }
+            entry.text = text;
+        }
+        entry.checked = Some(Instant::now());
+        (entry.grants.clone(), entry.error.clone())
+    }
+
+    /// Reads the person's file again at the next use: after a grant is
+    /// written or revoked, the next call must see it.
+    pub fn forget_grants(&self) {
+        self.grants
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .checked = None;
+    }
+
+    /// The whole verdict for a call a person was about to be asked about:
+    /// every prohibition, question and doubt first ([`Self::restrictive`]),
+    /// and only a call still undecided is offered to the person's grants for
+    /// the governing project. The one place a [`Verdict::Allow`] is made.
+    pub fn decide(&self, dir: &Path, tool: &str, input: &serde_json::Value) -> Verdict {
+        self.decide_at(dir, tool, input, jiff::Timestamp::now())
+    }
+
+    /// [`Self::decide`] at a given time, for lapsed grants.
+    pub fn decide_at(
+        &self,
+        dir: &Path,
+        tool: &str,
+        input: &serde_json::Value,
+        now: jiff::Timestamp,
+    ) -> Verdict {
+        let verdict = self.restrictive(dir, tool, input);
+        if verdict != Verdict::Undecided {
+            return verdict;
+        }
+        let dir = canonical(dir);
+        let Some(root) = crate::repo::governing_root(&dir).map(|r| canonical(&r)) else {
+            return verdict;
+        };
+        let (grants, _) = self.grants();
+        let ctx = Context::at(&dir)
+            .with_home(self.home.as_deref())
+            .with_source(&root)
+            .with_realpath(realpath);
+        match grants.matching(&ctx, &root, tool, input, now) {
+            Some(g) => Verdict::Allow { grant: g.clone() },
+            None => verdict,
+        }
+    }
+
+    /// A lapsed grant that would have answered this call, so a surface can
+    /// say it lapsed.
+    pub fn lapsed_for(
+        &self,
+        dir: &Path,
+        tool: &str,
+        input: &serde_json::Value,
+        now: jiff::Timestamp,
+    ) -> Option<crate::core::grant::Grant> {
+        let dir = canonical(dir);
+        let root = crate::repo::governing_root(&dir).map(|r| canonical(&r))?;
+        let (grants, _) = self.grants();
+        let ctx = Context::at(&dir)
+            .with_home(self.home.as_deref())
+            .with_source(&root)
+            .with_realpath(realpath);
+        grants
+            .lapsed_matching(&ctx, &root, tool, input, now)
+            .cloned()
     }
 
     /// Protects Devplane's own files under `dir` (see [`own_files`]).
     pub fn with_devplane_home(mut self, dir: PathBuf) -> Self {
-        self.devplane_home = Some(canonical(&dir));
+        let real = canonical(&dir);
+        self.devplane_home_given = (real != dir).then_some(dir);
+        self.devplane_home = Some(real);
         self
     }
 
@@ -109,7 +234,9 @@ impl PolicyCache {
         let own = crate::config::home().ok();
         let mut cache = Self::new(global, root, user_home);
         if let Some(own) = own {
-            cache = cache.with_devplane_home(own);
+            cache = cache
+                .with_grants_file(own.join("policy.toml"))
+                .with_devplane_home(own);
         }
         (cache, error)
     }
@@ -162,10 +289,11 @@ impl PolicyCache {
         Verdict::Undecided
     }
 
-    /// The built-in prohibition, beneath every rule a person writes: an agent
-    /// may not change the rules that gate it, the ledger that records its
-    /// permissions or the host's credentials — nor read the token, with which
-    /// it could answer its own questions. Reading the rest stays allowed.
+    /// The built-in prohibition ([`OWN_RULE`]), in force whether or not any
+    /// rule is: an agent may not read or change anything under `~/.devplane` —
+    /// the rules that gate it, the ledger its answers are written to, the
+    /// host's token — nor change the governing project's `devplane.toml`. It
+    /// runs as the same user, so this narrows the hole and does not close it.
     fn own_files(
         &self,
         dir: &Path,
@@ -174,23 +302,13 @@ impl PolicyCache {
         input: &serde_json::Value,
     ) -> Option<Verdict> {
         use crate::core::policy::{Class, Rule};
-        const WHY: &str = "built in: an agent may not change Devplane's own rules, records or \
-                           credentials, nor read its token";
         let mut edits: Vec<String> = Vec::new();
         let mut reads: Vec<String> = Vec::new();
         let mut repo: Vec<String> = Vec::new();
-        if let Some(h) = &self.devplane_home {
-            let h = h.display();
-            for f in [
-                "policy.toml",
-                "agents.toml",
-                "devplane.db*",
-                "token",
-                "host.json",
-            ] {
-                edits.push(format!("Edit(/{h}/{f})"));
-            }
-            reads.push(format!("Read(/{h}/token)"));
+        for h in self.devplane_home.iter().chain(&self.devplane_home_given) {
+            // The whole home: its store holds the answers, its token opens the host.
+            edits.push(format!("Edit(/{}/**)", h.display()));
+            reads.push(format!("Read(/{}/**)", h.display()));
         }
         if let Some(r) = root {
             repo.push(format!(
@@ -208,9 +326,11 @@ impl PolicyCache {
         if edits.is_empty() && repo.is_empty() {
             return None;
         }
-        let ctx = Context::at(dir).with_home(self.home.as_deref());
+        let ctx = Context::at(dir)
+            .with_home(self.home.as_deref())
+            .with_realpath(realpath);
         let deny = |r: &Rule| Verdict::Deny {
-            rule: format!("{r} ({WHY})"),
+            rule: format!("{OWN_RULE}: {r} ({OWN_WHY})"),
         };
         if !crate::core::policy::is_shell(tool) {
             if let Some(r) = edits
@@ -224,10 +344,13 @@ impl PolicyCache {
             return None;
         }
         let command = crate::core::policy::rule_content(tool, input)?;
-        let own = Own::new(self.devplane_home.as_deref(), root);
-        let why = |what: &str| format!("{what} ({WHY})");
+        let mut own = Own::new(self.devplane_home.as_deref(), root);
+        own.given = self.devplane_home_given.clone();
+        let why = |what: &str| format!("{what} ({OWN_WHY})");
         match own.judge(&command, dir, self.home.as_deref()) {
-            Judged::Deny(what) => Some(Verdict::Deny { rule: why(&what) }),
+            Judged::Deny(what) => Some(Verdict::Deny {
+                rule: format!("{OWN_RULE}: {}", why(&what)),
+            }),
             Judged::Unresolved(what) => Some(Verdict::Unresolved { why: why(&what) }),
             Judged::Clear => None,
         }
@@ -237,10 +360,19 @@ impl PolicyCache {
     /// process's cwd, which may be another repository).
     pub fn restrictive_global_only(&self, tool: &str, input: &serde_json::Value) -> Verdict {
         forget_resolved();
+        // No directory is known, so a relative path is read from the root:
+        // only an absolute or `~` path can name the home.
+        let own = self.own_files(Path::new("/"), None, tool, input);
+        if let Some(v @ Verdict::Deny { .. }) = own {
+            return v;
+        }
         let ctx = Context::at(&self.global_root)
             .with_home(self.home.as_deref())
             .with_realpath(realpath);
-        self.global.restrictive(&ctx, tool, input)
+        match self.global.restrictive(&ctx, tool, input) {
+            Verdict::Undecided => own.unwrap_or(Verdict::Undecided),
+            v => v,
+        }
     }
 
     /// The allow rule to paste into the agent's own settings so this call is
@@ -324,8 +456,8 @@ impl PolicyCache {
         let rules = match ProjectConfig::load(&root) {
             Ok(c) => Rules {
                 policy: c.policy(),
-                stall_seconds: c.policy.stall_timeout.map(|d| d.as_secs() as i64),
-                // A hold that will not parse is no hold: `devplane check`
+                stall_seconds: c.agent.stall_timeout.map(|d| d.as_secs() as i64),
+                // A hold that will not parse is no hold: `devplane config check`
                 // names it, and holding for an unintended time is worse.
                 hold: c.questions.hold().ok().flatten().map(|h| h.0),
             },
@@ -370,6 +502,45 @@ impl PolicyCache {
     }
 }
 
+/// The allow rules in the agent's own settings for a project: the project's
+/// `.claude/settings.json` and `settings.local.json`, and the person's
+/// `~/.claude/settings.json`. Unreadable files contribute nothing.
+pub fn agent_allow_rules(root: &Path, user_home: Option<&Path>) -> Vec<String> {
+    let mut files = vec![
+        root.join(".claude/settings.json"),
+        root.join(".claude/settings.local.json"),
+    ];
+    if let Some(h) = user_home {
+        files.push(h.join(".claude/settings.json"));
+    }
+    let mut out = Vec::new();
+    for f in files {
+        let Ok(text) = std::fs::read_to_string(&f) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if let Some(list) = v.pointer("/permissions/allow").and_then(|a| a.as_array()) {
+            out.extend(list.iter().filter_map(|r| r.as_str().map(str::to_string)));
+        }
+    }
+    out
+}
+
+/// Whether a grant is broader than the agent's own settings: no allow rule
+/// there covers it, so where it answers the agent would have asked.
+pub fn widens_the_agent(rule: &str, agent_allow: &[String]) -> bool {
+    use crate::core::policy::{Class, Rule};
+    let Some(grant) = Rule::parse(rule, Class::Allow) else {
+        return true;
+    };
+    !agent_allow
+        .iter()
+        .filter_map(|r| Rule::parse(r, Class::Allow))
+        .any(|a| a.covers_rule(&grant))
+}
+
 /// The path as the filesystem knows it, so `.`, `..` and a symlinked parent
 /// cannot make one directory look like another to the prefix test below.
 /// Devplane's own files as absolute paths, for reading a shell line: a
@@ -380,6 +551,8 @@ struct Own {
     home: Option<PathBuf>,
     /// The governing project's `devplane.toml`.
     repo: Option<PathBuf>,
+    /// `~/.devplane` as it was given, where that differs from `home`.
+    given: Option<PathBuf>,
 }
 
 enum Judged {
@@ -393,9 +566,20 @@ enum Held {
     Above(String),
 }
 
+/// The name every built-in refusal of Devplane's own files carries.
+pub const OWN_RULE: &str = "devplane-own-files";
+const OWN_WHY: &str = "built in: an agent may not read or change Devplane's own rules, records \
+                       or credentials";
+
 /// The files under `~/.devplane` no agent may change; `devplane.db` also
 /// covers its `-wal`, `-shm` and `-journal` siblings.
-const OWN_NAMES: &[&str] = &["policy.toml", "agents.toml", "token", "host.json"];
+const OWN_NAMES: &[&str] = &[
+    "policy.toml",
+    "agents.toml",
+    crate::trust::FILE,
+    "token",
+    "host.json",
+];
 const OWN_DB: &str = "devplane.db";
 /// Past this many candidate working directories the line is not followed.
 const MOST_CWDS: usize = 16;
@@ -405,6 +589,7 @@ impl Own {
         Self {
             home: home.map(Path::to_path_buf),
             repo: root.map(|r| r.join(crate::core::config::CONFIG_FILE)),
+            given: None,
         }
     }
 
@@ -456,6 +641,19 @@ impl Own {
 
     fn judge(&self, command: &str, dir: &Path, user_home: Option<&Path>) -> Judged {
         use crate::core::command::{Access, ArgKind};
+        // Naming the home at all, however the shell would spell it.
+        let lower = command.to_ascii_lowercase();
+        let named = ["~/.devplane", "$home/.devplane", "${home}/.devplane"]
+            .iter()
+            .any(|s| lower.contains(s))
+            || self
+                .home
+                .iter()
+                .chain(&self.given)
+                .any(|h| command.contains(&*h.to_string_lossy()));
+        if named {
+            return Judged::Deny("names Devplane's home".into());
+        }
         let line = crate::core::command::read(command);
         // Every directory a command on this line may run in; `None` once a
         // `cd` goes somewhere the reader cannot name.
@@ -556,6 +754,9 @@ impl Own {
                     }) else {
                         continue;
                     };
+                    if self.home.as_deref().is_some_and(|h| path.starts_with(h)) {
+                        return Judged::Deny(format!("reaches `{}`", path.display()));
+                    }
                     if let Some((f, read_too)) = self.file(&path) {
                         let home_file = self.repo.as_deref() != Some(path.as_path());
                         match t.access {
@@ -616,7 +817,6 @@ impl Own {
             ));
         }
         // Spelled so the reader cannot name it: a person looks.
-        let lower = command.to_ascii_lowercase();
         let mentions = lower.contains(".devplane")
             || lower.contains(crate::core::config::CONFIG_FILE)
             || lower.contains(OWN_DB);
@@ -707,13 +907,13 @@ mod tests {
 
     #[test]
     fn a_project_sets_its_own_stall_timeout_and_a_worktree_inherits_it() {
-        let dir = repo("stall", "[policy]\nstall_timeout = \"12m\"\n");
+        let dir = repo("stall", "[agent]\nstall_timeout = \"12m\"\n");
         let cache = PolicyCache::for_projects_only();
         assert_eq!(cache.stall_seconds(&dir), Some(720));
         let wt = dir.join(".claude/worktrees/fix-login");
         std::fs::create_dir_all(&wt).unwrap();
         assert_eq!(cache.stall_seconds(&wt), Some(720));
-        let silent = repo("stall-silent", "[policy]\nnever_auto = [\"Read(.env)\"]\n");
+        let silent = repo("stall-silent", "[policy]\ndeny = [\"Read(.env)\"]\n");
         assert_eq!(
             cache.stall_seconds(&silent),
             None,
@@ -723,7 +923,7 @@ mod tests {
 
     #[test]
     fn a_projects_own_rules_decide_its_agents_and_not_its_neighbours() {
-        let a = repo("own-a", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
+        let a = repo("own-a", "[policy]\ndeny = [\"Bash(rm -rf *)\"]\n");
         let b = repo("own-b", "");
         let cache = PolicyCache::for_projects_only();
         assert_eq!(
@@ -742,7 +942,7 @@ mod tests {
 
     #[test]
     fn deny_wins_in_both_directions_and_ask_reaches_from_either_file() {
-        let dir = repo("deny", "[policy]\nalways_ask = [\"Bash(git push *)\"]\n");
+        let dir = repo("deny", "[policy]\nask = [\"Bash(git push *)\"]\n");
         let cache = PolicyCache::new(
             Policy::rules(&["Bash(git push *)".into()], &[]),
             PathBuf::from("/"),
@@ -752,7 +952,7 @@ mod tests {
             cache.restrictive(&dir, "Bash", &sh("git push origin main")),
             Verdict::Deny { .. }
         ));
-        let dir2 = repo("deny2", "[policy]\nnever_auto = [\"Bash(ls *)\"]\n");
+        let dir2 = repo("deny2", "[policy]\ndeny = [\"Bash(ls *)\"]\n");
         let cache2 = PolicyCache::new(
             Policy::rules(&[], &["Bash(ls *)".into()]),
             PathBuf::from("/"),
@@ -762,7 +962,7 @@ mod tests {
             cache2.restrictive(&dir2, "Bash", &sh("ls -la")),
             Verdict::Deny { .. }
         ));
-        let dir3 = repo("askglobal", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
+        let dir3 = repo("askglobal", "[policy]\ndeny = [\"Bash(rm -rf *)\"]\n");
         let cache3 = PolicyCache::new(
             Policy::rules(&[], &["Bash(git push *)".into()]),
             PathBuf::from("/"),
@@ -783,12 +983,12 @@ mod tests {
 
     #[test]
     fn an_agent_cannot_widen_its_rules_from_the_worktree_it_works_in() {
-        let root = repo("escalate", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
+        let root = repo("escalate", "[policy]\ndeny = [\"Bash(rm -rf *)\"]\n");
         let wt = root.join(".claude/worktrees/feature-a");
         std::fs::create_dir_all(&wt).unwrap();
         std::fs::write(
             wt.join(crate::core::config::CONFIG_FILE),
-            "[policy]\nnever_auto = []\n",
+            "[policy]\ndeny = []\n",
         )
         .unwrap();
         let cache = PolicyCache::for_projects_only();
@@ -810,7 +1010,7 @@ mod tests {
 
     #[test]
     fn a_linked_worktree_is_governed_by_its_repository_only_when_git_agrees() {
-        let root = repo("linked", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
+        let root = repo("linked", "[policy]\ndeny = [\"Bash(rm -rf *)\"]\n");
         let wt = root
             .parent()
             .unwrap()
@@ -844,7 +1044,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             wt.join(crate::core::config::CONFIG_FILE),
-            "[policy]\nnever_auto = []\n",
+            "[policy]\ndeny = []\n",
         )
         .unwrap();
         cache.clear();
@@ -874,7 +1074,7 @@ mod tests {
 
     #[test]
     fn an_edit_takes_effect_and_a_broken_file_asks_about_everything() {
-        let dir = repo("edit", "[policy]\nnever_auto = []\n");
+        let dir = repo("edit", "[policy]\ndeny = []\n");
         let cache = PolicyCache::for_projects_only();
         assert_eq!(
             cache.restrictive(&dir, "Bash", &sh("ls -la")),
@@ -882,7 +1082,7 @@ mod tests {
         );
         std::fs::write(
             dir.join(crate::core::config::CONFIG_FILE),
-            "[policy]\nnever_auto = [\"Bash(ls *)\"]\n",
+            "[policy]\ndeny = [\"Bash(ls *)\"]\n",
         )
         .unwrap();
         cache.clear();
@@ -892,7 +1092,7 @@ mod tests {
         ));
         std::fs::write(
             dir.join(crate::core::config::CONFIG_FILE),
-            "[policy]\nnever_autoo = [",
+            "[policy]\ndenyy = [",
         )
         .unwrap();
         std::thread::sleep(RECHECK);
@@ -944,7 +1144,7 @@ mod tests {
     fn repeated_checks_are_cheap() {
         use std::sync::atomic::Ordering;
         let _counted = COUNTED.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = repo("fast", "[policy]\nnever_auto = [\"Bash(ls *)\"]\n");
+        let dir = repo("fast", "[policy]\ndeny = [\"Bash(ls *)\"]\n");
         let cache = PolicyCache::for_projects_only();
         cache.restrictive(&dir, "Bash", &sh("ls -la"));
         PARSED.store(0, Ordering::Relaxed);
@@ -965,10 +1165,7 @@ mod tests {
         let distinct: String = (0..10)
             .map(|i| format!("  \"Read(never-matches-{i}/deep/**)\",\n"))
             .collect();
-        let dir = repo(
-            "realpath",
-            &format!("[policy]\nnever_auto = [\n{distinct}]\n"),
-        );
+        let dir = repo("realpath", &format!("[policy]\ndeny = [\n{distinct}]\n"));
         let file = dir.join("f.txt");
         std::fs::write(&file, "x").ok();
         let cache = PolicyCache::for_projects_only();
@@ -985,10 +1182,7 @@ mod tests {
         let same: String = (0..10)
             .map(|i| format!("  \"Read(secrets/deep/x{i}/**)\",\n"))
             .collect();
-        let dir = repo(
-            "realpath-same",
-            &format!("[policy]\nnever_auto = [\n{same}]\n"),
-        );
+        let dir = repo("realpath-same", &format!("[policy]\ndeny = [\n{same}]\n"));
         let file = dir.join("f.txt");
         std::fs::write(&file, "x").ok();
         let call = json!({"file_path": file.to_str().unwrap()});
@@ -1007,6 +1201,387 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "{:?}",
             started.elapsed()
+        );
+    }
+}
+
+#[cfg(test)]
+mod grant_tests {
+    use super::*;
+    use crate::core::policy::{Class, Rule};
+    use serde_json::{Value, json};
+
+    /// A repository, a Devplane home beside it, and a cache that reads the
+    /// home's `policy.toml` for its machine-wide rules and the person's grants.
+    struct Setup {
+        root: PathBuf,
+        home: PathBuf,
+        outside: PathBuf,
+    }
+
+    fn setup(tag: &str, project: &str) -> Setup {
+        let base = std::env::temp_dir().join(format!(
+            "vp-grant-{tag}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let root = base.join("repo");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        if !project.is_empty() {
+            std::fs::write(root.join(crate::core::config::CONFIG_FILE), project).unwrap();
+        }
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        Setup {
+            root: canonical(&root),
+            home: canonical(&home),
+            outside: canonical(&outside),
+        }
+    }
+
+    fn cache(s: &Setup, persons_file: &str) -> PolicyCache {
+        let file = s.home.join("policy.toml");
+        if persons_file.is_empty() {
+            std::fs::remove_file(&file).ok();
+        } else {
+            std::fs::write(&file, persons_file).unwrap();
+        }
+        let global = match crate::core::GlobalConfig::parse(persons_file) {
+            Ok(g) => g.policy(),
+            Err(e) => Policy::unloadable(e),
+        };
+        PolicyCache::new(global, s.home.clone(), None)
+            .with_grants_file(file)
+            .with_devplane_home(s.home.clone())
+    }
+
+    fn granting(root: &Path, rules: &[&str]) -> String {
+        let list = rules
+            .iter()
+            .map(|r| crate::core::grant::toml_string(r))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "[projects.{}]\nallow = [{list}]\n",
+            crate::core::grant::toml_string(&root.display().to_string())
+        )
+    }
+
+    fn sh(c: &str) -> Value {
+        json!({ "command": c })
+    }
+
+    fn now() -> jiff::Timestamp {
+        "2026-10-04T00:00:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn a_prohibition_beats_a_grant() {
+        // The filesystem counters are shared with the tests that read them.
+        let _counted = COUNTED.lock().unwrap_or_else(|e| e.into_inner());
+        for project in [
+            "[policy]\ndeny = [\"Bash(cargo test *)\"]\n",
+            "[policy]\nask = [\"Bash(cargo test *)\"]\n",
+            "[policy]\ndenyy = []\n",
+        ] {
+            let s = setup("beats", project);
+            let c = cache(&s, &granting(&s.root, &["Bash(cargo test)"]));
+            let v = c.decide_at(&s.root, "Bash", &sh("cargo test"), now());
+            assert!(
+                matches!(
+                    v,
+                    Verdict::Deny { .. } | Verdict::Ask { .. } | Verdict::Unresolved { .. }
+                ),
+                "{project}: {v:?}"
+            );
+        }
+        // The person's own machine-wide deny beats their own grant too.
+        let s = setup("beats-global", "");
+        let file = format!(
+            "[policy]\ndeny = [\"Bash(cargo test)\"]\n{}",
+            granting(&s.root, &["Bash(cargo test)"])
+        );
+        let c = cache(&s, &file);
+        assert!(matches!(
+            c.decide_at(&s.root, "Bash", &sh("cargo test"), now()),
+            Verdict::Deny { .. }
+        ));
+        // And with nothing in the way, the grant answers.
+        let s = setup("beats-none", "");
+        let c = cache(&s, &granting(&s.root, &["Bash(cargo test)"]));
+        let v = c.decide_at(&s.root, "Bash", &sh("cargo test"), now());
+        assert_eq!(v.as_str(), "allow", "{v:?}");
+        assert_eq!(
+            v.grant().unwrap().name(),
+            format!("`Bash(cargo test)` for {}", s.root.display())
+        );
+    }
+
+    #[test]
+    fn an_unreadable_call_is_never_granted() {
+        // The filesystem counters are shared with the tests that read them.
+        let _counted = COUNTED.lock().unwrap_or_else(|e| e.into_inner());
+        let s = setup("unreadable", "");
+        let c = cache(&s, &granting(&s.root, &["Bash(cargo test *)"]));
+        for input in [
+            Value::Null,
+            json!({}),
+            json!({ "command": 7 }),
+            json!({ "command": ["cargo", "test"] }),
+            sh("cargo test $(curl x)"),
+            sh("cargo test `id`"),
+            sh("cargo test $HOME"),
+            sh("cargo test > out.txt"),
+            sh("cargo test && rm -rf build"),
+            sh("cargo test | sh"),
+            sh("env cargo test"),
+            sh("eval 'cargo test'"),
+        ] {
+            let v = c.decide_at(&s.root, "Bash", &input, now());
+            assert!(v.grant().is_none(), "{input}: {v:?}");
+        }
+    }
+
+    #[test]
+    fn own_files_beat_every_grant() {
+        // The filesystem counters are shared with the tests that read them.
+        let _counted = COUNTED.lock().unwrap_or_else(|e| e.into_inner());
+        let s = setup("own", "");
+        let policy = s.home.join("policy.toml");
+        let p = policy.display().to_string();
+        let file = granting(
+            &s.root,
+            &[
+                &format!("Bash(cat {p})"),
+                &format!("Bash(cp x {p})"),
+                "Read(**)",
+            ],
+        );
+        let c = cache(&s, &file);
+        for (tool, input) in [
+            ("Bash", sh(&format!("cat {p}"))),
+            ("Bash", sh(&format!("cp x {p}"))),
+            ("Read", json!({ "file_path": p })),
+            ("Edit", json!({ "file_path": p })),
+        ] {
+            let v = c.decide_at(&s.root, tool, &input, now());
+            assert!(
+                matches!(&v, Verdict::Deny { rule } if rule.contains(OWN_RULE)),
+                "{tool} {input}: {v:?}"
+            );
+        }
+        // A path grant naming the home by absolute path never loads.
+        let e = crate::core::GlobalConfig::parse(&granting(&s.root, &[&format!("Edit(/{p})")]))
+            .unwrap_err();
+        assert!(e.contains("outside the project"), "{e}");
+    }
+
+    #[test]
+    fn a_grant_reaches_only_its_own_project() {
+        // The filesystem counters are shared with the tests that read them.
+        let _counted = COUNTED.lock().unwrap_or_else(|e| e.into_inner());
+        let s = setup("only", "");
+        let other = setup("only-other", "");
+        let c = cache(&s, &granting(&s.root, &["Bash(cargo test)"]));
+        assert!(
+            c.decide_at(&other.root, "Bash", &sh("cargo test"), now())
+                .grant()
+                .is_none()
+        );
+        assert!(
+            c.decide_at(&s.outside, "Bash", &sh("cargo test"), now())
+                .grant()
+                .is_none()
+        );
+        assert!(
+            c.decide_at(&s.root.join("src"), "Bash", &sh("cargo test"), now())
+                .grant()
+                .is_some(),
+            "a directory inside the project is the project"
+        );
+    }
+
+    /// A small fixed-seed generator, so the corpus is the same on every run.
+    struct Gen(u64);
+    impl Gen {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn pick<'a, T>(&mut self, xs: &'a [T]) -> &'a T {
+            &xs[(self.next() % xs.len() as u64) as usize]
+        }
+    }
+
+    /// Over every reachable input the generator makes, an allow exists only
+    /// where the person's own file holds a live grant for that project, every
+    /// prohibition, question and doubt has passed, the input is readable, and
+    /// the grant names every command on the line; with no grant in the file,
+    /// nothing is ever allowed.
+    #[test]
+    fn no_reachable_input_allows_without_a_persons_grant() {
+        // The filesystem counters are shared with the tests that read them.
+        let _counted = COUNTED.lock().unwrap_or_else(|e| e.into_inner());
+        const WORDS: &[&str] = &[
+            "cargo",
+            "test",
+            "fmt",
+            "--lib",
+            "rm",
+            "-rf",
+            "build",
+            "&&",
+            ";",
+            "|",
+            "||",
+            "$(x)",
+            "`x`",
+            "$X",
+            "*",
+            "~",
+            "sudo",
+            "X=1",
+            ">",
+            "/etc/passwd",
+            "2>&1",
+            "\n",
+            "'a b'",
+            "\"c d\"",
+            "./cargo",
+            "cat",
+            "src/a.rs",
+            "git",
+            "push",
+            "python",
+            "-c",
+            "{a,b}",
+        ];
+        const TOOLS: &[&str] = &[
+            "Bash",
+            "Monitor",
+            "Read",
+            "Edit",
+            "Write",
+            "Grep",
+            "WebFetch",
+            "PowerShell",
+            "mcp__github__create_pull_request",
+            "",
+        ];
+        const PROJECTS: &[&str] = &[
+            "",
+            "[policy]\ndeny = [\"Bash(rm -rf *)\"]\n",
+            "[policy]\nask = [\"Bash(cargo fmt *)\"]\n",
+            "[policy]\ndenyy = []\n",
+        ];
+        let mut allows = 0usize;
+        let mut cases = 0usize;
+        for (pi, project) in PROJECTS.iter().enumerate() {
+            let s = setup(&format!("prop{pi}"), project);
+            let files = [
+                String::new(),
+                granting(
+                    &s.root,
+                    &["Bash(cargo test)", "Bash(cargo fmt *)", "Edit(src/**)"],
+                ),
+                granting(&s.root, &["Bash(cargo test *)", "Read(**)"]),
+                format!(
+                    "[projects.{}]\nallow = [{{ rule = \"Bash(cargo test)\", until = \"2026-01-01\" }}]\n",
+                    crate::core::grant::toml_string(&s.root.display().to_string())
+                ),
+                granting(&s.outside, &["Bash(cargo test)"]),
+            ];
+            let home = s.home.display().to_string();
+            let root = s.root.display().to_string();
+            let files_in: Vec<String> = vec![
+                "src/a.rs".into(),
+                format!("{root}/src/b.rs"),
+                format!("{root}/../x"),
+                "../x".into(),
+                format!("{home}/policy.toml"),
+                "~/x".into(),
+                "/etc/passwd".into(),
+                "$X/a".into(),
+            ];
+            for (fi, file) in files.iter().enumerate() {
+                let c = cache(&s, file);
+                let (grants, error) = c.grants();
+                assert!(error.is_none(), "{file}: {error:?}");
+                let mut g = Gen(0x9E37_79B9_7F4A_7C15 ^ ((pi as u64) << 8 | fi as u64));
+                for _ in 0..1500 {
+                    cases += 1;
+                    let tool = *g.pick(TOOLS);
+                    let input = match g.next() % 8 {
+                        0 => Value::Null,
+                        1 => json!({}),
+                        2 => json!({ "command": g.next() % 100 }),
+                        3 | 4 => {
+                            let n = 1 + g.next() % 5;
+                            let words: Vec<&str> = (0..n).map(|_| *g.pick(WORDS)).collect();
+                            sh(&words.join(" "))
+                        }
+                        5 => sh(g.pick(&["cargo test", "cargo fmt --all", "cargo test --lib"])),
+                        _ => json!({ "file_path": g.pick(&files_in) }),
+                    };
+                    let dir = g
+                        .pick(&[s.root.clone(), s.root.join("src"), s.outside.clone()])
+                        .clone();
+                    let v = c.decide_at(&dir, tool, &input, now());
+                    let Verdict::Allow { grant } = &v else {
+                        continue;
+                    };
+                    allows += 1;
+                    let why = format!("{project} | {file} | {tool} {input} in {}", dir.display());
+                    assert!(fi != 0, "allowed with no grant in the file: {why}");
+                    assert_eq!(
+                        c.restrictive(&dir, tool, &input),
+                        Verdict::Undecided,
+                        "allowed past a prohibition: {why}"
+                    );
+                    assert!(!grant.is_lapsed(now()), "a lapsed grant allowed: {why}");
+                    assert_eq!(grant.root(), s.root.as_path(), "{why}");
+                    assert!(
+                        grants.in_project(&s.root).contains(grant),
+                        "the grant is not one the file holds: {why}"
+                    );
+                    let content = crate::core::policy::rule_content(tool, &input)
+                        .unwrap_or_else(|| panic!("allowed unreadable input: {why}"));
+                    if crate::core::policy::is_shell(tool) {
+                        let line = crate::core::command::read(&content);
+                        assert!(line.barrier.is_none() && !line.commands.is_empty(), "{why}");
+                        assert!(!content.contains(['$', '`', '>', '~', '*']), "{why}");
+                        for cmd in &line.commands {
+                            assert!(
+                                grants.in_project(&s.root).iter().any(|g| {
+                                    Rule::parse(g.rule(), Class::Allow)
+                                        .is_some_and(|r| r.allows_command(cmd))
+                                }),
+                                "a command no grant names was allowed: {why}"
+                            );
+                        }
+                    } else {
+                        let p = Path::new(&content);
+                        let abs = if p.is_absolute() {
+                            p.to_path_buf()
+                        } else {
+                            dir.join(p)
+                        };
+                        assert!(crate::core::policy::within(&s.root, &abs), "{why}");
+                        assert!(!content.contains(".."), "{why}");
+                    }
+                }
+            }
+        }
+        // A guard that finds nothing to compare must fail.
+        assert!(cases >= 30_000, "{cases}");
+        assert!(
+            allows > 100,
+            "the corpus never reached an allow ({allows}), so it proves nothing"
         );
     }
 }

@@ -6,11 +6,12 @@
 //! which table is which. Timestamps are compared as text, so every one is
 //! written through [`ts`] at a fixed width.
 
+use crate::core::comments::ReviewComment;
 use crate::core::event::EventEnvelope;
 use crate::core::ids::{ProjectId, RunId};
 use crate::core::project::Project;
 use crate::core::run::Run;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use std::path::{Path, PathBuf};
@@ -23,14 +24,14 @@ use std::str::FromStr;
 /// satisfy (a renamed or added column, a changed type, a dropped table). A file
 /// stamped with anything else is moved aside on open (`Store::retire`), not
 /// migrated.
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 18;
 
 /// The statement that stamps it, written out because `PRAGMA user_version`
 /// accepts no bind parameter.
-const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 11";
+const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 18";
 
 /// The database and its sidecars readable by their owner alone, whoever
-/// opened them first — a hook creates the file long before any `serve` would
+/// opened them first — a hook creates the file long before any `up` would
 /// tighten the home. Best effort: a file this process does not own is left.
 fn owner_only(path: &Path) {
     #[cfg(unix)]
@@ -72,20 +73,58 @@ pub struct Store {
 
 impl Store {
     /// Opens the store, creating it if needed.
+    /// A store written by an older schema is set aside ([`Self::retire`]); one
+    /// written by a newer schema is refused and left exactly as it is.
     pub async fn open(path: &Path) -> Result<Self> {
-        Self::open_waiting(path, std::time::Duration::from_secs(5)).await
-    }
-
-    /// Opens the store, waiting at most `busy` for another writer's lock. The
-    /// hook passes a short one: it runs under the vendor's timeout, and a locked
-    /// database must cost the record (which is spooled), never the answer.
-    pub async fn open_waiting(path: &Path, busy: std::time::Duration) -> Result<Self> {
-        let store = Self::open_file(path, busy).await?;
+        let store = Self::open_file(path, std::time::Duration::from_secs(5), true).await?;
         owner_only(path);
         Ok(store)
     }
 
-    async fn open_file(path: &Path, busy: std::time::Duration) -> Result<Self> {
+    /// Opens the store for the hook, waiting at most `busy` for another
+    /// writer's lock: it runs under the vendor's timeout, and a locked database
+    /// must cost the record (which is spooled), never the answer. It never sets
+    /// a store aside: a store of another schema is an error here, and only a
+    /// person's own command or host retires an older one.
+    pub async fn open_waiting(path: &Path, busy: std::time::Duration) -> Result<Self> {
+        let store = Self::open_file(path, busy, false).await?;
+        owner_only(path);
+        Ok(store)
+    }
+
+    /// The schema a database file is stamped with, read from its header
+    /// without opening it; `None` when there is no such file or it is not yet
+    /// a database. The stamp is written once, so the header cannot disagree
+    /// with a log that has not been checkpointed except by still reading 0.
+    pub fn schema_on_disk(path: &Path) -> Option<i64> {
+        use std::io::Read;
+        let mut head = [0u8; 64];
+        std::fs::File::open(path).ok()?.read_exact(&mut head).ok()?;
+        if &head[..16] != b"SQLite format 3\0" {
+            return None;
+        }
+        Some(i64::from(i32::from_be_bytes([
+            head[60], head[61], head[62], head[63],
+        ])))
+    }
+
+    /// Why a store stamped `found` cannot be used by this binary, if it cannot.
+    pub fn skew(found: i64) -> Option<String> {
+        match found {
+            0 | SCHEMA_VERSION => None,
+            v if v > SCHEMA_VERSION => Some(format!(
+                "this store was written by a newer Devplane (schema {v}); this binary \
+                 understands {SCHEMA_VERSION} — update devplane"
+            )),
+            v => Some(format!(
+                "this store was written by an older Devplane (schema {v}); this binary \
+                 understands {SCHEMA_VERSION} — start the host (`devplane up` or `devplane \
+                 serve`) to set it aside"
+            )),
+        }
+    }
+
+    async fn open_file(path: &Path, busy: std::time::Duration, set_aside: bool) -> Result<Self> {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.ok();
         }
@@ -159,9 +198,14 @@ impl Store {
                         .with_context(|| format!("opening {}", path.display()))?;
                     return Ok(Self { pool });
                 }
-                // Written by a different schema: moved aside, never migrated
-                // or reused. Parallel tool calls fire concurrent hooks; one
-                // retires under an exclusive lock and the rest re-read after.
+                // Written by a newer schema: refused and never touched, since
+                // this binary cannot know what that record holds. By an older
+                // one, where this opener may: moved aside, never migrated or
+                // reused. Concurrent openers retire once, under an exclusive
+                // lock, and the rest re-read after.
+                Some(v) if v > SCHEMA_VERSION || (v != 0 && !set_aside) => {
+                    bail!("{}", Self::skew(v).unwrap_or_default());
+                }
                 Some(v) if v != 0 => {
                     let lock = Self::retire_lock(path).await?;
                     match probe().await {
@@ -172,7 +216,16 @@ impl Store {
                                 .with_context(|| format!("opening {}", path.display()))?;
                             return Ok(Self { pool });
                         }
-                        Some(v) if v != 0 => Self::retire(path, v)?,
+                        Some(v) if v > SCHEMA_VERSION => {
+                            bail!("{}", Self::skew(v).unwrap_or_default());
+                        }
+                        Some(v) if v != 0 => {
+                            // Trust lived in the store before schema 14: its
+                            // roots move to the file named for it before the
+                            // store is set aside, or trust would vanish.
+                            Self::carry_trust(path).await?;
+                            Self::retire(path, v)?
+                        }
                         _ => {}
                     }
                     let pool = connect()
@@ -196,6 +249,48 @@ impl Store {
         let store = Self { pool };
         store.migrate().await?;
         Ok(store)
+    }
+
+    /// Reads the roots a store from before schema 14 recorded as trusted and
+    /// adds them to `trusted.toml` beside it. A store with no such column
+    /// carries nothing; a trust file that cannot be written keeps the store
+    /// where it is, so the roots are never lost between the two.
+    async fn carry_trust(path: &Path) -> Result<()> {
+        let opts = SqliteConnectOptions::new().filename(path).read_only(true);
+        let Ok(pool) = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+        else {
+            return Ok(());
+        };
+        let roots = sqlx::query_as::<_, (String,)>("SELECT root FROM projects WHERE trusted != 0")
+            .fetch_all(&pool)
+            .await;
+        pool.close().await;
+        let Ok(roots) = roots else {
+            return Ok(());
+        };
+        if roots.is_empty() {
+            return Ok(());
+        }
+        let home = path.parent().unwrap_or(Path::new("."));
+        let n = roots.len();
+        crate::trust::add(home, roots.into_iter().map(|(r,)| PathBuf::from(r))).with_context(
+            || {
+                format!(
+                    "{} recorded {n} trusted repositories and they could not be moved to {}, \
+                     so the store was not set aside",
+                    path.display(),
+                    crate::trust::path(home).display()
+                )
+            },
+        )?;
+        tracing::info!(
+            roots = n,
+            "trusted repositories moved from the store to their own file"
+        );
+        Ok(())
     }
 
     /// Takes the exclusive lock that serialises retiring, on a file next to
@@ -415,6 +510,19 @@ impl Store {
         Ok(decode_rows("event", &rows, row_to_event))
     }
 
+    /// The edits a driven run's agent reported (`edit_reported`), oldest
+    /// first: the agent's own claims, kept only where transcripts are.
+    pub async fn edits_reported(&self, run: &RunId) -> Result<Vec<EventEnvelope>> {
+        let rows = sqlx::query(
+            "SELECT id, at, run_id, project_id, source, payload FROM events
+             WHERE run_id = ? AND kind = 'edit_reported' ORDER BY seq ASC",
+        )
+        .bind(run.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(decode_rows("event", &rows, row_to_event))
+    }
+
     /// Every tool call observed on this machine, newest first, with the
     /// directory whose rules govern it (from the run; calls whose run is pruned
     /// are dropped). Only tools a path or command rule can speak for.
@@ -492,18 +600,24 @@ impl Store {
     }
 
     /// Writes the run projection; one upsert, called after every applied event.
+    /// Snapshots are taken and saved by concurrent tasks, so one that folded
+    /// fewer stored events than the row already holds is dropped, never
+    /// written over it.
     pub async fn save_run(&self, run: &Run) -> Result<()> {
         sqlx::query(
-            "INSERT INTO runs (id, agent, cwd, last_event_at, payload)
-             VALUES (?,?,?,?,?)
+            "INSERT INTO runs (id, agent, cwd, last_event_at, last_seq, payload)
+             VALUES (?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
                agent=excluded.agent, cwd=excluded.cwd,
-               last_event_at=excluded.last_event_at, payload=excluded.payload",
+               last_event_at=excluded.last_event_at, last_seq=excluded.last_seq,
+               payload=excluded.payload
+             WHERE excluded.last_seq >= runs.last_seq",
         )
         .bind(run.id.as_str())
         .bind(&run.agent)
         .bind(run.cwd.to_string_lossy().to_string())
         .bind(ts(&run.last_event_at))
+        .bind(run.last_seq)
         .bind(serde_json::to_string(run)?)
         .execute(&self.pool)
         .await?;
@@ -517,18 +631,19 @@ impl Store {
         Ok(decode_rows("run", &rows, payload))
     }
 
+    /// Records a registered project. Its `trusted` is never written: trust is
+    /// a preference, kept in `trusted.toml` ([`crate::trust`]).
     pub async fn save_project(&self, p: &Project) -> Result<()> {
         sqlx::query(
-            "INSERT INTO projects (id, name, root, trusted, repo_url, auto_discovered)
-             VALUES (?,?,?,?,?,?)
+            "INSERT INTO projects (id, name, root, repo_url, auto_discovered)
+             VALUES (?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
-               name=excluded.name, trusted=excluded.trusted, repo_url=excluded.repo_url,
+               name=excluded.name, repo_url=excluded.repo_url,
                auto_discovered=excluded.auto_discovered",
         )
         .bind(p.id.as_str())
         .bind(&p.name)
         .bind(p.root.to_string_lossy().to_string())
-        .bind(p.trusted as i32)
         .bind(p.repo_url.as_deref())
         .bind(p.auto_discovered as i32)
         .execute(&self.pool)
@@ -537,20 +652,19 @@ impl Store {
     }
 
     /// Records a project something saw (a hook resolving a directory, the host
-    /// learning a remote) without touching `trusted`. Inserts a new row, and on
-    /// an existing one only fills a missing remote, so a hook's stale read can
-    /// never revoke a trust granted in between.
+    /// learning a remote). Inserts a new row, and on an existing one only fills
+    /// a missing remote, so a hook's stale read never undoes a registration
+    /// made in between.
     pub async fn note_project(&self, p: &Project) -> Result<()> {
         sqlx::query(
-            "INSERT INTO projects (id, name, root, trusted, repo_url, auto_discovered)
-             VALUES (?,?,?,?,?,?)
+            "INSERT INTO projects (id, name, root, repo_url, auto_discovered)
+             VALUES (?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
                repo_url = COALESCE(projects.repo_url, excluded.repo_url)",
         )
         .bind(p.id.as_str())
         .bind(&p.name)
         .bind(p.root.to_string_lossy().to_string())
-        .bind(p.trusted as i32)
         .bind(p.repo_url.as_deref())
         .bind(p.auto_discovered as i32)
         .execute(&self.pool)
@@ -559,17 +673,17 @@ impl Store {
     }
 
     pub async fn load_projects(&self) -> Result<Vec<Project>> {
-        let rows =
-            sqlx::query("SELECT id, name, root, trusted, repo_url, auto_discovered FROM projects")
-                .fetch_all(&self.pool)
-                .await?;
+        let rows = sqlx::query("SELECT id, name, root, repo_url, auto_discovered FROM projects")
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows
             .iter()
             .map(|r| Project {
                 id: ProjectId::new(r.get::<String, _>("id")),
                 name: r.get("name"),
                 root: r.get::<String, _>("root").into(),
-                trusted: r.get::<i64, _>("trusted") != 0,
+                // Never the store's to say: see `crate::trust`.
+                trusted: false,
                 repo_url: r.get("repo_url"),
                 auto_discovered: r.get::<i64, _>("auto_discovered") != 0,
             })
@@ -757,118 +871,6 @@ impl Store {
         Ok(decode_rows("change", &rows, payload))
     }
 
-    // ── Reports ─────────────────────────────────────────────────────────
-
-    /// Writes a report, and every later state of it.
-    pub async fn save_report(&self, r: &crate::core::report::Report) -> Result<()> {
-        let target = match &r.target {
-            crate::core::report::Target::Project { project, .. } => Some(project.as_str()),
-            _ => None,
-        };
-        sqlx::query(
-            "INSERT OR REPLACE INTO reports
-               (id, filed_at, source_project, target_project, state, payload)
-             VALUES (?,?,?,?,?,?)",
-        )
-        .bind(r.id.as_str())
-        .bind(ts(&r.provenance.at))
-        .bind(r.provenance.project.as_str())
-        .bind(target)
-        .bind(r.state.as_str())
-        .bind(serde_json::to_string(r)?)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// One report by id or id prefix, since people copy the part a table printed.
-    pub async fn report(&self, id: &str) -> Result<Option<crate::core::report::Report>> {
-        let rows = sqlx::query("SELECT id, payload FROM reports WHERE id = ?")
-            .bind(id)
-            .fetch_all(&self.pool)
-            .await?;
-        if let Some(r) = decode_rows("report", &rows, payload).pop() {
-            return Ok(Some(r));
-        }
-        let rows = sqlx::query("SELECT id, payload FROM reports WHERE id LIKE ? || '%' LIMIT 2")
-            .bind(id)
-            .fetch_all(&self.pool)
-            .await?;
-        let mut hits = decode_rows("report", &rows, payload);
-        Ok(match hits.len() {
-            1 => hits.pop(),
-            _ => None,
-        })
-    }
-
-    /// Every report addressed to a project, newest first; only the open ones
-    /// when asked.
-    pub async fn reports_to(
-        &self,
-        project: &crate::core::ProjectId,
-        open_only: bool,
-    ) -> Result<Vec<crate::core::report::Report>> {
-        let rows = sqlx::query(
-            "SELECT id, payload FROM reports
-              WHERE target_project = ? AND (? = 0 OR state = 'open')
-              ORDER BY filed_at DESC",
-        )
-        .bind(project.as_str())
-        .bind(open_only as i64)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(decode_rows("report", &rows, payload))
-    }
-
-    /// Every report a project filed, newest first; only the unanswered ones
-    /// when asked.
-    pub async fn reports_from(
-        &self,
-        project: &crate::core::ProjectId,
-        open_only: bool,
-    ) -> Result<Vec<crate::core::report::Report>> {
-        let rows = sqlx::query(
-            "SELECT id, payload FROM reports
-              WHERE source_project = ?
-                AND (? = 0 OR state IN ('open', 'accepted', 'drafted'))
-              ORDER BY filed_at DESC",
-        )
-        .bind(project.as_str())
-        .bind(open_only as i64)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(decode_rows("report", &rows, payload))
-    }
-
-    /// Every report, newest first, bounded — the inbox and the list read
-    /// the whole set and ask the struct.
-    pub async fn reports(&self, limit: i64) -> Result<Vec<crate::core::report::Report>> {
-        let rows = sqlx::query("SELECT id, payload FROM reports ORDER BY filed_at DESC LIMIT ?")
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(decode_rows("report", &rows, payload))
-    }
-
-    /// The reports a change raised or was started from, newest first. Read from
-    /// the payload rather than a column.
-    pub async fn reports_for_change(
-        &self,
-        change: &crate::core::ChangeId,
-    ) -> Result<Vec<crate::core::report::Report>> {
-        let rows = sqlx::query(
-            "SELECT id, payload FROM reports
-              WHERE json_extract(payload, '$.provenance.change') = ?
-                 OR json_extract(payload, '$.state.change') = ?
-              ORDER BY filed_at DESC",
-        )
-        .bind(change.as_str())
-        .bind(change.as_str())
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(decode_rows("report", &rows, payload))
-    }
-
     /// How many stored rows this build can no longer read, for `devplane
     /// doctor`: on the board they look exactly like rows that never existed.
     pub async fn unreadable(&self) -> Result<Vec<(String, String)>> {
@@ -882,12 +884,6 @@ impl Store {
             .fetch_all(&self.pool)
             .await?;
         out.extend(unreadable_in::<crate::core::Change>("change", &changes));
-        let reports = sqlx::query("SELECT id, payload FROM reports")
-            .fetch_all(&self.pool)
-            .await?;
-        out.extend(unreadable_in::<crate::core::report::Report>(
-            "report", &reports,
-        ));
         Ok(out)
     }
 
@@ -909,7 +905,7 @@ impl Store {
     /// The last thing the agent said on a run, to read beside a gate's exit
     /// code rather than on its own.
     ///
-    /// `None` when nothing was recorded (a watched run, or `[transcripts] keep
+    /// `None` when nothing was recorded (a watched run, or `[agent] keep_transcripts
     /// = false`), which surfaces must not show as *the agent said nothing*.
     pub async fn last_agent_message(&self, run: &RunId) -> Result<Option<String>> {
         let row = sqlx::query(
@@ -956,8 +952,8 @@ impl Store {
         sqlx::query(
             "INSERT OR IGNORE INTO decisions
                (id, at, authority, action, subject, outcome, reason, tool, server_source,
-                project_id, run_id, change_id)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                project_id, run_id, change_id, call_id, vendor, vendor_source, grant_name)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&d.id)
         .bind(ts(&d.at))
@@ -971,9 +967,195 @@ impl Store {
         .bind(d.project_id.as_ref().map(|p| p.as_str()))
         .bind(d.run_id.as_ref().map(|r| r.as_str()))
         .bind(d.change_id.as_ref().map(|w| w.as_str()))
+        .bind(d.call_id.as_deref())
+        .bind(d.vendor.as_deref())
+        .bind(d.vendor_source.as_deref())
+        .bind(d.grant.as_deref())
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Every decision a grant made, oldest first: what revoking it lists.
+    pub async fn decisions_by_grant(&self, name: &str) -> Result<Vec<crate::core::Decision>> {
+        let rows = sqlx::query("SELECT * FROM decisions WHERE grant_name = ? ORDER BY at, rowid")
+            .bind(name)
+            .fetch_all(&self.pool)
+            .await
+            .context("reading the decisions one grant made")?;
+        Ok(decode_rows("decision", &rows, decode_decision))
+    }
+
+    /// Gate failures on one change, oldest first: the observable reversal of
+    /// a grant that decided on that change.
+    pub async fn gate_failures(&self, change: &str) -> Result<Vec<crate::core::Decision>> {
+        let rows = sqlx::query(
+            "SELECT * FROM decisions WHERE change_id = ? AND action = 'gate:run' \
+             AND outcome = 'fail' ORDER BY at, rowid",
+        )
+        .bind(change)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading a change's gate failures")?;
+        Ok(decode_rows("decision", &rows, decode_decision))
+    }
+
+    /// Permission asks a person answered from the window or a notification —
+    /// the paths the host proves — newest first: what a grant offer counts.
+    pub async fn answered_permissions(&self, limit: i64) -> Result<Vec<crate::core::ask::Ask>> {
+        let rows = sqlx::query(
+            "SELECT * FROM asks WHERE kind = 'permission' AND answer IS NOT NULL \
+             AND answered_from IN ('window', 'notification') ORDER BY asked_at DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(decode_rows("ask", &rows, decode_ask))
+    }
+
+    /// The decision rows naming one call by the agent's id: Devplane's own
+    /// (`vendor` NULL) and any written from a vendor's report.
+    pub async fn decisions_for_call(&self, call: &str) -> Result<Vec<crate::core::Decision>> {
+        let rows = sqlx::query("SELECT * FROM decisions WHERE call_id = ? ORDER BY at, rowid")
+            .bind(call)
+            .fetch_all(&self.pool)
+            .await
+            .context("reading the decisions about one call")?;
+        Ok(decode_rows("decision", &rows, decode_decision))
+    }
+
+    /// The tool and input of a call a hook reported starting, by the
+    /// vendor's id for it: what a later report of who decided it is matched
+    /// against. `None` when no hook named the call.
+    pub async fn started_call(
+        &self,
+        run: &RunId,
+        call: &str,
+    ) -> Result<Option<(String, serde_json::Value)>> {
+        let row = sqlx::query(
+            "SELECT payload FROM events
+              WHERE run_id = ? AND kind = 'tool_started'
+                AND json_extract(payload, '$.call_id') = ?
+              ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(run.as_str())
+        .bind(call)
+        .fetch_optional(&self.pool)
+        .await
+        .context("reading a started call")?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let v: serde_json::Value = serde_json::from_str(&row.get::<String, _>("payload"))?;
+        let tool = v.get("tool").and_then(|t| t.as_str()).unwrap_or_default();
+        Ok(Some((
+            tool.to_string(),
+            v.get("input").cloned().unwrap_or(serde_json::Value::Null),
+        )))
+    }
+
+    /// The permission modes a run was seen in, newest first, by any channel.
+    pub async fn modes_seen(&self, run: &RunId, limit: i64) -> Result<Vec<EventEnvelope>> {
+        let rows = sqlx::query(
+            "SELECT id, at, run_id, project_id, source, payload FROM events
+              WHERE run_id = ? AND kind = 'permission_mode_seen'
+              ORDER BY seq DESC LIMIT ?",
+        )
+        .bind(run.as_str())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading the modes a run was seen in")?;
+        Ok(decode_rows("event", &rows, row_to_event))
+    }
+
+    /// Every `source` a vendor's decision report carried, with when it was
+    /// first seen. An absent source is not a value and is not listed.
+    pub async fn vendor_sources_seen(&self) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query(
+            "SELECT json_extract(payload, '$.source') AS source, min(at) AS first
+               FROM events WHERE kind = 'vendor_decided'
+                 AND json_extract(payload, '$.source') IS NOT NULL
+              GROUP BY source ORDER BY first",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("reading the decision sources seen")?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get::<String, _>("source"), r.get::<String, _>("first")))
+            .collect())
+    }
+
+    /// Vendors' reports of who decided a call, newest first, for some runs
+    /// or for every run. Observations: pruned with the event log.
+    pub async fn vendor_reports(
+        &self,
+        runs: Option<&[RunId]>,
+        limit: i64,
+    ) -> Result<Vec<EventEnvelope>> {
+        let mut out = Vec::new();
+        match runs {
+            Some(runs) => {
+                for run in runs {
+                    let rows = sqlx::query(
+                        "SELECT id, at, run_id, project_id, source, payload FROM events
+                          WHERE run_id = ? AND kind = 'vendor_decided'
+                          ORDER BY seq DESC LIMIT ?",
+                    )
+                    .bind(run.as_str())
+                    .bind(limit)
+                    .fetch_all(&self.pool)
+                    .await
+                    .context("reading vendor reports")?;
+                    out.extend(decode_rows("event", &rows, row_to_event));
+                }
+                out.sort_by_key(|e: &EventEnvelope| std::cmp::Reverse(e.at));
+                out.truncate(usize::try_from(limit).unwrap_or(0));
+            }
+            None => {
+                let rows = sqlx::query(
+                    "SELECT id, at, run_id, project_id, source, payload FROM events
+                      WHERE kind = 'vendor_decided' ORDER BY at DESC LIMIT ?",
+                )
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await
+                .context("reading vendor reports")?;
+                out = decode_rows("event", &rows, row_to_event);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Marks that an inbox item was put in front of the person by a desktop
+    /// notification, so a restart does not announce it again. No time is kept:
+    /// beside an answer's time it would make a time-to-answer derivable.
+    pub async fn announce_mark(&self, key: &str) -> Result<()> {
+        sqlx::query("INSERT OR IGNORE INTO announced (key) VALUES (?)")
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Forgets an announcement once its item left the inbox, so the same
+    /// question asked again later is announced again.
+    pub async fn announce_unmark(&self, key: &str) -> Result<()> {
+        sqlx::query("DELETE FROM announced WHERE key = ?")
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Every item currently marked as announced.
+    pub async fn announced(&self) -> Result<std::collections::BTreeSet<String>> {
+        use sqlx::Row;
+        let rows = sqlx::query("SELECT key FROM announced")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(|r| r.get::<String, _>("key")).collect())
     }
 
     /// Records that the inbox is asking for something. Idempotent against the
@@ -1163,32 +1345,112 @@ impl Store {
         Ok(())
     }
 
-    /// Records that a person read one weakened-check row of a change. No time
-    /// is stored: only that it was seen, and by a person.
-    pub async fn mark_weakened_seen(&self, change: &str, path: &str, matched: &str) -> Result<()> {
+    /// Records that a person marked one unit of a change's review seen. No
+    /// time is stored: only that it was seen.
+    pub async fn mark_seen(&self, change: &str, path: &str, digest: &str) -> Result<()> {
         sqlx::query(
-            "INSERT INTO weakened_seen (change_id, path, matched, authority) \
-             VALUES (?, ?, ?, 'person') ON CONFLICT DO NOTHING",
+            "INSERT INTO seen (change_id, path, hunk_digest) VALUES (?, ?, ?) \
+             ON CONFLICT DO NOTHING",
         )
         .bind(change)
         .bind(path)
-        .bind(matched)
+        .bind(digest)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Every `(path, matched)` a person marked seen on this change.
-    pub async fn weakened_seen(
-        &self,
-        change: &str,
-    ) -> Result<std::collections::HashSet<(String, String)>> {
+    /// Every `(path, hunk_digest)` a person marked seen on this change.
+    pub async fn seen(&self, change: &str) -> Result<std::collections::HashSet<(String, String)>> {
         let rows: Vec<(String, String)> =
-            sqlx::query_as("SELECT path, matched FROM weakened_seen WHERE change_id = ?")
+            sqlx::query_as("SELECT path, hunk_digest FROM seen WHERE change_id = ?")
                 .bind(change)
                 .fetch_all(&self.pool)
                 .await?;
         Ok(rows.into_iter().collect())
+    }
+
+    /// Keeps a review comment, unsent.
+    pub async fn add_comment(&self, c: &ReviewComment) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO review_comments (id, change_id, path, line, side, hunk_header, \
+             hunk_digest, line_text, body, tree, created_at, sent_at, run_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
+        )
+        .bind(&c.id)
+        .bind(&c.change_id)
+        .bind(&c.path)
+        .bind(i64::from(c.line))
+        .bind(&c.side)
+        .bind(&c.hunk_header)
+        .bind(&c.hunk_digest)
+        .bind(&c.line_text)
+        .bind(&c.body)
+        .bind(&c.tree)
+        .bind(&c.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A change's comments, oldest first, sent and unsent.
+    pub async fn comments(&self, change: &str) -> Result<Vec<ReviewComment>> {
+        let rows = sqlx::query(
+            "SELECT id, change_id, path, line, side, hunk_header, hunk_digest, line_text, body, \
+             tree, created_at, sent_at, run_id FROM review_comments WHERE change_id = ? \
+             ORDER BY created_at, rowid",
+        )
+        .bind(change)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| ReviewComment {
+                id: r.get("id"),
+                change_id: r.get("change_id"),
+                path: r.get("path"),
+                line: u32::try_from(r.get::<i64, _>("line")).unwrap_or(0),
+                side: r.get("side"),
+                hunk_header: r.get("hunk_header"),
+                hunk_digest: r.get("hunk_digest"),
+                line_text: r.get("line_text"),
+                body: r.get("body"),
+                tree: r.get("tree"),
+                created_at: r.get("created_at"),
+                sent_at: r.get("sent_at"),
+                run_id: r.get("run_id"),
+            })
+            .collect())
+    }
+
+    /// Deletes one unsent comment; `false` when there is no such unsent one.
+    pub async fn delete_unsent_comment(&self, change: &str, id: &str) -> Result<bool> {
+        let done = sqlx::query(
+            "DELETE FROM review_comments WHERE change_id = ? AND id = ? AND sent_at IS NULL",
+        )
+        .bind(change)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    /// Marks comments sent to `run`, once: a sent comment keeps its first send.
+    pub async fn mark_comments_sent(&self, ids: &[String], run: &str, at: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for id in ids {
+            sqlx::query(
+                "UPDATE review_comments SET sent_at = ?, run_id = ? \
+                 WHERE id = ? AND sent_at IS NULL",
+            )
+            .bind(at)
+            .bind(run)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     /// One day's decisions and the count of the day's questions, for the close.
@@ -1216,6 +1478,42 @@ impl Store {
             .context("reading today's asks")?;
         let waited: i64 = asks.first().map(|r| r.get("n")).unwrap_or(0);
         Ok((decisions, u32::try_from(waited).unwrap_or(u32::MAX)))
+    }
+
+    /// How many of a change's tool calls each authority decided: rows about
+    /// the change or one of its `runs` that name a tool (Devplane's own acts,
+    /// a push or a pull request, name none). Unknown authority text is not
+    /// counted, never defaulted. Counts only — no name, no time.
+    pub async fn authority_counts(
+        &self,
+        change: &crate::core::ChangeId,
+        runs: &[RunId],
+    ) -> Result<std::collections::BTreeMap<crate::core::Authority, u32>> {
+        // A decision counts once, however many of its keys match: collected
+        // by row id across the change and each of its runs.
+        let mut seen = std::collections::HashMap::new();
+        let ids = std::iter::once(change.as_str()).chain(runs.iter().map(RunId::as_str));
+        for id in ids {
+            let rows = sqlx::query(
+                "SELECT rowid AS seq, authority FROM decisions
+                  WHERE tool IS NOT NULL AND (change_id = ?1 OR run_id = ?1)",
+            )
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await?;
+            for row in rows {
+                let seq: i64 = row.get("seq");
+                let a: String = row.get("authority");
+                seen.insert(seq, a);
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        for a in seen.values() {
+            if let Some(a) = crate::core::Authority::parse(a) {
+                *out.entry(a).or_insert(0u32) += 1;
+            }
+        }
+        Ok(out)
     }
 
     /// The decision log, newest first, optionally about one run or change.
@@ -1294,25 +1592,31 @@ impl Store {
     }
 
     /// Removes what a gate probe left behind: the probe session's run, events
-    /// and decisions, and the temporary project it was discovered as.
+    /// and their search index, messages and decisions, and the temporary
+    /// project it was discovered as — in one transaction, so a failure leaves
+    /// all of it or none.
     pub async fn forget_probe(&self, session: &str) -> Result<u64> {
+        let mut tx = self.pool.begin().await?;
         let mut n = 0;
         for sql in [
+            "DELETE FROM events_fts WHERE run_id = ?",
             "DELETE FROM events WHERE run_id = ?",
+            "DELETE FROM messages WHERE run_id = ?",
             "DELETE FROM decisions WHERE run_id = ?",
             // A run's id is its session's id.
             "DELETE FROM runs WHERE id = ?",
         ] {
             n += sqlx::query(sql)
                 .bind(session)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?
                 .rows_affected();
         }
         n += sqlx::query("DELETE FROM projects WHERE root LIKE '%/devplane-probe-%'")
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?
             .rows_affected();
+        tx.commit().await?;
         Ok(n)
     }
 
@@ -1563,6 +1867,10 @@ fn decode_decision(r: &sqlx::sqlite::SqliteRow) -> Result<crate::core::Decision>
         change_id: r
             .get::<Option<String>, _>("change_id")
             .map(crate::core::ChangeId::new),
+        call_id: r.get("call_id"),
+        vendor: r.get("vendor"),
+        vendor_source: r.get("vendor_source"),
+        grant: r.get("grant_name"),
     })
 }
 
@@ -1854,19 +2162,73 @@ mod tests {
         assert!(rows[0].0 > through, "a sequence number was reused");
     }
 
-    /// Recording what a hook saw never revokes a trust granted in between.
+    /// The store keeps no trust: a project saved trusted reads back as not,
+    /// and a hook noting it changes nothing either way.
     #[tokio::test]
-    async fn noting_a_project_never_touches_trust() {
+    async fn the_store_never_records_trust() {
         let s = Store::open_in_memory().await.unwrap();
         let seen = Project::from_root(PathBuf::from("/repo"));
-        assert!(!seen.trusted);
         s.note_project(&seen).await.unwrap();
         let mut trusted = seen.clone();
         trusted.trusted = true;
         s.save_project(&trusted).await.unwrap();
         s.note_project(&seen).await.unwrap();
         let back = s.load_projects().await.unwrap();
-        assert!(back[0].trusted, "a hook revoked the trust");
+        assert_eq!(back.len(), 1);
+        assert!(
+            !back[0].trusted,
+            "trust is `trusted.toml`'s, not the store's"
+        );
+    }
+
+    /// A store from before schema 14 kept trust in a column; setting it
+    /// aside first moves its trusted roots to `trusted.toml`, so no trust a
+    /// person granted is lost.
+    #[tokio::test]
+    async fn an_older_stores_trusted_roots_move_to_their_own_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "devplane-carry-trust-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::trust::add(&dir, [PathBuf::from("/already")]).unwrap();
+        let path = dir.join("devplane.db");
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "PRAGMA user_version = 13;
+             CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT NOT NULL,
+               trusted INTEGER NOT NULL DEFAULT 0, repo_url TEXT,
+               auto_discovered INTEGER NOT NULL DEFAULT 1);
+             INSERT INTO projects VALUES ('a', 'a', '/repos/a', 1, NULL, 0);
+             INSERT INTO projects VALUES ('b', 'b', '/repos/b', 0, NULL, 1);",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let s = Store::open(&path).await.unwrap();
+        let t = crate::trust::Trusted::read(&dir).unwrap();
+        assert_eq!(
+            t.roots.iter().cloned().collect::<Vec<_>>(),
+            [PathBuf::from("/already"), PathBuf::from("/repos/a")],
+            "the trusted root moved, the untrusted one did not, and nothing was lost"
+        );
+        assert_eq!(backups(&dir).len(), 1, "the old store was set aside");
+        let columns: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM pragma_table_info('projects')")
+                .fetch_all(s.pool())
+                .await
+                .unwrap();
+        assert!(!columns.iter().any(|(c,)| c == "trusted"), "{columns:?}");
     }
 
     #[tokio::test]
@@ -1957,7 +2319,10 @@ mod tests {
             change_id: None,
             offer: None,
             no_offer: None,
-            report: None,
+            grant: Default::default(),
+            resume_command: None,
+            session_link: None,
+            marker: None,
             since: jiff::Timestamp::now(),
         }
     }
@@ -2032,7 +2397,10 @@ mod tests {
             change_id: None,
             offer: None,
             no_offer: None,
-            report: None,
+            grant: Default::default(),
+            resume_command: None,
+            session_link: None,
+            marker: None,
             since: jiff::Timestamp::now(),
             options: Vec::new(),
             actions: Vec::new(),
@@ -2100,7 +2468,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("devplane.db");
-        write_old_schema(&path, 97).await;
+        write_old_schema(&path, 7).await;
 
         let opens: Vec<_> = (0..8)
             .map(|_| {
@@ -2127,7 +2495,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A store opened by anything (a hook, before any `serve`) is owner-only.
+    /// A store opened by anything (a hook, before any `up`) is owner-only.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_store_is_owner_only_from_its_first_open() {
@@ -2167,7 +2535,7 @@ mod tests {
         std::fs::write(dir.join("devplane.v3.bak"), b"").unwrap();
         std::fs::write(dir.join("devplane.v3.bak-wal"), b"frames").unwrap();
 
-        for v in [90, 91, 92, 93, 94] {
+        for v in [5, 6, 7, 8, 9] {
             for f in ["", "-wal", "-shm"] {
                 let _ = std::fs::remove_file(format!("{}{f}", path.display()));
             }
@@ -2185,7 +2553,7 @@ mod tests {
                 "{kept} was deleted: {baks:?}"
             );
         }
-        for v in [90, 91, 92, 93, 94] {
+        for v in [5, 6, 7, 8, 9] {
             assert!(
                 baks.iter()
                     .any(|b| b.starts_with(&format!("devplane.v{v}."))),
@@ -2214,8 +2582,8 @@ mod tests {
                 .await
                 .unwrap();
             sqlx::raw_sql(
-                // Any version but this build's.
-                "PRAGMA user_version = 99;
+                // An older version than this build's.
+                "PRAGMA user_version = 10;
                  CREATE TABLE decisions (
                    id TEXT PRIMARY KEY, at TEXT NOT NULL, actor TEXT NOT NULL,
                    action TEXT NOT NULL, subject TEXT NOT NULL, outcome TEXT NOT NULL,
@@ -2258,6 +2626,101 @@ mod tests {
         assert_eq!(s.decisions(None, 10).await.unwrap().len(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A newer binary's store is refused by name and never set aside; the
+    /// hook's opener sets aside nothing at all.
+    #[tokio::test]
+    async fn a_newer_store_is_refused_and_the_hook_never_sets_one_aside() {
+        let dir = std::env::temp_dir().join(format!(
+            "devplane-skew-{}-{}",
+            std::process::id(),
+            jiff::Timestamp::now().as_nanosecond()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("devplane.db");
+        let newer = SCHEMA_VERSION + 1;
+        write_old_schema(&path, newer).await;
+        assert_eq!(Store::schema_on_disk(&path), Some(newer));
+        for opened in [
+            Store::open(&path).await,
+            Store::open_waiting(&path, std::time::Duration::from_millis(50)).await,
+        ] {
+            let e = opened.expect_err("a newer store is refused").to_string();
+            assert!(
+                e.contains(&format!("newer Devplane (schema {newer})"))
+                    && e.contains("update devplane"),
+                "{e}"
+            );
+        }
+        assert!(backups(&dir).is_empty(), "nothing was set aside");
+        assert_eq!(Store::schema_on_disk(&path), Some(newer), "nor touched");
+
+        let _ = std::fs::remove_file(&path);
+        write_old_schema(&path, SCHEMA_VERSION - 1).await;
+        let e = Store::open_waiting(&path, std::time::Duration::from_millis(50))
+            .await
+            .expect_err("the hook does not retire an older store");
+        assert!(e.to_string().contains("older Devplane"), "{e}");
+        assert!(backups(&dir).is_empty());
+        // A person's own opener does.
+        Store::open(&path).await.unwrap().pool.close().await;
+        assert_eq!(backups(&dir).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An older snapshot saved after a newer one does not replace it.
+    #[tokio::test]
+    async fn an_older_run_snapshot_never_overwrites_a_newer_one() {
+        let s = Store::open_in_memory().await.unwrap();
+        let mut run = Run::new(
+            crate::core::ids::SessionId::new("s-order"),
+            "/tmp/repo".into(),
+            crate::core::run::RunMode::Observed,
+            "claude",
+        );
+        let mut newer = run.clone();
+        newer.last_seq = 7;
+        newer.summary = Some("folded through 7".into());
+        run.last_seq = 3;
+        run.summary = Some("folded through 3".into());
+        s.save_run(&newer).await.unwrap();
+        s.save_run(&run).await.unwrap();
+        let loaded = s.load_runs().await.unwrap();
+        assert_eq!(loaded[0].last_seq, 7);
+        assert_eq!(loaded[0].summary.as_deref(), Some("folded through 7"));
+        // The same mark still writes: an event the host applied directly.
+        newer.summary = Some("snoozed".into());
+        s.save_run(&newer).await.unwrap();
+        assert_eq!(
+            s.load_runs().await.unwrap()[0].summary.as_deref(),
+            Some("snoozed")
+        );
+    }
+
+    /// A probe leaves no search entry or message behind.
+    #[tokio::test]
+    async fn forgetting_a_probe_removes_its_search_index_and_messages() {
+        let s = Store::open_in_memory().await.unwrap();
+        for sql in [
+            "INSERT INTO events_fts (text, run_id, event_id) VALUES ('probe words', 'p1', 'e1')",
+            "INSERT INTO messages (id, run_id, at, role, text) VALUES ('m1','p1','t','agent','x')",
+            "INSERT INTO messages (id, run_id, at, role, text) VALUES ('m2','other','t','agent','y')",
+        ] {
+            sqlx::query(sql).execute(&s.pool).await.unwrap();
+        }
+        s.forget_probe("p1").await.unwrap();
+        let count = |sql: &'static str| {
+            let pool = s.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(sql)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(count("SELECT COUNT(*) FROM events_fts").await, 0);
+        assert_eq!(count("SELECT COUNT(*) FROM messages").await, 1);
     }
 
     #[tokio::test]
@@ -2394,98 +2857,6 @@ mod ask_store_tests {
     }
 }
 
-#[cfg(test)]
-mod report_store_tests {
-    use super::*;
-    use crate::core::report::{Draft, Provenance, Report, State, Target};
-
-    fn filed(from: &str, to: &str, change: Option<&str>) -> Report {
-        Report::new(
-            Draft {
-                kind: "defect".into(),
-                title: "client retries on 4xx".into(),
-                finding: "retry() does not check status".into(),
-                ..Default::default()
-            },
-            Target::Project {
-                project: crate::core::ProjectId::new(to),
-                name: to.trim_start_matches('/').into(),
-            },
-            Provenance::of_run(
-                crate::core::ProjectId::new(from),
-                from.trim_start_matches('/').into(),
-                change.map(crate::core::ChangeId::new),
-                RunId::new("acp-1"),
-                "claude".into(),
-                jiff::Timestamp::now(),
-            ),
-            |_| Ok(()),
-        )
-        .unwrap()
-    }
-
-    #[tokio::test]
-    async fn a_report_is_found_from_both_ends_and_by_its_change() {
-        let s = Store::open_in_memory().await.unwrap();
-        let mut r = filed("/api", "/core-lib", Some("c-src"));
-        s.save_report(&r).await.unwrap();
-        let api = crate::core::ProjectId::new("/api");
-        let core = crate::core::ProjectId::new("/core-lib");
-
-        assert_eq!(s.report(r.id.as_str()).await.unwrap().as_ref(), Some(&r));
-        assert_eq!(
-            s.report(&r.id.as_str()[..10]).await.unwrap().map(|x| x.id),
-            Some(r.id.clone()),
-            "the start of an id is enough when it names one"
-        );
-        assert_eq!(s.reports_to(&core, true).await.unwrap().len(), 1);
-        assert_eq!(s.reports_from(&api, true).await.unwrap().len(), 1);
-        assert!(s.reports_to(&api, false).await.unwrap().is_empty());
-
-        // Accepted into a change in the target: that change finds it too.
-        r.state = State::Accepted {
-            change: crate::core::ChangeId::new("c-dst"),
-        };
-        s.save_report(&r).await.unwrap();
-        assert!(
-            s.reports_to(&core, true).await.unwrap().is_empty(),
-            "no longer open"
-        );
-        assert_eq!(s.reports_to(&core, false).await.unwrap().len(), 1);
-        for c in ["c-src", "c-dst"] {
-            let found = s
-                .reports_for_change(&crate::core::ChangeId::new(c))
-                .await
-                .unwrap();
-            assert_eq!(found.len(), 1, "{c}");
-        }
-        assert_eq!(
-            s.reports(10).await.unwrap().len(),
-            1,
-            "rewritten, not appended"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_unreadable_report_is_dropped_and_counted() {
-        let s = Store::open_in_memory().await.unwrap();
-        sqlx::query(
-            "INSERT INTO reports (id, filed_at, source_project, target_project, state, payload)
-             VALUES ('rp-bad', '2026-09-25T00:00:00.000000000Z', '/a', '/b', 'open', '{')",
-        )
-        .execute(s.pool())
-        .await
-        .unwrap();
-        s.save_report(&filed("/a", "/b", None)).await.unwrap();
-        assert_eq!(s.reports(10).await.unwrap().len(), 1);
-        let lost = s.unreadable().await.unwrap();
-        assert!(
-            lost.iter().any(|(what, _)| what == "report rp-bad"),
-            "{lost:?}"
-        );
-    }
-}
-
 /// A row this build cannot read is dropped and counted, never defaulted.
 #[cfg(test)]
 mod integrity_tests {
@@ -2517,7 +2888,7 @@ mod integrity_tests {
         let mut a = ask("a1");
         a.answer(
             serde_json::json!({"q": "keep"}),
-            "board",
+            crate::core::ask::AnswerPath::Window,
             jiff::Timestamp::now(),
         )
         .unwrap();
@@ -2739,7 +3110,7 @@ mod integrity_tests {
         for (table, expected) in [
             (
                 "runs",
-                vec!["id", "agent", "cwd", "last_event_at", "payload"],
+                vec!["id", "agent", "cwd", "last_event_at", "last_seq", "payload"],
             ),
             ("changes", vec!["id", "updated_at", "payload"]),
         ] {
@@ -2793,5 +3164,44 @@ mod integrity_tests {
         );
         assert_eq!(s.decisions(Some("r1"), 10).await.unwrap().len(), 1);
         assert!(s.decisions(Some("nobody"), 10).await.unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod announced_tests {
+    use super::*;
+
+    /// The mark survives reopening the store, is one row however often it is
+    /// set, and is gone once unmarked.
+    #[tokio::test]
+    async fn an_announcement_survives_a_restart_and_carries_no_time() {
+        let dir = std::env::temp_dir().join(format!("devplane-announced-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("devplane.db");
+        {
+            let s = Store::open(&path).await.unwrap();
+            s.announce_mark("ask-1").await.unwrap();
+            s.announce_mark("ask-1").await.unwrap();
+            s.announce_mark("run-2:gate_failed").await.unwrap();
+        }
+        let s = Store::open(&path).await.unwrap();
+        let marked = s.announced().await.unwrap();
+        assert_eq!(
+            marked.into_iter().collect::<Vec<_>>(),
+            ["ask-1", "run-2:gate_failed"]
+        );
+        s.announce_unmark("ask-1").await.unwrap();
+        assert_eq!(s.announced().await.unwrap().len(), 1);
+
+        use sqlx::Row;
+        let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('announced')")
+            .fetch_all(&s.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        assert_eq!(cols, ["key"], "the mark is a key and nothing else");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

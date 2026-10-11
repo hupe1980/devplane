@@ -1,8 +1,10 @@
 //! The done certificate: evidence a reviewer can check without trusting this
-//! tool. It borrows the in-toto statement shape but is deliberately unsigned:
-//! SLSA provenance asks the reader to trust the builder, whereas this names a
-//! commit and the gate commands so the reader re-runs them. It establishes only
-//! that these commands ended as recorded against this commit — not that the
+//! tool. Its structured shape is an in-toto Statement v1 with the Test Result
+//! predicate ([`super::attest`]). Devplane never signs it: SLSA provenance asks
+//! the reader to trust the builder, whereas this names a tree and the gate
+//! commands so the reader re-runs them. The person may sign the statement with
+//! their own SSH key, which says who put their name to it. It establishes only
+//! that these commands ended as recorded against that tree — not that the
 //! work is correct — and says so in its own text ([`LIMITS`]).
 
 use super::change::{
@@ -34,9 +36,7 @@ impl Origin {
     }
 }
 
-/// The predicate type this emits, versioned.
-pub const PREDICATE_TYPE: &str = "https://devplane.dev/DoneCertificate/v1";
-pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
+pub use super::attest::{STATEMENT_TYPE, TEST_RESULT_TYPE};
 
 /// The artifact's hard size ceiling.
 pub const MAX_BYTES: usize = 64 * 1024;
@@ -45,19 +45,33 @@ pub const MAX_BYTES: usize = 64 * 1024;
 pub const PAGE_COMMAND_CHARS: usize = 120;
 
 /// What the artifact claims, in its own words, so it travels with the paste.
-pub const LIMITS: &str = "This is evidence that these commands ended as recorded against this \
-commit. It is not evidence that the work is correct, that the commands check the right things, or \
-that the specification was satisfied. It is unsigned and detects change rather than forgery.";
+pub const LIMITS: &str = "This is evidence that these commands ended as recorded against the \
+working tree it names. It is not evidence that the work is correct, that the commands check the \
+right things, or that the specification was satisfied. The commands ran code in this tree, including tests and \
+build scripts the change may have edited; the tree was the same before and after the run, which \
+cannot see an edit reverted during the run. The base checks put the base's tests back to see \
+whether they still pass, and their runs are observed beside this evidence, never part of it. \
+Devplane does not sign it; unless a person signed it with their own key, it detects change rather \
+than forgery.";
 
 /// Every field a reader can check for themselves — one list shared by both renderings.
 pub const REDERIVABLE: &[&str] = &[
-    "evidence.commit.commit",
-    "evidence.commit.tree",
-    "evidence.commands[].command",
-    "evidence.commands[].outcome",
+    "subject[0].digest.gitTree",
+    "subject[0].digest.gitCommit",
+    "configuration[0].digest.sha256",
+    "commands[].command",
+    "commands[].exitCode",
     "specification.fingerprint",
     "specification.tasks_done",
     "specification.tasks_total",
+    "baseChecks.base",
+    "baseChecks.tree",
+    "baseChecks.onChange.restored",
+    "baseChecks.onBase.placed[].blob",
+    "baseChecks.onChange.commands[].outcome",
+    "baseChecks.onBase.commands[].outcome",
+    "mergeApprovals.bearing[].state",
+    "mergeApprovals.bearing[].commit",
 ];
 
 /// The portable record of one change's completion. Assembled from a `Change`,
@@ -80,7 +94,22 @@ pub struct Certificate<'a> {
     pub weakened_unreadable: Option<String>,
     /// Every weakened row was marked seen by a person before this was read.
     pub weakened_read: bool,
+    /// The counts and base checks, as the change's own view composed them;
+    /// `None` when `check` never ran. Beside the evidence, never in it.
+    pub base_checks: Option<super::base_checks::View>,
+    /// How many of this change's tool calls each authority decided, read by
+    /// the edge; empty when none were, `None` when it was not read.
+    pub decided_by: Option<std::collections::BTreeMap<super::Authority, u32>>,
+    /// `devplane.toml`'s git blob id in the checked commit, when the tree was
+    /// clean and committed and holds one.
+    pub config_blob: Option<String>,
 }
+
+/// What the certificate says when the diff was read and nothing in it altered
+/// the checks, what governs the agent or what the build trusts.
+pub const NOTHING_ALTERED: &str = "This change altered none of its checks: no skip marker added, \
+     no test file deleted, no gate or CI definition edited, and nothing that governs the agent \
+     or the build edited.";
 
 impl<'a> Certificate<'a> {
     /// Builds the certificate for a change. The evidence is the run the basis
@@ -105,6 +134,9 @@ impl<'a> Certificate<'a> {
             weakened: None,
             weakened_unreadable: None,
             weakened_read: false,
+            base_checks: None,
+            decided_by: Default::default(),
+            config_blob: None,
         }
     }
 
@@ -146,22 +178,15 @@ impl<'a> Certificate<'a> {
                 "{} A person marked each of these read.",
                 super::review::weakened_sentence(w).unwrap_or_default()
             ),
-            Some(w) => super::review::weakened_sentence(w).unwrap_or_else(|| {
-                "This change altered none of its checks: no skip marker added, no test file \
-                 deleted, no gate or CI definition edited."
-                    .into()
-            }),
+            Some(w) => {
+                super::review::weakened_sentence(w).unwrap_or_else(|| NOTHING_ALTERED.into())
+            }
         }
     }
 
     /// A digest of the evidence's gate commands, in order.
     pub fn commands_digest(&self) -> Option<String> {
-        let report = self.evidence?;
-        let mut h = super::hash::Rolling::new();
-        for c in &report.commands {
-            h.push_str(&c.command);
-        }
-        Some(h.hex())
+        self.evidence.map(commands_digest)
     }
 
     /// Whether this change is finished. Unfinished is a rendering branch, not an error.
@@ -285,6 +310,58 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// A digest of a report's gate commands, in order.
+pub fn commands_digest(report: &GateReport) -> String {
+    let mut h = super::hash::Rolling::new();
+    for c in &report.commands {
+        h.push_str(&c.command);
+    }
+    h.hex()
+}
+
+/// What stands in for a statement that cannot be made: no `_type`, so nothing
+/// reads it as one, and the sentence saying why.
+pub const NO_STATEMENT: &str = "no_statement";
+
+/// What `devplane verify` knows when it writes a statement: a gate run and the
+/// rows its diff weakened, with no change record behind them. The statement is
+/// the certificate's own shape — one format, two callers — with a `verify`
+/// block naming the base whose definition ran.
+pub struct VerifyEvidence<'a> {
+    /// The subject's name: the repository or checkout.
+    pub name: &'a str,
+    pub report: &'a GateReport,
+    pub weakened: &'a [super::review::Weakened],
+    /// `{ base, baseCommit, head, definition, definitionChanged }`.
+    pub verify: serde_json::Value,
+    /// `predicate.devplane.baseChecks`, as [`base_checks_json`] writes it.
+    pub base_checks: serde_json::Value,
+    /// The base's `devplane.toml` as a git blob id: the definition that ran.
+    pub config_blob: Option<&'a str>,
+}
+
+/// The in-toto statement for a `devplane verify` run. Never signed: CI holds
+/// no person's key. With no tree recorded there is no subject and so no
+/// statement: the error says why.
+pub fn verify_statement(e: &VerifyEvidence<'_>) -> Result<serde_json::Value, String> {
+    use super::attest;
+    let mut ext = serde_json::Map::new();
+    ext.insert("says".into(), format!("{} {LIMITS}", attest::SAYS).into());
+    ext.insert("run".into(), attest::run_of(e.report, 1));
+    ext.insert("commands".into(), attest::commands_of(e.report));
+    let says = super::review::weakened_sentence(e.weakened)
+        .unwrap_or_else(|| "This change altered none of its checks.".into());
+    ext.insert(
+        "checksAltered".into(),
+        attest::checks_altered(Some(e.weakened), None, says),
+    );
+    ext.insert("verify".into(), e.verify.clone());
+    ext.insert("baseChecks".into(), e.base_checks.clone());
+    ext.insert("rederivable".into(), REDERIVABLE.into());
+    ext.insert("signed".into(), false.into());
+    attest::statement(e.name, e.report, e.config_blob, ext).map_err(|n| n.says())
+}
+
 /// How a command's outcome reads — one function for both renderings.
 pub fn outcome_sentence(c: &CommandResult) -> String {
     match &c.outcome {
@@ -306,10 +383,16 @@ pub fn commit_sentence(c: &CommitStamp) -> String {
     // gets to it.
     let head = match (&c.commit, &c.tree) {
         (Some(sha), Some(tree)) => format!("Commit `{sha}`, working-tree digest `{tree}`"),
-        (Some(sha), None) => format!(
-            "Commit `{sha}`, working-tree digest not recorded — the tree moved while the gate \
-             ran, or could not be read, so this run cannot verify anything"
-        ),
+        (Some(sha), None) => match &c.tree_unknown {
+            Some(why) => format!(
+                "Commit `{sha}`, working-tree digest not recorded — {why} — so this run cannot \
+                 verify anything"
+            ),
+            None => format!(
+                "Commit `{sha}`, working-tree digest not recorded — the tree moved while the \
+                 gate ran, or could not be read, so this run cannot verify anything"
+            ),
+        },
         (None, Some(tree)) => {
             format!("No commit yet — this repository had none; working-tree digest `{tree}`")
         }
@@ -353,7 +436,7 @@ pub fn commit_sentence(c: &CommitStamp) -> String {
 /// A fence one backtick longer than the longest run inside the content (min
 /// three), so untrusted commands, titles or output cannot close it and inject
 /// Markdown.
-fn fenced(content: &str) -> String {
+pub(crate) fn fenced(content: &str) -> String {
     let longest = content
         .as_bytes()
         .split(|b| *b != b'`')
@@ -396,8 +479,23 @@ fn bytes_phrase(n: u64) -> String {
 }
 
 impl Certificate<'_> {
-    /// The document a reviewer reads, sized for a pull request body.
+    /// The document a reviewer reads, sized for a pull request body. It ends
+    /// with the change's `devplane://` link and the command that opens the
+    /// same change, as plain text: whether a pull request or a chat makes the
+    /// link clickable is theirs, and the command works either way.
     pub fn markdown(&self) -> String {
+        let mut o = self.body();
+        o.push_str(&self.link_lines());
+        o
+    }
+
+    /// The last two lines: the link, and the command.
+    fn link_lines(&self) -> String {
+        let id = self.change.id.as_str();
+        format!("\ndevplane://change/{id}\n\ndevplane change show {id}\n")
+    }
+
+    fn body(&self) -> String {
         let mut o = String::new();
         let w = self.change;
 
@@ -415,6 +513,8 @@ impl Certificate<'_> {
                 o.push_str("No gate has run.\n\n");
             }
             o.push_str(&format!("{}\n\n", inline(&self.weakened_says())));
+            o.push_str(&self.base_checks_markdown());
+            o.push_str(&merge_approvals_markdown(self.change));
             o.push_str("There is no completion to certify yet.\n");
             return o;
         };
@@ -486,6 +586,10 @@ impl Certificate<'_> {
                  this does not establish*.\n\n"
             ));
         }
+
+        // Beside the evidence and its steps, never part of them.
+        o.push_str(&self.base_checks_markdown());
+        o.push_str(&merge_approvals_markdown(self.change));
 
         if let Some(report) = self.evidence
             && let Some(spec) = report.spec.as_ref()
@@ -569,54 +673,125 @@ impl Certificate<'_> {
         o
     }
 
-    /// The structured shape, as an in-toto statement.
-    pub fn json(&self) -> serde_json::Value {
-        use serde_json::json;
-        let w = self.change;
-        let commit = self.evidence.and_then(|r| r.commit.as_ref());
-        // `subject` is what the statement is about: the commit.
-        let subject = match commit.and_then(|c| c.commit.as_deref()) {
-            Some(sha) => json!([{ "name": w.title, "digest": { "gitCommit": sha } }]),
-            None => json!([{ "name": w.title, "digest": {} }]),
-        };
-        json!({
-            "_type": STATEMENT_TYPE,
-            "subject": subject,
-            "predicateType": PREDICATE_TYPE,
-            "predicate": {
-                "change": { "id": w.id, "title": w.title, "state": self.state.as_str(),
-                          "branch": w.branch },
-                "completion": w.completion,
-                "evidence": self.evidence.map(|r| json!({
-                    // Observed by something the agent does not control.
-                    Origin::KEY: Origin::ExternallyObserved.as_str(),
-                    "gate": r.gate,
-                    "at": r.at,
-                    "attempt": r.attempt,
-                    "attempts": self.attempts,
-                    "passed": r.passed(),
-                    "commit": r.commit,
-                    "commands": r.commands,
-                    "commands_digest": self.commands_digest(),
-                })),
-                "basis_run_missing": self.basis_run_missing(),
-                "checks_altered": self.weakened,
-                "specification": self.evidence.and_then(|r| r.spec.clone()),
-                // An object so the origin rides with the text; absent entirely
-                // when the agent said nothing.
-                "agent_claim": self.claim.map(|text| json!({
-                    Origin::KEY: Origin::SelfReported.as_str(),
-                    "text": text,
-                })),
-                "verification": {
-                    "steps": self.verification_steps(),
-                    "caveat": self.verification_caveat(),
+    /// Why this certificate's evidence cannot be attested, if it cannot.
+    fn not_attestable(&self) -> Option<super::attest::NotAttestable> {
+        use super::attest::NotAttestable;
+        if self.evidence.is_some() {
+            return None;
+        }
+        // The run the basis names is gone: never another run in its place.
+        Some(
+            match self
+                .change
+                .completion
+                .as_ref()
+                .and_then(Completion::gate)
+                .filter(|_| self.basis_run_missing())
+            {
+                Some((gate, attempt)) => NotAttestable::BasisRunMissing {
+                    gate: gate.into(),
+                    attempt,
                 },
-                "rederivable": REDERIVABLE,
-                "limits": LIMITS,
-                "signed": false,
+                None => NotAttestable::NoCheckRun,
+            },
+        )
+    }
+
+    /// The structured shape: an in-toto Statement v1 with the Test Result
+    /// predicate, about the tree `check` ran on. With nothing to attest there
+    /// is no statement, and the error says why.
+    pub fn statement(&self) -> Result<serde_json::Value, super::attest::NotAttestable> {
+        use super::attest;
+        use serde_json::json;
+        if let Some(why) = self.not_attestable() {
+            return Err(why);
+        }
+        let Some(report) = self.evidence else {
+            return Err(attest::NotAttestable::NoCheckRun);
+        };
+        let w = self.change;
+        let mut ext = serde_json::Map::new();
+        ext.insert("says".into(), format!("{} {LIMITS}", attest::SAYS).into());
+        let mut change = json!({
+            "id": w.id, "title": w.title, "finished": self.is_finished(),
+            "state": self.state.as_str(),
+        });
+        if let Some(b) = &w.branch {
+            change["branch"] = json!(b);
+        }
+        ext.insert("change".into(), change);
+        if let Some(c) = &w.completion {
+            ext.insert("completion".into(), json!(c));
+        }
+        let mut run = attest::run_of(report, self.attempts);
+        if let Some(basis) = &w.completion {
+            run["basis"] = json!(basis.headline());
+        }
+        // Observed by something the agent does not control.
+        run[Origin::KEY] = json!(Origin::ExternallyObserved.as_str());
+        ext.insert("run".into(), run);
+        ext.insert("commands".into(), attest::commands_of(report));
+        ext.insert(
+            "checksAltered".into(),
+            attest::checks_altered(
+                self.weakened.as_deref(),
+                Some(self.weakened_read),
+                self.weakened_says(),
+            ),
+        );
+        ext.insert("baseChecks".into(), self.base_checks_json());
+        ext.insert(
+            "mergeApprovals".into(),
+            merge_approvals_json(self.change.pull_request.as_ref()),
+        );
+        // Not read is said, never rendered as *nobody decided anything*.
+        match &self.decided_by {
+            Some(counts) => {
+                ext.insert(
+                    "permissionsDecidedBy".into(),
+                    attest::permissions_of(counts),
+                );
             }
-        })
+            None => {
+                ext.insert(
+                    "permissionsUnknown".into(),
+                    "The decision log was not read, so who decided this change's tool calls \
+                     is not stated."
+                        .into(),
+                );
+            }
+        }
+        if let Some(spec) = &report.spec {
+            ext.insert("specification".into(), json!(spec));
+        }
+        // An object so the origin rides with the text; absent entirely when
+        // the agent said nothing.
+        if let Some(text) = self.claim {
+            ext.insert(
+                "agentClaim".into(),
+                json!({ Origin::KEY: Origin::SelfReported.as_str(), "text": text }),
+            );
+        }
+        let mut steps = self.verification_steps();
+        if let Some(curl) = self.change.pull_request.as_ref().and_then(reviews_request) {
+            steps.push(curl);
+        }
+        let mut verification = json!({ "steps": steps });
+        if let Some(c) = self.verification_caveat() {
+            verification["caveat"] = json!(c);
+        }
+        ext.insert("verification".into(), verification);
+        ext.insert("rederivable".into(), REDERIVABLE.into());
+        // These bytes carry no signature; a person's is a file beside them.
+        ext.insert("signed".into(), false.into());
+        attest::statement(&w.title, report, self.config_blob.as_deref(), ext)
+    }
+
+    /// The structured shape as the export carries it: the statement, or an
+    /// object that is not one — `{"no_statement": why}`.
+    pub fn json(&self) -> serde_json::Value {
+        self.statement()
+            .unwrap_or_else(|why| serde_json::json!({ NO_STATEMENT: why.says() }))
     }
 
     /// The certificate as a page renders it, every sentence already written, so
@@ -632,6 +807,8 @@ impl Certificate<'_> {
                                       where_it_is(self.change, self.state)),
                 "last_gate": self.evidence.map(|g| g.summary()),
                 "checks_altered": self.weakened_says(),
+                "base_checks": self.base_checks_page(),
+                "merge_approvals_says": merge_approvals_says(self.change.pull_request.as_ref()),
             });
         };
 
@@ -661,6 +838,8 @@ impl Certificate<'_> {
                 })).collect::<Vec<_>>(),
             })),
             "no_evidence": self.evidence.is_none().then(|| self.no_evidence()),
+            "base_checks": self.base_checks_page(),
+            "merge_approvals_says": merge_approvals_says(self.change.pull_request.as_ref()),
             "commands_digest": self.commands_digest(),
             "checks_altered": self.weakened_says(),
             "claim": self.claim.map(|text| json!({
@@ -669,11 +848,12 @@ impl Certificate<'_> {
                 "caveat": "The agent\u{2019}s own account, shown beside the outcomes and never in \
                            place of them. Nothing here grades it against the evidence.",
             })),
-            // Unsigned is a position, stated beside the flag; no signing option exists.
+            // Devplane never signs; the person may, with their own key.
             "signing": {
                 "signed": false,
-                "says": "Unsigned on purpose — a signature would attest that this tool wrote \
-                         this, which is not the claim.",
+                "says": format!("Unsigned. Devplane never signs; you can sign the in-toto \
+                                 statement with your own SSH key: devplane change export {} \
+                                 --sign ssh --out <file>", self.change.id.as_str()),
             },
             "limits": LIMITS,
             "rederivable": REDERIVABLE,
@@ -687,18 +867,215 @@ impl Certificate<'_> {
         if full.len() <= MAX_BYTES {
             return full;
         }
+        // The link and the command survive the cut: they are how a reader
+        // reaches the whole record.
+        let links = self.link_lines();
+        let full = self.body();
         let note = format!(
             "\n---\n\n**This certificate was truncated to fit its size limit.** What is above is \
              incomplete. Read the structured form for the whole record: `devplane change export {} \
              --json`.",
             self.change.id.as_str()
         );
-        let keep = MAX_BYTES.saturating_sub(note.len() + 1);
+        let keep = MAX_BYTES.saturating_sub(note.len() + links.len() + 2);
         let mut cut = keep;
         while cut > 0 && !full.is_char_boundary(cut) {
             cut -= 1;
         }
-        format!("{}\n{note}", &full[..cut])
+        format!("{}\n{note}\n{links}", &full[..cut])
+    }
+}
+
+impl Certificate<'_> {
+    /// The one sentence about how many tests ran, after the commands table.
+    fn counts_sentence(&self, report: &GateReport) -> String {
+        match &self.base_checks {
+            // The view's, when it describes this run.
+            Some(v) if self.change.check_report().map(|r| r.at) == Some(report.at) => {
+                v.certificate.clone()
+            }
+            _ => super::testcount::compare::certificate_sentence(&report.commands, None),
+        }
+    }
+
+    /// Why there is no current base-checks result, as a sentence; `None` when
+    /// there is one.
+    fn base_checks_absent(&self) -> Option<String> {
+        base_checks_absent(self.base_checks.as_ref())
+    }
+
+    /// The *Base checks* section: both runs, what was put back and placed,
+    /// the named tests, and the steps to redo them — or the one sentence
+    /// saying why there is nothing current. Never omitted.
+    fn base_checks_markdown(&self) -> String {
+        let mut o = String::from("## Base checks\n\n");
+        // How many ran, as the runner printed it: first, since it needs no base run.
+        if let Some(report) = self.evidence {
+            o.push_str(&format!("{}\n\n", inline(&self.counts_sentence(report))));
+        }
+        if let Some(why) = self.base_checks_absent() {
+            o.push_str(&format!("{}\n\n", inline(&why)));
+            return o;
+        }
+        let Some(v) = &self.base_checks else {
+            return o;
+        };
+        let (Some(on_change), Some(on_base)) = (&v.on_change, &v.on_base) else {
+            return o;
+        };
+        let base = v.base.clone().unwrap_or_default();
+        let tree = v.tree.clone().unwrap_or_default();
+        o.push_str(&format!(
+            "`{}: {}` — beside the evidence above, not part of it.\nBase commit {}; tree {} (the \
+             tree `check` verified).\n\n",
+            Origin::KEY,
+            Origin::ExternallyObserved.as_str(),
+            code(&base),
+            code(&tree),
+        ));
+        let list = |items: &[String], more: usize| -> String {
+            let mut s = items.iter().map(|i| code(i)).collect::<Vec<_>>().join(", ");
+            if more > 0 {
+                s.push_str(&format!(" and {more} more"));
+            }
+            s
+        };
+        let table = |o: &mut String, cmds: &[CommandResult]| {
+            if cmds.is_empty() {
+                return;
+            }
+            o.push_str("| Command | Outcome | Tests |\n|---|---|---|\n");
+            for c in cmds {
+                o.push_str(&format!(
+                    "| {} | {} | {} |\n",
+                    code(&c.command),
+                    inline(&outcome_sentence(c)),
+                    inline(&c.tests.says())
+                ));
+            }
+            o.push('\n');
+        };
+
+        o.push_str("### The base's tests on this change\n\n");
+        o.push_str(&format!("**{}.**\n\n", inline(&on_change.says)));
+        if !on_change.restored.is_empty() {
+            o.push_str(&format!(
+                "Put back as the base has them: {}.\n\n",
+                list(&on_change.restored, 0)
+            ));
+        }
+        if !on_change.removed.is_empty() {
+            o.push_str(&format!(
+                "Removed, as the base lacks them: {}.\n\n",
+                list(&on_change.removed, 0)
+            ));
+        }
+        table(&mut o, &on_change.commands);
+        if !on_change.failing.is_empty() {
+            o.push_str(&format!(
+                "Failing: {}.\n\n",
+                list(&on_change.failing, on_change.failing_more)
+            ));
+        }
+        if let Some(n) = &on_change.named {
+            if !n.not_run_on_change.is_empty() {
+                o.push_str(&format!(
+                    "Did not run on this change: {}.\n\n",
+                    list(&n.not_run_on_change, n.not_run_on_change_more)
+                ));
+            }
+            if !n.became_skipped.is_empty() {
+                o.push_str(&format!(
+                    "Became skipped: {}.\n\n",
+                    list(&n.became_skipped, n.became_skipped_more)
+                ));
+            }
+        }
+
+        o.push_str("### This change's new tests on the base\n\n");
+        o.push_str(&format!("**{}.**\n\n", inline(&on_base.says)));
+        if !on_base.placed.is_empty() {
+            let placed: Vec<String> = on_base
+                .placed
+                .iter()
+                .map(|p| match &p.blob {
+                    Some(b) => format!("{} (blob {})", code(&p.path), code(b)),
+                    None => code(&p.path),
+                })
+                .collect();
+            o.push_str(&format!("Placed: {}.\n\n", placed.join(", ")));
+        }
+        if !on_base.not_separable.is_empty() {
+            o.push_str(&format!(
+                "Not separable: {}.\n\n",
+                list(&on_base.not_separable, 0)
+            ));
+        }
+        table(&mut o, &on_base.commands);
+        if !on_base.passing.is_empty() {
+            o.push_str(&format!(
+                "Passing without the change: {}.\n\n",
+                list(&on_base.passing, on_base.passing_more)
+            ));
+        }
+        if !on_base.failing.is_empty() {
+            o.push_str(&format!(
+                "Failing without it: {}.\n\n",
+                list(&on_base.failing, on_base.failing_more)
+            ));
+        }
+
+        o.push_str("### To redo both by hand\n\n");
+        let restored = on_change
+            .restored
+            .iter()
+            .map(|p| shell_quote(p))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let placed = on_base
+            .placed
+            .iter()
+            .map(|p| shell_quote(&p.path))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut steps = vec![
+            format!("git worktree add --detach /tmp/base-checks {base}"),
+            "cd /tmp/base-checks".to_string(),
+            format!("git read-tree -u --reset {tree}"),
+        ];
+        if !restored.is_empty() {
+            steps.push(format!("git checkout {base} -- {restored}"));
+        }
+        for p in &on_change.removed {
+            steps.push(format!("rm -f {}", shell_quote(p)));
+        }
+        steps.push("# run the commands of the first table".into());
+        steps.push(format!(
+            "git read-tree -u --reset {base} && git clean -ffdx"
+        ));
+        if !placed.is_empty() {
+            steps.push(format!("git checkout {tree} -- {placed}"));
+            steps.push("# run the commands of the second table; compare each placed blob with `git hash-object <path>`".into());
+        }
+        o.push_str(&fenced(&steps.join("\n")));
+        o.push_str("\n\n");
+        o
+    }
+
+    /// `predicate.devplane.baseChecks`.
+    fn base_checks_json(&self) -> serde_json::Value {
+        base_checks_json(self.base_checks.as_ref(), self.base_checks_absent())
+    }
+
+    /// The page's sentences, as the host wrote them.
+    fn base_checks_page(&self) -> serde_json::Value {
+        serde_json::json!({
+            "counts": self.base_checks.as_ref().map(|v| &v.counts_says),
+            "on_change": self.base_checks.as_ref().and_then(|v| v.on_change.as_ref()).map(|o| &o.says),
+            "on_base": self.base_checks.as_ref().and_then(|v| v.on_base.as_ref()).map(|o| &o.says),
+            "absent": self.base_checks_absent(),
+            "stale": self.base_checks.as_ref().is_some_and(|v| v.stale),
+        })
     }
 }
 
@@ -714,13 +1091,229 @@ fn where_it_is(change: &Change, state: ChangeState) -> String {
     }
 }
 
+/// Why there is no current base-checks result, as a sentence; `None` when
+/// there is one.
+pub fn base_checks_absent(view: Option<&super::base_checks::View>) -> Option<String> {
+    match view {
+        None => Some("Base checks not run — `check` has not run on this change.".into()),
+        Some(v) => v.absent.as_ref().map(|a| {
+            let says = match (a.absent, &v.tree) {
+                (super::base_checks::Absent::Stale, Some(t)) => format!(
+                    "base checks stale — they describe tree `{}`, not this one",
+                    super::text::clip(t, 12)
+                ),
+                _ => a.says.clone(),
+            };
+            let mut c = says.chars();
+            match c.next() {
+                Some(f) => format!("{}{}.", f.to_uppercase(), c.as_str()),
+                None => String::new(),
+            }
+        }),
+    }
+}
+
+/// `predicate.devplane.mergeApprovals`: the reading of who approved the
+/// change's pull request, or why there is none — never an empty list.
+pub fn merge_approvals_json(pr: Option<&super::change::PullRequestRef>) -> serde_json::Value {
+    use super::approvals::ReadingState;
+    use serde_json::json;
+    let Some(pr) = pr else {
+        return json!({ "absent": "no pull request" });
+    };
+    match &pr.approvals {
+        None => json!({ "unread": NOT_READ_YET }),
+        Some(ReadingState::NotRead { why }) => json!({ "unread": why }),
+        Some(ReadingState::Stale { last, why }) => json!({ "unread": why, "last": last }),
+        Some(ReadingState::Current { reading }) => json!(reading),
+    }
+}
+
+/// What a pull request whose approvals were never read says.
+pub const NOT_READ_YET: &str = "the pull request's approvals have not been read yet";
+
+/// The one sentence a surface shows for the approvals: the reading's, or why
+/// there is none. `None` without a pull request.
+pub fn merge_approvals_says(pr: Option<&super::change::PullRequestRef>) -> Option<String> {
+    use super::approvals::ReadingState;
+    let pr = pr?;
+    Some(match &pr.approvals {
+        None => format!("Approvals not read: {NOT_READ_YET}."),
+        Some(ReadingState::NotRead { why }) => format!("Approvals not read: {why}."),
+        Some(ReadingState::Stale { last, why }) => format!(
+            "As of {}, not current ({why}): {}",
+            last.read_at, last.sentence
+        ),
+        Some(ReadingState::Current { reading }) => reading.sentence.clone(),
+    })
+}
+
+/// The documented request that re-reads the reviews, when the pull request's
+/// address can be read as `https://<host>/<owner>/<repo>/pull/<n>`.
+pub fn reviews_request(pr: &super::change::PullRequestRef) -> Option<String> {
+    let rest = pr.url.strip_prefix("https://")?;
+    let mut parts = rest.split('/');
+    let (host, owner, repo, kind, n) = (
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+    );
+    let safe = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    };
+    if kind != "pull"
+        || n.parse::<u64>().ok()? != pr.number
+        || ![host, owner, repo].iter().all(|s| safe(s))
+    {
+        return None;
+    }
+    let api = match host.eq_ignore_ascii_case("github.com") {
+        true => "https://api.github.com".to_string(),
+        false => format!("https://{host}/api/v3"),
+    };
+    Some(format!(
+        "curl -H \"Accept: application/vnd.github+json\" {api}/repos/{owner}/{repo}/pulls/{}/reviews",
+        pr.number
+    ))
+}
+
+/// The *Merge approvals* section: absent without a pull request.
+fn merge_approvals_markdown(change: &Change) -> String {
+    use super::approvals::{ReadingState, sentence::LIMITS_LINE};
+    let Some(pr) = change.pull_request.as_ref() else {
+        return String::new();
+    };
+    let mut o = String::from("## Merge approvals\n\n");
+    if let Some(says) = merge_approvals_says(Some(pr)) {
+        o.push_str(&format!("{}\n\n", inline(&says)));
+    }
+    let reading = pr.approvals.as_ref().and_then(ReadingState::reading);
+    if let Some(r) = reading {
+        if let Some(rule) = &r.required_says {
+            o.push_str(&format!("{}\n\n", inline(rule)));
+        }
+        o.push_str(&match r.after_merge {
+            true => format!("Read at {}, after the pull request merged.\n\n", r.read_at),
+            false => format!(
+                "Read at {}. This is what the reviews said then, not necessarily at merge.\n\n",
+                r.read_at
+            ),
+        });
+    }
+    if let Some(review) = pr.decision_quote() {
+        o.push_str(&format!("GitHub says: {}.\n\n", inline(&review)));
+    }
+    if let Some(curl) = reviews_request(pr) {
+        o.push_str(
+            "To re-read the reviews (add an `Authorization` header for a private repository):\n\n",
+        );
+        o.push_str(&fenced(&curl));
+        o.push_str("\n\n");
+    }
+    o.push_str(LIMITS_LINE);
+    o.push_str("\n\n");
+    o
+}
+
+/// `predicate.devplane.baseChecks`: the whole result when current, else
+/// the sentence and which absence it is. Never `null`.
+pub fn base_checks_json(
+    view: Option<&super::base_checks::View>,
+    absent_says: Option<String>,
+) -> serde_json::Value {
+    use serde_json::json;
+    let origin = Origin::ExternallyObserved.as_str();
+    let Some(v) = view else {
+        return json!({
+            Origin::KEY: origin,
+            "absent": "check_not_run",
+            "says": absent_says,
+        });
+    };
+    if let Some(a) = &v.absent {
+        return json!({
+            Origin::KEY: origin,
+            "absent": a.absent,
+            "says": absent_says,
+            "stale": v.stale,
+        });
+    }
+    let on_change = v.on_change.as_ref();
+    let on_base = v.on_base.as_ref();
+    json!({
+        Origin::KEY: origin,
+        "says": {
+            "counts": v.counts_says,
+            "onChange": on_change.map(|o| &o.says),
+            "onBase": on_base.map(|o| &o.says),
+        },
+        "stale": v.stale,
+        "base": v.base,
+        "tree": v.tree,
+        "onChange": on_change.map(|o| json!({
+            "restored": o.restored,
+            "removed": o.removed,
+            "inline": o.inline,
+            "outcome": o.outcome,
+            "commands": o.commands.iter().map(|c| json!({
+                "command": c.command, "outcome": c.outcome, "tests": c.tests,
+            })).collect::<Vec<_>>(),
+            "failing": o.failing,
+            "failingOmitted": o.failing_more,
+            "named": o.named,
+        })),
+        "onBase": on_base.map(|o| json!({
+            "placed": o.placed,
+            "notSeparable": o.not_separable,
+            "outcome": o.outcome,
+            "commands": o.commands.iter().map(|c| json!({
+                "command": c.command, "outcome": c.outcome, "tests": c.tests,
+            })).collect::<Vec<_>>(),
+            "passing": o.passing,
+            "passingOmitted": o.passing_more,
+            "failing": o.failing,
+            "failingOmitted": o.failing_more,
+        })),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Nothing altered names the agent's controls and the build's inputs too;
+    /// a lockfile row reaches the statement with its kind.
+    #[test]
+    fn the_controls_are_named_in_what_the_change_altered() {
+        assert!(NOTHING_ALTERED.contains("no gate or CI definition edited"));
+        assert!(NOTHING_ALTERED.contains("nothing that governs the agent or the build edited"));
+        let lock = super::super::review::Weakened {
+            path: "Cargo.lock".into(),
+            why: "edits the lockfile `Cargo.lock`: 1 package added (`a` 1.0)".into(),
+            kind: super::super::review::WeakKind::SupplyChain,
+            matched: "changed lines 0".into(),
+        };
+        let rows = std::slice::from_ref(&lock);
+        let says = super::super::review::weakened_sentence(rows).unwrap();
+        let altered = super::super::attest::checks_altered(Some(rows), Some(false), says);
+        assert_eq!(altered["rows"][0]["kind"], "supply_chain", "{altered}");
+        assert!(
+            altered["says"]
+                .as_str()
+                .unwrap()
+                .starts_with("It also edited what governs the agent or what the build trusts"),
+            "{altered}"
+        );
+    }
+
     #[test]
     fn the_four_outcomes_read_differently() {
         let base = CommandResult {
+            tests: Default::default(),
             command: "x".into(),
             outcome: Outcome::Exited { code: 1 },
             duration_ms: 0,

@@ -17,13 +17,42 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 // Renamed on the wire: ts-rs exports one flat namespace, and two `Kind.ts`
 // files would silently overwrite each other.
-#[cfg_attr(
-    feature = "typescript",
-    ts(rename = "AskKind", export, export_to = "wire/")
-)]
+#[cfg_attr(feature = "typescript", ts(rename = "AskKind"))]
 pub enum Kind {
     Permission,
     Question,
+}
+
+/// Where an answer came from, as the host can prove it — never as a request
+/// says it. `Window` only for a request carrying the window's proof for that
+/// very ask; `Notification` only for a notification's action handled inside
+/// the app's own process, which no route can reach; `Cli` for every other
+/// holder of the control token and for the host-less command line.
+///
+/// Deliberately not readable from text: no `FromStr`, no `From<&str>`, no
+/// `Deserialize`. The host constructs it; a body or a header never does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnswerPath {
+    Window,
+    Notification,
+    Cli,
+}
+
+impl AnswerPath {
+    /// The word the record keeps and every surface shows.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AnswerPath::Window => "window",
+            AnswerPath::Notification => "notification",
+            AnswerPath::Cli => "cli",
+        }
+    }
+}
+
+impl std::fmt::Display for AnswerPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl Kind {
@@ -49,10 +78,7 @@ impl Kind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(
-    feature = "typescript",
-    ts(rename = "AskDeadline", export, export_to = "wire/")
-)]
+#[cfg_attr(feature = "typescript", ts(rename = "AskDeadline"))]
 pub enum Deadline {
     /// It waits; the run shows as waiting on a person.
     #[default]
@@ -123,10 +149,7 @@ pub fn parse_deadline(s: &str) -> Option<Deadline> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(
-    feature = "typescript",
-    ts(rename = "AskEnded", export, export_to = "wire/")
-)]
+#[cfg_attr(feature = "typescript", ts(rename = "AskEnded"))]
 pub enum Ended {
     /// A person answered.
     Person,
@@ -171,10 +194,7 @@ impl Ended {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(
-    feature = "typescript",
-    ts(rename = "AskDelivery", export, export_to = "wire/")
-)]
+#[cfg_attr(feature = "typescript", ts(rename = "AskDelivery"))]
 pub enum Delivery {
     /// Straight down the connection the ask arrived on.
     Live,
@@ -208,7 +228,6 @@ impl Delivery {
 /// never the session, which may be gone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub struct Ask {
     pub id: AskId,
     pub kind: Kind,
@@ -234,7 +253,9 @@ pub struct Ask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "typescript", ts(type = "string | null"))]
     pub answered_at: Option<Timestamp>,
-    /// Which surface answered — `cli`, `board`, `mcp`.
+    /// Where the answer came from, as the host proved it: `window`,
+    /// `notification` or `cli` ([`AnswerPath`]). An older row may read
+    /// `board`, shown as stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -333,7 +354,7 @@ impl Ask {
     pub fn answer(
         &mut self,
         answer: serde_json::Value,
-        from: impl Into<String>,
+        from: AnswerPath,
         at: Timestamp,
     ) -> Result<(), Refused> {
         if let Some(e) = &self.ended {
@@ -349,7 +370,7 @@ impl Ask {
         }
         self.answer = Some(answer);
         self.answered_at = Some(at);
-        self.answered_from = Some(from.into());
+        self.answered_from = Some(from.as_str().to_string());
         self.ended = Some(Ended::Person);
         self.ended_at = Some(at);
         Ok(())
@@ -363,6 +384,16 @@ impl Ask {
         }
     }
 
+    /// Where the person answered from, as the record has it: ` from the
+    /// notification`, ` from the window`, ` from the cli` — or an older row's
+    /// word as stored.
+    fn path_says(&self) -> String {
+        match &self.answered_from {
+            Some(f) => format!(" from the {f}"),
+            None => String::new(),
+        }
+    }
+
     /// What became of it, in one sentence, with the delivery when there was one.
     /// What became of it, in one sentence — composed only here so surfaces
     /// cannot word it differently.
@@ -372,10 +403,21 @@ impl Ask {
                 Deadline::Never => "waiting for you".to_string(),
                 Deadline::After(_) => format!("waiting for you — {}", self.deadline.says()),
             },
-            (Some(Ended::Person), Some(d)) => format!("{} · {}", Ended::Person.says(), d.says()),
+            (Some(Ended::Person), Some(d)) => {
+                format!(
+                    "{}{} · {}",
+                    Ended::Person.says(),
+                    self.path_says(),
+                    d.says()
+                )
+            }
             (Some(Ended::Person), None) => {
                 // Answered, not yet delivered: the state a crash lands in.
-                "you answered it · not delivered yet".to_string()
+                format!(
+                    "{}{} · not delivered yet",
+                    Ended::Person.says(),
+                    self.path_says()
+                )
             }
             (Some(e), _) => e.says(),
         }
@@ -527,24 +569,77 @@ mod tests {
         assert!(
             a.answer(
                 serde_json::json!({"question_0": "keep"}),
-                "board",
+                AnswerPath::Notification,
                 at("2026-09-21T09:05:00Z")
             )
             .is_ok()
         );
         let again = a.answer(
             serde_json::json!({"question_0": "drop"}),
-            "cli",
+            AnswerPath::Cli,
             at("2026-09-21T09:05:01Z"),
         );
         match again {
-            Err(Refused::AlreadyAnswered { from, .. }) => {
-                assert_eq!(from.as_deref(), Some("board"))
+            Err(Refused::AlreadyAnswered { ref from, .. }) => {
+                assert_eq!(from.as_deref(), Some("notification"));
+                assert!(
+                    again
+                        .as_ref()
+                        .unwrap_err()
+                        .says()
+                        .contains("from the notification"),
+                    "the loser is told the path"
+                );
             }
             other => panic!("{other:?}"),
         }
         assert_eq!(a.answer, Some(serde_json::json!({"question_0": "keep"})));
-        assert_eq!(a.answered_from.as_deref(), Some("board"));
+        assert_eq!(a.answered_from.as_deref(), Some("notification"));
+    }
+
+    /// The three paths are stored as their own words, and only those.
+    #[test]
+    fn each_path_is_stored_as_its_word() {
+        for (path, word) in [
+            (AnswerPath::Window, "window"),
+            (AnswerPath::Notification, "notification"),
+            (AnswerPath::Cli, "cli"),
+        ] {
+            let mut a = ask();
+            a.answer(serde_json::json!({}), path, at("2026-09-21T09:05:00Z"))
+                .unwrap();
+            assert_eq!(a.answered_from.as_deref(), Some(word));
+            assert_eq!(path.to_string(), word);
+        }
+    }
+
+    /// A row answered from `board`, a path no surface writes, still loads
+    /// and says what it said.
+    #[test]
+    fn an_old_board_row_still_loads_and_reads_as_stored() {
+        let mut a = ask();
+        a.answer(
+            serde_json::json!({}),
+            AnswerPath::Cli,
+            at("2026-09-21T09:05:00Z"),
+        )
+        .unwrap();
+        a.answered_from = Some("board".into());
+        let back: Ask = serde_json::from_value(serde_json::to_value(&a).unwrap()).unwrap();
+        assert_eq!(back.answered_from.as_deref(), Some("board"));
+        let refused = back
+            .clone()
+            .answer(
+                serde_json::json!({}),
+                AnswerPath::Cli,
+                at("2026-09-21T09:06:00Z"),
+            )
+            .unwrap_err();
+        assert!(
+            refused.says().contains("from the board"),
+            "{}",
+            refused.says()
+        );
     }
 
     #[test]
@@ -558,7 +653,11 @@ mod tests {
             at("2026-09-21T09:01:00Z"),
         );
         let refused = a
-            .answer(serde_json::json!({}), "cli", at("2026-09-21T09:02:00Z"))
+            .answer(
+                serde_json::json!({}),
+                AnswerPath::Cli,
+                at("2026-09-21T09:02:00Z"),
+            )
             .unwrap_err();
         assert!(matches!(refused, Refused::AlreadyEnded(_)));
         assert!(refused.says().contains("no longer answerable"));
@@ -569,8 +668,12 @@ mod tests {
     #[test]
     fn a_run_ending_cannot_overwrite_a_person_who_already_answered() {
         let mut a = ask();
-        a.answer(serde_json::json!({}), "cli", at("2026-09-21T09:05:00Z"))
-            .unwrap();
+        a.answer(
+            serde_json::json!({}),
+            AnswerPath::Cli,
+            at("2026-09-21T09:05:00Z"),
+        )
+        .unwrap();
         a.end(
             Ended::Nobody {
                 because: "the run ended".into(),
@@ -584,9 +687,30 @@ mod tests {
     #[test]
     fn answered_but_undelivered_says_so_rather_than_claiming_a_delivery() {
         let mut a = ask();
-        a.answer(serde_json::json!({}), "cli", at("2026-09-21T09:05:00Z"))
-            .unwrap();
-        assert_eq!(a.outcome(), "you answered it · not delivered yet");
+        a.answer(
+            serde_json::json!({}),
+            AnswerPath::Cli,
+            at("2026-09-21T09:05:00Z"),
+        )
+        .unwrap();
+        assert_eq!(
+            a.outcome(),
+            "you answered it from the cli · not delivered yet"
+        );
+        let mut n = ask();
+        n.answer(
+            serde_json::json!({}),
+            AnswerPath::Notification,
+            at("2026-09-21T09:05:00Z"),
+        )
+        .unwrap();
+        n.delivery = Some(Delivery::Live);
+        assert!(
+            n.outcome()
+                .starts_with("you answered it from the notification · "),
+            "{}",
+            n.outcome()
+        );
         a.delivery = Some(Delivery::Resumed);
         assert!(a.outcome().contains("resumed session"), "{}", a.outcome());
         a.delivery = Some(Delivery::Undeliverable {

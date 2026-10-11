@@ -2,7 +2,13 @@
 //! stranger can do with it. Mostly wording assertions, since the failure mode
 //! is a true record read as a larger claim than the evidence supports.
 
+mod common;
+
+use common::{git, scratch};
 use devplane::core::certificate::{Certificate, LIMITS, MAX_BYTES, REDERIVABLE};
+
+/// The fixture commit: a full object id, as git prints one.
+const COMMIT: &str = "4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d";
 use devplane::core::change::{
     Change, CommandResult, CommitStamp, Completion, Declared, GateReport, Outcome, Reach,
     SpecStamp, Waiting,
@@ -19,7 +25,8 @@ fn change() -> Change {
 fn stamp(commit: Option<&str>, clean: bool, reach: Reach) -> CommitStamp {
     CommitStamp {
         commit: commit.map(str::to_string),
-        tree: commit.map(|c| format!("tree-of-{c}")),
+        tree: commit.map(tree_of),
+        tree_unknown: None,
         branch: Some("change/rate-limiting".into()),
         clean,
         changed_files: if clean { 0 } else { 3 },
@@ -28,15 +35,26 @@ fn stamp(commit: Option<&str>, clean: bool, reach: Reach) -> CommitStamp {
     }
 }
 
+/// The tree a fixture commit holds: a git object id, distinct from the commit.
+fn tree_of(commit: &str) -> String {
+    format!("{:0>40}", commit.chars().rev().collect::<String>())
+}
+
 fn report(gate: &str, attempt: u32, commands: Vec<CommandResult>) -> GateReport {
     GateReport {
+        junit: Vec::new(),
+        base_commit: None,
         gate: gate.into(),
         at: jiff::Timestamp::now(),
         duration_ms: 10,
         commands,
         attempt,
         spec: None,
-        commit: Some(stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        commit: Some(stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     }
 }
 
@@ -74,7 +92,11 @@ fn passing() -> Change {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     finished(w, basis)
 }
@@ -85,10 +107,13 @@ fn passing() -> Change {
 fn the_document_names_the_commit_the_commands_and_how_to_run_them() {
     let w = passing();
     let md = cert_of(&w, None).markdown();
-    assert!(md.contains("4f2a9c1e"), "the commit is not named:\n{md}");
+    assert!(
+        md.contains("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        "the commit is not named:\n{md}"
+    );
     assert!(md.contains("cargo test"), "the command is not named");
     assert!(
-        md.contains("git checkout 4f2a9c1e"),
+        md.contains("git checkout 4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
         "no re-derivation step"
     );
     assert!(md.contains("Check this yourself"), "no instructions at all");
@@ -99,11 +124,12 @@ fn both_shapes_report_the_same_commit_and_the_same_outcome() {
     let w = passing();
     let c = cert_of(&w, None);
     let j = c.json();
-    assert_eq!(j["subject"][0]["digest"]["gitCommit"], "4f2a9c1e");
     assert_eq!(
-        j["predicate"]["evidence"]["commands"][0]["outcome"]["code"],
-        0
+        j["subject"][0]["digest"]["gitCommit"],
+        "4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"
     );
+    assert_eq!(j["predicate"]["devplane"]["commands"][0]["exitCode"], 0);
+    assert_eq!(j["predicate"]["result"], "PASSED");
     assert!(c.markdown().contains("exit 0"));
 }
 
@@ -115,7 +141,11 @@ fn the_structured_shape_is_an_in_toto_statement() {
     assert_eq!(j["_type"], "https://in-toto.io/Statement/v1");
     assert_eq!(
         j["predicateType"],
-        "https://devplane.dev/DoneCertificate/v1"
+        "https://in-toto.io/attestation/test-result/v0.1"
+    );
+    assert!(
+        !j.to_string().contains("DoneCertificate"),
+        "the retired predicate: {j}"
     );
     assert!(j["subject"].is_array());
     assert!(j["predicate"].is_object());
@@ -125,16 +155,27 @@ fn the_structured_shape_is_an_in_toto_statement() {
 fn it_says_it_is_unsigned_rather_than_implying_otherwise() {
     // Unsigned: a signature would invite trusting the builder.
     let w = passing();
-    assert_eq!(cert_of(&w, None).json()["predicate"]["signed"], false);
+    let c = cert_of(&w, None);
+    assert_eq!(c.json()["predicate"]["devplane"]["signed"], false);
+    // Devplane never signs; the person may, and the page says how.
+    let says = c.page()["signing"]["says"].as_str().unwrap().to_string();
+    assert!(says.starts_with("Unsigned. Devplane never signs"), "{says}");
+    assert!(says.contains("--sign ssh --out"), "{says}");
+    assert!(!says.contains("on purpose"), "{says}");
 }
 
 #[test]
 fn the_verification_steps_are_data_and_not_only_prose() {
     let w = passing();
     let j = cert_of(&w, None).json();
-    let steps = j["predicate"]["verification"]["steps"].as_array().unwrap();
+    let steps = j["predicate"]["devplane"]["verification"]["steps"]
+        .as_array()
+        .unwrap();
     assert!(steps[0].as_str().unwrap().starts_with("git clone "));
-    assert_eq!(steps[1], "git checkout 4f2a9c1e");
+    assert_eq!(
+        steps[1],
+        "git checkout 4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"
+    );
     assert_eq!(steps[2], "cargo test");
 }
 
@@ -167,7 +208,11 @@ fn the_attempt_says_which_of_how_many() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let md = cert_of(&w, None).markdown();
@@ -213,7 +258,11 @@ fn a_gate_that_ran_outside_a_repository_says_so() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let md = cert_of(&w, None).markdown();
@@ -233,7 +282,11 @@ fn a_repository_with_no_commits_yet_is_a_state_not_a_blank() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let c = cert_of(&w, None);
@@ -251,7 +304,11 @@ fn a_commit_nobody_can_fetch_says_so_where_the_instructions_are() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let md = cert_of(&w, None).markdown();
@@ -280,7 +337,11 @@ fn the_four_reaches_read_differently() {
         let basis = basis_of(
             &w,
             true,
-            Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+            Some(&stamp(
+                Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+                true,
+                Reach::Remote,
+            )),
         );
         let w = finished(w, basis);
         assert!(
@@ -299,7 +360,11 @@ fn a_dirty_tree_is_said_where_the_commit_is() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let md = cert_of(&w, None).markdown();
@@ -407,7 +472,11 @@ fn the_four_outcomes_produce_four_sentences() {
         let basis = basis_of(
             &w,
             true,
-            Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+            Some(&stamp(
+                Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+                true,
+                Reach::Remote,
+            )),
         );
         let w = finished(w, basis);
         assert!(
@@ -433,7 +502,11 @@ fn a_specification_that_was_not_found_is_stated_not_omitted() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let md = cert_of(&w, None).markdown();
@@ -456,7 +529,11 @@ fn unticked_tasks_appear_beside_the_outcome_and_neither_is_judged() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let md = cert_of(&w, None).markdown();
@@ -490,7 +567,11 @@ fn the_four_bases_read_differently_one_at_a_time() {
             gate: "check".into(),
             attempt: 1,
             attempts: 1,
-            ran_at: Some(Box::new(stamp(Some("4f2a9c1e"), true, Reach::Remote))),
+            ran_at: Some(Box::new(stamp(
+                Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+                true,
+                Reach::Remote,
+            ))),
             now: Some(Box::new(stamp(Some("b7c2ffff"), true, Reach::Remote))),
             at,
         },
@@ -551,7 +632,11 @@ fn a_failing_gate_cannot_produce_a_gates_passed_basis() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     assert!(
         matches!(basis, Completion::ByHand { .. }),
@@ -596,7 +681,9 @@ fn every_rederivable_field_is_named_in_both_shapes_from_one_list() {
     let c = cert_of(&w, None);
     let md = c.markdown();
     let j = c.json();
-    let listed = j["predicate"]["rederivable"].as_array().unwrap();
+    let listed = j["predicate"]["devplane"]["rederivable"]
+        .as_array()
+        .unwrap();
     assert_eq!(listed.len(), REDERIVABLE.len());
     for f in REDERIVABLE {
         assert!(
@@ -675,7 +762,11 @@ fn the_artifact_is_bounded_and_says_that_it_truncated() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let md = cert_of(&w, None).markdown_bounded();
@@ -697,7 +788,11 @@ fn untrusted_text_cannot_restructure_the_document() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let c = cert_of(&w, None);
@@ -729,7 +824,7 @@ fn untrusted_text_cannot_restructure_the_document() {
         );
     }
     assert!(md.contains("Fake heading"));
-    assert_eq!(c.json()["predicate"]["change"]["title"], nasty);
+    assert_eq!(c.json()["predicate"]["devplane"]["change"]["title"], nasty);
 }
 
 /// Numbered lines outside fenced blocks; a fence closes on a run of equal or
@@ -760,7 +855,11 @@ fn a_fence_in_the_verification_block_cannot_close_it() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let md = cert_of(&w, None).markdown();
@@ -882,7 +981,11 @@ fn every_shape_of_change_gets_a_basis() {
     ));
     cases.push(hung);
 
-    let here = stamp(Some("4f2a9c1e"), true, Reach::Remote);
+    let here = stamp(
+        Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        true,
+        Reach::Remote,
+    );
     for w in &cases {
         for declares in [true, false] {
             for now in [None, Some(&here)] {
@@ -898,7 +1001,11 @@ fn every_shape_of_change_gets_a_basis() {
 #[test]
 fn a_gate_that_passed_on_a_commit_that_moved_on_is_no_longer_a_pass() {
     let w = passing();
-    let here = stamp(Some("4f2a9c1e"), true, Reach::Remote);
+    let here = stamp(
+        Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        true,
+        Reach::Remote,
+    );
 
     assert!(
         matches!(
@@ -918,13 +1025,17 @@ fn a_gate_that_passed_on_a_commit_that_moved_on_is_no_longer_a_pass() {
     assert!(!basis.is_checked());
     let said = basis.headline();
     assert!(
-        said.contains("tree-of") && said.contains("changed after"),
+        said.contains(&tree_of(COMMIT)[..7]) && said.contains("changed after"),
         "{said}"
     );
     assert!(!said.contains("did not pass"), "{said}");
 
     // Dirty alone is not stale: the same working-tree digest is the same tree.
-    let dirty = stamp(Some("4f2a9c1e"), false, Reach::Remote);
+    let dirty = stamp(
+        Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        false,
+        Reach::Remote,
+    );
     assert!(matches!(
         basis_of(&w, true, Some(&dirty)),
         Completion::GatesPassed { .. }
@@ -964,33 +1075,6 @@ fn a_gate_that_passed_on_a_commit_that_moved_on_is_no_longer_a_pass() {
 }
 
 // ── Against real git, because the claims are about somebody else's tool ─────
-
-fn scratch(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "dp-cert-{tag}-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn git(dir: &std::path::Path, args: &[&str]) {
-    let out = std::process::Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
 
 #[tokio::test]
 async fn a_repository_with_no_commits_reports_no_commit_rather_than_failing() {
@@ -1073,6 +1157,196 @@ async fn outside_a_repository_there_is_no_stamp_at_all() {
     assert!(devplane::git::commit_stamp(&dir).await.is_none());
 }
 
+/// *Clean* is the digest being the commit's own tree, never `git status`,
+/// which an `assume-unchanged` flag silences.
+#[tokio::test]
+async fn an_edit_hidden_from_status_is_not_clean() {
+    let dir = scratch("hidden");
+    git(&dir, &["init", "-q", "-b", "main"]);
+    std::fs::write(dir.join("a.txt"), "one").unwrap();
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-q", "-m", "one"]);
+    assert!(devplane::git::commit_stamp(&dir).await.unwrap().clean);
+    std::fs::write(dir.join("a.txt"), "two").unwrap();
+    git(&dir, &["update-index", "--assume-unchanged", "a.txt"]);
+    let st = devplane::git::status(&dir).await.unwrap();
+    assert!(
+        st.changed_files == 0 && st.untracked_files == 0,
+        "git status still sees the edit"
+    );
+    let stamp = devplane::git::commit_stamp(&dir).await.unwrap();
+    assert!(!stamp.clean, "a hidden edit read as clean");
+}
+
+/// The statement is about the tree the commands ran against; the commit is
+/// named only when that tree is the commit's own, and no tree is no statement
+/// at all — never an empty subject or an empty digest.
+#[test]
+fn the_statement_is_about_the_tree_and_names_the_commit_only_when_clean() {
+    let subject_of = |s: CommitStamp| {
+        let mut w = change();
+        let mut r = report("check", 1, vec![CommandResult::exited("cargo test", 0)]);
+        r.commit = Some(s.clone());
+        w.gates.push(r);
+        let basis = basis_of(&w, true, Some(&s));
+        let w = finished(w, basis);
+        cert_of(&w, None).json()
+    };
+    let j = subject_of(stamp(
+        Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        true,
+        Reach::Remote,
+    ));
+    assert_eq!(j["subject"][0]["digest"]["gitTree"], tree_of(COMMIT));
+    assert_eq!(
+        j["subject"][0]["digest"]["gitCommit"],
+        "4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"
+    );
+
+    let j = subject_of(stamp(
+        Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        false,
+        Reach::Remote,
+    ));
+    assert_eq!(j["subject"][0]["digest"]["gitTree"], tree_of(COMMIT));
+    assert!(
+        j["subject"][0]["digest"].get("gitCommit").is_none(),
+        "a commit that is not the tree named as the subject: {j}"
+    );
+
+    let mut none = stamp(
+        Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        true,
+        Reach::Remote,
+    );
+    none.tree = None;
+    none.tree_unknown = Some("`check` moved the tree: coverage.xml".into());
+    let j = subject_of(none);
+    assert!(
+        j.get("_type").is_none() && j.get("subject").is_none(),
+        "a statement with no subject: {j}"
+    );
+    assert!(
+        j["no_statement"]
+            .as_str()
+            .is_some_and(|w| w.starts_with("No in-toto statement") && w.contains("coverage.xml")),
+        "{j}"
+    );
+}
+
+/// An in-toto Statement v1: its four top-level fields and nothing else, and at
+/// least one subject, each with a digest that names something.
+fn assert_statement_v1(st: &serde_json::Value) {
+    let mut keys: Vec<&str> = st.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["_type", "predicate", "predicateType", "subject"],
+        "{st}"
+    );
+    assert_eq!(st["_type"], "https://in-toto.io/Statement/v1");
+    let subject = st["subject"].as_array().expect("subject is a list");
+    assert!(!subject.is_empty(), "a statement with no subject: {st}");
+    for s in subject {
+        let digest = s["digest"].as_object().expect("a digest");
+        assert!(!digest.is_empty(), "{st}");
+        assert!(
+            digest
+                .values()
+                .all(|d| d.as_str().is_some_and(|d| !d.is_empty())),
+            "{st}"
+        );
+    }
+}
+
+/// Every shape a change's evidence can take either makes a valid statement or
+/// makes none and says why: never an empty subject, never an extra top-level
+/// field.
+#[test]
+fn a_statement_always_has_a_subject_and_only_the_four_statement_fields() {
+    use devplane::core::certificate::NO_STATEMENT;
+    let of = |commit: Option<CommitStamp>| {
+        let mut w = change();
+        let mut r = report("check", 1, vec![CommandResult::exited("cargo test", 0)]);
+        r.commit = commit.clone();
+        w.gates.push(r);
+        let basis = basis_of(&w, true, commit.as_ref());
+        let w = finished(w, basis);
+        let c = cert_of(&w, None);
+        (c.statement(), c.json())
+    };
+    let mut dirty = stamp(
+        Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        false,
+        Reach::LocalOnly,
+    );
+    dirty.changed_files = 2;
+    for s in [
+        stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        ),
+        stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::NoRemote,
+        ),
+        dirty,
+    ] {
+        let (st, j) = of(Some(s));
+        let st = st.expect("a tree makes a statement");
+        assert_statement_v1(&st);
+        assert_eq!(st, j);
+    }
+
+    let mut no_tree = stamp(
+        Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        true,
+        Reach::Remote,
+    );
+    no_tree.tree = None;
+    let mut empty_tree = stamp(
+        Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        true,
+        Reach::Remote,
+    );
+    empty_tree.tree = Some(String::new());
+    for (s, says) in [
+        (Some(no_tree), "no working-tree digest was recorded"),
+        (Some(empty_tree), "no working-tree digest was recorded"),
+        (None, "no gate ran in a repository"),
+    ] {
+        let (st, j) = of(s);
+        let why = st.expect_err("no tree makes no statement").says();
+        assert!(why.contains(says), "{why}");
+        assert_eq!(j, serde_json::json!({ NO_STATEMENT: why }));
+    }
+
+    // An unfinished change with no gate yet: no statement either.
+    let w = change();
+    let j = cert_of(&w, None).json();
+    assert!(j.get("_type").is_none(), "{j}");
+    assert!(j[NO_STATEMENT].is_string(), "{j}");
+}
+
+/// What the certificate says it establishes names what the subject now is: the
+/// tree, not the commit.
+#[test]
+fn the_limits_name_the_tree_the_subject_names() {
+    assert!(
+        LIMITS.contains("against the working tree it names"),
+        "{LIMITS}"
+    );
+    assert!(!LIMITS.contains("against this commit"), "{LIMITS}");
+}
+
+#[test]
+fn the_limits_say_the_commands_ran_the_changes_own_code() {
+    assert!(LIMITS.contains("including tests and build scripts the change may have edited"));
+    assert!(LIMITS.contains("cannot see an edit reverted during the run"));
+}
+
 /// Evidence and claim carry an origin (`externally_observed` / `self_reported`,
 /// per the proposed OpenTelemetry GenAI attribute) in both shapes, and an
 /// absent one is never defaulted.
@@ -1085,18 +1359,18 @@ fn the_certificate_says_where_its_predicate_came_from_and_never_defaults_it() {
     let w = passing();
     let cert = cert_of(&w, Some("I added rate limiting and it all works."));
     let j = cert.json();
-    let predicate = &j["predicate"];
+    let predicate = &j["predicate"]["devplane"];
 
     assert_eq!(
-        predicate["evidence"][key], "externally_observed",
+        predicate["run"][key], "externally_observed",
         "a gate transcript is the one thing here that is not the agent's word"
     );
     assert_eq!(
-        predicate["agent_claim"][key], "self_reported",
+        predicate["agentClaim"][key], "self_reported",
         "the agent's account has to say that is what it is"
     );
     assert_eq!(
-        predicate["agent_claim"]["text"], "I added rate limiting and it all works.",
+        predicate["agentClaim"]["text"], "I added rate limiting and it all works.",
         "the claim itself still travels"
     );
 
@@ -1114,13 +1388,12 @@ fn the_certificate_says_where_its_predicate_came_from_and_never_defaults_it() {
     let none = cert_of(&bare, None);
     let jn = none.json();
     assert!(
-        jn["predicate"]["evidence"].is_null(),
-        "no gate ran, so there is no evidence to carry an origin"
+        jn.get("predicate").is_none() && jn["no_statement"].is_string(),
+        "no gate ran, so there is no evidence to attest and no origin to carry: {jn}"
     );
-    assert!(
-        jn["predicate"]["agent_claim"].is_null(),
-        "the agent said nothing, which is not the same as saying something unverified"
-    );
+    // A claim with no gate run is no statement either: a claim is never evidence.
+    let claimed = cert_of(&bare, Some("all done"));
+    assert!(claimed.json().get("predicate").is_none());
     assert!(
         !none.markdown().contains(key),
         "an origin appeared on a certificate that has no evidence and no claim"
@@ -1235,20 +1508,19 @@ fn the_certificate_carries_the_tree_digest_beside_the_commit() {
     let w = passing();
     let c = cert_of(&w, None);
     let md = c.markdown();
-    let at_commit = md.find("4f2a9c1e").expect("the commit is named");
+    let at_commit = md
+        .find("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d")
+        .expect("the commit is named");
     let at_tree = md
-        .find("tree-of-4f2a9c1e")
+        .find(&tree_of(COMMIT))
         .expect("the tree digest is not on the certificate");
     assert!(
         at_tree.abs_diff(at_commit) < 80,
         "the tree is nowhere near the commit it belongs to"
     );
-    assert_eq!(
-        c.json()["predicate"]["evidence"]["commit"]["tree"],
-        "tree-of-4f2a9c1e"
-    );
+    assert_eq!(c.json()["subject"][0]["digest"]["gitTree"], tree_of(COMMIT));
     assert!(
-        REDERIVABLE.contains(&"evidence.commit.tree"),
+        REDERIVABLE.contains(&"subject[0].digest.gitTree"),
         "a digest git produces is one a reader can re-derive"
     );
 
@@ -1283,7 +1555,11 @@ fn the_certificate_offers_no_flag_the_cli_does_not_have() {
     let basis = basis_of(
         &huge,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let huge = finished(huge, basis);
     let corpus = [
@@ -1326,8 +1602,8 @@ fn the_certificate_offers_no_flag_the_cli_does_not_have() {
         );
     }
     assert!(
-        !corpus.contains("--sign"),
-        "`--sign` is offered again, and there is no such flag"
+        flags.contains("--sign") && flags.contains("--out"),
+        "the page no longer says how a person signs: {flags:?}"
     );
 }
 
@@ -1483,24 +1759,33 @@ fn a_project_that_declares_no_markers_has_no_questions() {
     );
     assert!(plan.questions.is_empty());
 
-    let id = devplane::core::ProjectId::from("p1");
+    let change = devplane::core::Change::new(
+        devplane::core::ProjectId::from("p1"),
+        "x".into(),
+        "…".into(),
+    );
+    let lines: Vec<(String, u32, String)> = devplane::spec::Spec::read(&root, "specs/001-x", &[])
+        .question_lines_at()
+        .map(|(p, l, t)| (p.to_string(), l, t.to_string()))
+        .collect();
     assert!(
-        devplane::core::attention::plan_question_item_at(
+        devplane::core::attention::spec_question_items_at(
             "proj",
-            &id,
-            &[("w1".into(), plan)],
+            &change,
+            &lines,
+            &[],
             jiff::Timestamp::UNIX_EPOCH,
         )
-        .is_none(),
+        .is_empty(),
         "an item was raised for a project that declared no words"
     );
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// Many markers in one project raise one inbox item naming the count, never
-/// one per marker.
+/// Every marker line is its own inbox item, each naming its file and line,
+/// and none of them folds: each is a question only the person can answer.
 #[test]
-fn many_markers_in_one_project_are_one_item() {
+fn many_markers_are_one_item_each_and_never_folded() {
     let root = std::env::temp_dir().join(format!("dp-manymark-{}", uuid::Uuid::new_v4().simple()));
     let dir = root.join("specs/001-x");
     std::fs::create_dir_all(&dir).unwrap();
@@ -1516,25 +1801,35 @@ fn many_markers_in_one_project_are_one_item() {
         plan.questions.len() <= 20,
         "the lines handed to a surface are bounded; the count is not"
     );
+    assert_eq!(plan.questions[0].line, 3, "each question names its line");
 
-    let id = devplane::core::ProjectId::from("p1");
-    let item = devplane::core::attention::plan_question_item_at(
+    let change = devplane::core::Change::new(
+        devplane::core::ProjectId::from("p1"),
+        "x".into(),
+        "…".into(),
+    );
+    let lines: Vec<(String, u32, String)> =
+        devplane::spec::Spec::read(&root, "specs/001-x", &markers)
+            .question_lines_at()
+            .map(|(p, l, t)| (p.to_string(), l, t.to_string()))
+            .collect();
+    let items = devplane::core::attention::spec_question_items_at(
         "proj",
-        &id,
-        &[("w1".into(), plan)],
+        &change,
+        &lines,
+        &markers,
         jiff::Timestamp::UNIX_EPOCH,
-    )
-    .expect("forty markers is a fact worth one item");
-    assert!(
-        item.title.contains("40 questions"),
-        "the item names the count: {}",
-        item.title
     );
-    assert_eq!(item.level, devplane::core::attention::Level::Normal);
+    assert_eq!(items.len(), 40, "one item per marker line");
     assert!(
-        item.actions.is_empty(),
-        "nothing here can be answered from the inbox: the answer is an edit to a committed file"
+        items[0].title.contains("specs/001-x/spec.md:3"),
+        "{}",
+        items[0].title
     );
+    assert_eq!(items[0].level, devplane::core::attention::Level::Normal);
+    let (rendered, folded) = devplane::core::attention::fold(items);
+    assert_eq!(rendered.len(), 40, "no marker is folded into a summary");
+    assert!(folded.is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1685,4 +1980,430 @@ fn the_certificate_names_the_checks_the_change_altered() {
             && md.contains("A person marked each of these read."),
         "{md}"
     );
+}
+
+// ── Base checks, beside the evidence ────────────────────────────────────────
+
+mod base_checks {
+    use super::*;
+    use devplane::core::ProjectConfig;
+    use devplane::core::base_checks::{
+        self as bc, BaseChecks, Defining, NewTests, OnBase, OnChange, Placement, Run, RunOutcome,
+        View,
+    };
+    use devplane::core::testcount::junit::{Case, CaseOutcome, JunitFile, JunitRead};
+    use devplane::core::testcount::{CommandCount, Runner, Tally};
+
+    fn config() -> ProjectConfig {
+        ProjectConfig::parse("[gates]\ncheck = [\"cargo test\"]\n").unwrap()
+    }
+
+    fn counted(ran: u32) -> CommandResult {
+        let mut c = CommandResult::exited("cargo test", 0);
+        c.tests = CommandCount::Read {
+            tallies: vec![Tally {
+                runner: Runner::Pytest,
+                counts: vec![("passed".into(), ran)],
+                ran,
+                lines: 1,
+            }],
+        };
+        c
+    }
+
+    /// A passing, current change with a stamped base, and `failing` base
+    /// tests that fail on it.
+    fn with_result(failing: usize) -> Change {
+        let mut w = change();
+        let mut r = report("check", 1, vec![counted(3)]);
+        r.base_commit = Some("5940cb87c7f9".into());
+        w.tree_now = r.commit.clone();
+        w.gates.push(r);
+        let key = bc::key_now(&w, &config()).expect("current");
+        let cases: Vec<Case> = (0..failing)
+            .map(|i| Case {
+                suite: "pytest".into(),
+                class: "tests.test_login".into(),
+                name: format!("test_{i}"),
+                nth: 0,
+                file: None,
+                outcome: CaseOutcome::Failed,
+            })
+            .collect();
+        let mut cmd = counted(12);
+        cmd.outcome = Outcome::Exited { code: 1 };
+        w.base_checks = Some(BaseChecks {
+            key,
+            at: jiff::Timestamp::now(),
+            on_change: OnChange {
+                defining: Defining {
+                    restored: vec!["scripts/test.sh".into()],
+                    ..Defining::default()
+                },
+                run: Run {
+                    outcome: match failing {
+                        0 => RunOutcome::Passed,
+                        _ => RunOutcome::Failed,
+                    },
+                    commands: vec![cmd],
+                    junit: vec![JunitFile {
+                        read: JunitRead::Read {
+                            path: "r.xml".into(),
+                            cases,
+                            dropped: false,
+                        },
+                        ignored: Some(true),
+                    }],
+                    setup: None,
+                },
+                named: None,
+            },
+            on_base: OnBase {
+                placement: Placement::default(),
+                run: Run::not_run(RunOutcome::Skipped {
+                    why: "the change adds or edits no tests".into(),
+                }),
+                counted: NewTests::None,
+            },
+        });
+        w
+    }
+
+    fn cert<'a>(w: &'a Change, view: bool) -> Certificate<'a> {
+        let mut c = cert_of(w, None);
+        if view {
+            c.base_checks = View::of(w, Some(&config()), false);
+        }
+        c
+    }
+
+    #[test]
+    fn the_certificate_carries_base_checks_beside_the_evidence() {
+        let w = with_result(1);
+        let c = cert(&w, true);
+        let md = c.markdown();
+        assert!(md.contains("## Base checks"), "{md}");
+        assert!(
+            md.contains("pytest ran 3 on this change against 12"),
+            "{md}"
+        );
+        assert!(md.contains("**1 base test fails on this change.**"), "{md}");
+        assert!(
+            md.contains("Put back as the base has them: `scripts/test.sh`."),
+            "{md}"
+        );
+        assert!(
+            md.contains("git checkout 5940cb87c7f9 -- 'scripts/test.sh'"),
+            "{md}"
+        );
+        let j = c.json();
+        let b = &j["predicate"]["devplane"]["baseChecks"];
+        assert_eq!(b["gen_ai.evidence.origin"], "externally_observed");
+        assert_eq!(b["base"], "5940cb87c7f9");
+        assert_eq!(b["onChange"]["restored"][0], "scripts/test.sh");
+        assert_eq!(
+            c.page()["base_checks"]["on_change"],
+            "1 base test fails on this change"
+        );
+        assert!(REDERIVABLE.contains(&"baseChecks.onBase.placed[].blob"));
+    }
+
+    #[test]
+    fn base_checks_change_no_outcome() {
+        let w = with_result(2);
+        let (with, without) = (cert(&w, true).json(), cert(&w, false).json());
+        assert_eq!(
+            with["predicate"]["evidence"],
+            without["predicate"]["evidence"]
+        );
+        assert_eq!(with["predicate"]["change"], without["predicate"]["change"]);
+        assert_eq!(with["subject"], without["subject"]);
+    }
+
+    #[test]
+    fn an_absence_is_said_not_omitted() {
+        let mut w = with_result(0);
+        w.base_checks = None;
+        let c = cert(&w, true);
+        assert!(
+            c.markdown().contains(
+                "Base checks not run — they run when you offer, or press Run base checks."
+            ),
+            "{}",
+            c.markdown()
+        );
+        assert_eq!(
+            c.json()["predicate"]["devplane"]["baseChecks"]["absent"],
+            "not_run"
+        );
+        assert!(c.page()["base_checks"]["absent"].is_string());
+        // Stale: the tree moved.
+        let mut s = with_result(1);
+        if let Some(b) = s.base_checks.as_mut() {
+            b.key.tree = "an-older-tree".into();
+        }
+        let md = cert(&s, true).markdown();
+        assert!(
+            md.contains("Base checks stale — they describe tree `an-older-tr"),
+            "{md}"
+        );
+        assert!(
+            !md.contains("1 base test fails"),
+            "a stale result is never shown as current"
+        );
+        // No view at all (no check ran) is still a sentence.
+        let bare = change();
+        assert!(cert_of(&bare, None).markdown().contains("## Base checks"));
+    }
+
+    #[test]
+    fn no_count_is_said_not_zero() {
+        let w = passing();
+        let md = cert(&w, true).markdown();
+        assert!(md.contains("how many tests ran is not known"), "{md}");
+        assert!(!md.contains("ran 0"), "{md}");
+    }
+
+    #[test]
+    fn the_limits_say_check_ran_the_changes_code() {
+        assert!(LIMITS.contains("including tests and build scripts the change may have edited"));
+        assert!(LIMITS.contains("base checks put the base's tests back"));
+    }
+
+    #[test]
+    fn five_thousand_names_stay_under_the_ceiling_and_say_the_rest() {
+        let w = with_result(5000);
+        let c = cert(&w, true);
+        let md = c.markdown();
+        assert!(
+            md.contains("and 4980 more"),
+            "the fold states its remainder"
+        );
+        assert!(c.markdown_bounded().len() <= MAX_BYTES);
+        assert_eq!(
+            c.json()["predicate"]["devplane"]["baseChecks"]["onChange"]["failingOmitted"],
+            4980
+        );
+    }
+}
+
+/// The certificate ends with the change's link and the command that opens the
+/// same change, as plain text, finished or not, and the bounded form keeps
+/// them past its cut.
+#[test]
+fn the_certificate_ends_with_its_link_and_the_command() {
+    let lines = |w: &Change| {
+        let id = w.id.as_str().to_string();
+        (
+            format!("devplane://change/{id}"),
+            format!("devplane change show {id}"),
+        )
+    };
+    let tail = |md: &str| {
+        md.lines()
+            .rev()
+            .filter(|l| !l.trim().is_empty())
+            .take(2)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+
+    let w = passing();
+    let (link, show) = lines(&w);
+    assert_eq!(
+        tail(&cert_of(&w, None).markdown()),
+        vec![show.clone(), link.clone()]
+    );
+
+    let unfinished = change();
+    let (ulink, ushow) = lines(&unfinished);
+    assert_eq!(
+        tail(&cert_of(&unfinished, None).markdown()),
+        vec![ushow, ulink]
+    );
+
+    let mut huge = change();
+    huge.gates.push(report(
+        "check",
+        1,
+        vec![CommandResult::exited("x".repeat(2 * MAX_BYTES), 0)],
+    ));
+    let basis = basis_of(
+        &huge,
+        true,
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
+    );
+    let huge = finished(huge, basis);
+    let (hlink, hshow) = lines(&huge);
+    let bounded = cert_of(&huge, None).markdown_bounded();
+    assert!(bounded.len() <= MAX_BYTES, "{} bytes", bounded.len());
+    assert!(bounded.contains("was truncated"), "the cut is not said");
+    assert_eq!(tail(&bounded), vec![hshow, hlink]);
+}
+
+// ── Who approved the merge ──────────────────────────────────────────────────
+
+mod merge_approvals {
+    use super::*;
+    use devplane::core::approvals::{
+        Account, ModelWord, Reading, ReadingState, Required, Review, ReviewState, Source, bearing,
+    };
+    use devplane::core::change::PullRequestRef;
+
+    const HEAD: &str = "3f2a9c1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn reading() -> Reading {
+        let who = |id: u64, login: &str, ty: &str| {
+            Some(Account {
+                id,
+                login: login.into(),
+                account_type: ty.into(),
+            })
+        };
+        let reviews = vec![
+            Review {
+                id: 1,
+                account: who(10, "alice", "User"),
+                state: ReviewState::Dismissed,
+                commit: Some("3f2a9c1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                submitted_at: None,
+            },
+            Review {
+                id: 2,
+                account: who(20, "copilot-pull-request-reviewer[bot]", "Bot"),
+                state: ReviewState::Approved,
+                commit: Some(HEAD.into()),
+                submitted_at: None,
+            },
+        ];
+        Reading {
+            number: 7,
+            url: "https://github.com/acme/widgets/pull/7".into(),
+            head: HEAD.into(),
+            base: "main".into(),
+            required: Required::Count {
+                n: 1,
+                source: Source::Rules,
+                dismiss_stale: true,
+                code_owner: false,
+                last_push: false,
+            },
+            required_says: None,
+            bearing: bearing("github.com", &reviews, HEAD),
+            unread_pages: None,
+            sentence: String::new(),
+            model_word: ModelWord::Unattributed,
+            read_at: jiff::Timestamp::UNIX_EPOCH,
+            after_merge: false,
+        }
+        .composed(false)
+    }
+
+    fn with_pr(approvals: Option<ReadingState>) -> Change {
+        let mut w = passing();
+        w.pull_request = Some(PullRequestRef {
+            number: 7,
+            url: "https://github.com/acme/widgets/pull/7".into(),
+            status: "ready_for_review".into(),
+            review_decision: Some("APPROVED".into()),
+            approvals,
+            ..Default::default()
+        });
+        w
+    }
+
+    #[test]
+    fn the_certificate_carries_who_approved_the_merge() {
+        let r = reading();
+        let w = with_pr(Some(ReadingState::Current {
+            reading: Box::new(r.clone()),
+        }));
+        let cert = cert_of(&w, None);
+        let st = cert.statement().unwrap();
+        let m = &st["predicate"]["devplane"]["mergeApprovals"];
+        for k in [
+            "number",
+            "url",
+            "head",
+            "base",
+            "required",
+            "bearing",
+            "sentence",
+            "modelWord",
+            "readAt",
+            "afterMerge",
+        ] {
+            assert!(m.get(k).is_some(), "{k} in {m}");
+        }
+        assert_eq!(m["sentence"], r.sentence.as_str());
+        assert!(
+            r.sentence.contains(
+                "could not be attributed — a model decided, and the record has no word for it yet"
+            ),
+            "{}",
+            r.sentence
+        );
+        let md = cert.markdown();
+        assert!(md.contains("## Merge approvals"), "{md}");
+        assert!(md.contains("1 of 1 required approvals"), "{md}");
+        assert!(md.contains("GitHub says: approved."), "{md}");
+        assert!(
+            md.contains("which approvals GitHub counted toward its rule"),
+            "the limits line: {md}"
+        );
+        assert_eq!(cert.page()["merge_approvals_says"], r.sentence.as_str());
+        let steps = st["predicate"]["devplane"]["verification"]["steps"]
+            .as_array()
+            .unwrap();
+        assert!(
+            steps.iter().any(|s| s
+                == "curl -H \"Accept: application/vnd.github+json\" https://api.github.com/repos/acme/widgets/pulls/7/reviews"),
+            "{steps:?}"
+        );
+        assert!(REDERIVABLE.contains(&"mergeApprovals.bearing[].state"));
+        assert!(REDERIVABLE.contains(&"mergeApprovals.bearing[].commit"));
+    }
+
+    #[test]
+    fn without_a_pull_request_the_block_says_so() {
+        let w = passing();
+        let st = cert_of(&w, None).statement().unwrap();
+        assert_eq!(
+            st["predicate"]["devplane"]["mergeApprovals"],
+            serde_json::json!({"absent": "no pull request"})
+        );
+        assert!(!cert_of(&w, None).markdown().contains("## Merge approvals"));
+    }
+
+    #[test]
+    fn an_unread_reading_says_why_and_never_no_approvals() {
+        let w = with_pr(Some(ReadingState::NotRead {
+            why: "GitHub sign-in expired (github.com)".into(),
+        }));
+        let st = cert_of(&w, None).statement().unwrap();
+        let m = &st["predicate"]["devplane"]["mergeApprovals"];
+        assert_eq!(m["unread"], "GitHub sign-in expired (github.com)");
+        assert!(m.get("bearing").is_none());
+
+        let last = reading();
+        let w = with_pr(Some(ReadingState::Stale {
+            last: Box::new(last.clone()),
+            why: "GitHub unreachable: timed out".into(),
+        }));
+        let cert = cert_of(&w, None);
+        let st = cert.statement().unwrap();
+        let m = &st["predicate"]["devplane"]["mergeApprovals"];
+        assert_eq!(m["unread"], "GitHub unreachable: timed out");
+        assert_eq!(m["last"]["sentence"], last.sentence.as_str());
+        let says = cert.page()["merge_approvals_says"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(says.starts_with("As of "), "{says}");
+        assert!(!says.contains("0 approvals"), "{says}");
+    }
 }

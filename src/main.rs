@@ -23,10 +23,44 @@ async fn main() {
         }
         return;
     }
-    let cli = devplane::cli::Cli::parse();
+    // Linux and Windows start the binary with the link as its one argument
+    // when the app is closed; clap would refuse it as an unknown command.
+    if let devplane::cli::Launch::Link(url) = devplane::cli::launch_of(std::env::args_os()) {
+        if let Err(e) = devplane::cli::open_link(&url).await {
+            std::process::exit(devplane::cli::report_error(&e, false));
+        }
+        return;
+    }
+    // An app build started by the operating system (Finder, the Start menu, a
+    // launcher) has no argument and no terminal: it is the window.
+    if cfg!(feature = "app") {
+        use std::io::IsTerminal;
+        let args: Vec<_> = std::env::args_os().collect();
+        if devplane::cli::opens_window(&args, std::io::stdin().is_terminal()) {
+            if let Err(e) = devplane::cli::open_window().await {
+                std::process::exit(devplane::cli::report_error(&e, false));
+            }
+            return;
+        }
+    }
+    let cli = match devplane::cli::Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // A name the command line had before it was reorganised by noun
+            // is refused like any unknown one, with where it went.
+            if e.kind() == clap::error::ErrorKind::InvalidSubcommand
+                && let Some(word) = std::env::args().skip(1).find(|a| !a.starts_with('-'))
+                && let Some(now) = devplane::cli::renamed(&word)
+            {
+                eprintln!("error: {now}");
+                std::process::exit(2);
+            }
+            e.exit();
+        }
+    };
     // Read before the command consumes the arguments: an error under `--json`
     // is printed as JSON.
-    let json = cli.json();
+    let json = cli.json;
     if let Err(e) = devplane::cli::run(cli).await {
         std::process::exit(devplane::cli::report_error(&e, json));
     }

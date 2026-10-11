@@ -80,7 +80,8 @@ const find = (id: string) => surfaces().find((s) => s.id === id);
   for (const band of BANDS) if (!bar.includes(`role="group" aria-label="${BAND_LABELS[band]}"`)) fail(`the activity bar does not name the band ${band}`);
   for (const s of listed()) {
     const n = s.count?.(recorded) ?? null;
-    const name = n ? `${s.title}, ${n}` : s.title;
+    // The number with what it counts, where the surface names it.
+    const name = n ? `${s.title}, ${n}${s.countWord ? ` ${s.countWord}` : ""}` : s.title;
     if (!bar.includes(`aria-label="${name}"`)) fail(`the activity bar's ${s.id} button is not named "${name}"`);
   }
   if (!/aria-current="page"/.test(bar)) fail("nothing in the activity bar says which surface is showing");
@@ -106,13 +107,13 @@ const find = (id: string) => surfaces().find((s) => s.id === id);
 // ── Every surface gets its data from somewhere real ──────────────────────
 {
   const api = source("../../src/api.rs");
-  const served = new Set([...api.matchAll(/\.route\("([^"]+)"/g)].map((m) => m[1]));
+  const served = new Set([...api.matchAll(/\.route\(\s*"([^"]+)"/g)].map((m) => m[1]));
   if (served.size < 20) fail(`only ${served.size} routes were read from src/api.rs — this check is inert`);
   for (const s of surfaces()) {
     const takesProps = Object.keys(s.select(recorded, "focus")).length > 0;
     if (!takesProps && !(s.reads ?? []).length) fail(`surface "${s.id}" selects nothing and reads nothing, so it renders its defaults for ever`);
     const dir = `../src/surfaces/${s.id}/`;
-    const code = readdirSync(new URL(dir, import.meta.url)).filter((f) => f !== "index.ts").map((f) => source(dir + f)).join("\n");
+    const code = readdirSync(new URL(dir, import.meta.url)).filter((f) => f !== "index.ts" && f.includes(".")).map((f) => source(dir + f)).join("\n");
     for (const route of s.reads ?? []) {
       if (!served.has(route)) fail(`surface "${s.id}" reads ${route}, which src/api.rs does not serve`);
       if (!code.includes(route)) fail(`surface "${s.id}" declares it reads ${route} and none of its components calls it`);
@@ -140,7 +141,7 @@ const find = (id: string) => surfaces().find((s) => s.id === id);
     if (s?.select({ ...empty, loaded: false }, "").loaded !== false || s?.select({ ...empty, loaded: true }, "").loaded !== true)
       fail(`${id}.select does not carry the feed's phase, so it cannot tell unread from empty`);
   }
-  for (const kind of ["change", "review", "ask", "run"])
+  for (const kind of ["change", "ask", "run"])
     if (surfaces().filter((s) => s.link === kind).length !== 1) fail(`the ${kind} link is not claimed by exactly one surface`);
   if (surfaces().filter((s) => s.holds === "run").length !== 1) fail("no one surface holds a run, so the activity panel opens nothing");
   const marks = surfaces().filter((s) => s.marksLook);
@@ -166,6 +167,9 @@ const find = (id: string) => surfaces().find((s) => s.id === id);
   for (const want of [`${sum.working} working`, `${answerable} need you`, `${sum.projects} projects`])
     if (!bar.includes(want)) fail(`the status bar does not say "${want}"`);
   if (/0 failed|0 asked/.test(bar)) fail("an empty bucket is a zero in the status bar rather than absent");
+  const one = html(StatusBar, { items: [], projects: 1, pulse: "live", bad: false, theme: "auto",
+    cycleTheme: () => {}, help: () => {}, go: () => {} });
+  if (!one.includes("1 project<") || one.includes("1 projects")) fail('one project is said as "1 projects"');
   if (surfaces().some((s) => (s.status?.(empty) ?? []).length > 0)) fail("the status bar counts before the feed arrived");
   const panel = html(Panel, { board, open: null });
   if (!/<button[^>]*disabled/.test(panel)) fail("the activity panel offers rows that open nothing");

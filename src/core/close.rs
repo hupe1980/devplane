@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 /// would measure the person.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub struct Tally {
     /// `by_person` through `by_nobody` are decisions taken on the person's
     /// behalf; Devplane's own gates and bounds are counted apart.

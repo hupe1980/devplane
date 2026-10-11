@@ -9,6 +9,10 @@ export type Question = {
  */
 path: string, 
 /**
+ * Where it is in that file, from one.
+ */
+line: number, 
+/**
  * The line, in the project's own words.
  */
 text: string, };

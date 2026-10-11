@@ -1,13 +1,12 @@
 +++
 title = "Install"
-description = "Install Devplane on your platform — installer, npm, cargo or the window — check it works, upgrade it, and remove every trace of it."
+description = "Install Devplane on your platform — the desktop app, the installer, npm or cargo — check it works, upgrade it, and remove every trace of it."
 weight = 1
 [extra]
 group = "start"
 +++
 
-Devplane is one binary: the host, the CLI, the hooks and the workbench. Nothing runs until you start
-it, and nothing starts at login.
+One binary: host, CLI, hooks and workbench. Nothing runs until you start it; nothing starts at login.
 
 ## Platforms
 
@@ -16,17 +15,15 @@ it, and nothing starts at login.
 | macOS, Apple Silicon | yes | the installer, `npm install -g devplane`, or `cargo install` |
 | Linux x86_64 and arm64 | yes, static (musl) | the installer, `npm install -g devplane`, or `cargo install` |
 | Windows x86_64 | yes | `npm install -g devplane`, or the `.zip` from the [releases page](https://github.com/hupe1980/devplane/releases) |
-| macOS on Intel, Windows on ARM, anything else | no | `cargo install` (Rust 1.90 or later) |
+| macOS on Intel, Windows on ARM, anything else | no | `cargo install` (Rust 1.94 or later) |
 
-macOS and Linux are the platforms Devplane is tested on. On Windows it builds and runs, with these
-limits:
+Tested on macOS and Linux. On Windows:
 
-- A gate that times out is stopped, but the processes it started are not.
-- Gates run through `cmd`, not `sh`, so a `check` written for a POSIX shell may behave differently.
-- There is no process table: *running a command it started* and lost-run detection do nothing, and
-  every recorded process reads as alive.
-- `devplane attach` starts `claude` and waits instead of replacing itself.
-- The test suite does not run on Windows in CI.
+- A timed-out gate's child processes are not stopped.
+- Gates run through `cmd`, not `sh`.
+- No process table: *running a command it started* and lost-run detection do nothing.
+- `devplane run attach` starts `claude` and waits instead of replacing itself.
+- CI does not run the test suite on Windows.
 
 ## The installer
 
@@ -34,12 +31,11 @@ limits:
 curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh
 ```
 
-A prebuilt binary for macOS (Apple Silicon) and Linux, installed to `~/.cargo/bin` (`$CARGO_HOME/bin`).
-No Rust toolchain is needed.
+Installs to `$CARGO_HOME/bin` (`~/.cargo/bin`); no Rust needed.
 
 > [!IMPORTANT]
-> **On macOS, use this rather than the releases page.** The binaries are not notarised, and macOS
-> quarantines a file a browser downloaded, so Gatekeeper refuses it. `curl` sets no quarantine flag.
+> **On macOS, use this, not the releases page.** The binaries are not notarised, and Gatekeeper refuses
+> a browser download; `curl` sets no quarantine flag.
 
 ## With npm
 
@@ -47,12 +43,9 @@ No Rust toolchain is needed.
 npm install -g devplane
 ```
 
-The package fetches the prebuilt binary for your platform and carries a provenance attestation
-naming the workflow run and commit that built it.
-
-`npx devplane ls` runs it without installing, which is fine for a look. **Do not connect hooks from
-npx.** Every hook runs the binary by its full path, and npx's copy lives in a cache npm clears, so
-`devplane connect` refuses it. Install it (any way on this page) before `connect` or the plugin.
+Fetches the prebuilt binary; the package carries a provenance attestation naming the workflow run and
+commit. `npx devplane status` works for a look, but `devplane agent connect` refuses npx's cached
+binary: install it before connecting hooks or adding the plugin.
 
 ## From source
 
@@ -60,26 +53,97 @@ npx.** Every hook runs the binary by its full path, and npx's copy lives in a ca
 cargo install --locked devplane
 ```
 
-Rust 1.90 or later. `--locked` builds with the dependency versions the release was tested with.
+Rust 1.94+. `--locked` uses the release's tested dependency versions.
+
+## What a release contains
+
+Each `v*` tag publishes, on the [releases page](https://github.com/hupe1980/devplane/releases):
+
+| File | What |
+|---|---|
+| `devplane-installer.sh` | the installer above |
+| `devplane-<target>.tar.xz` (Windows: `.zip`) | the command line, for `aarch64-apple-darwin`, `aarch64-unknown-linux-musl`, `x86_64-unknown-linux-musl`, `x86_64-pc-windows-msvc` |
+| `Devplane_<version>_…` | the desktop app's packages ([below](#the-window)) |
+| `<file>.sha256` | the SHA-256 of each archive and package |
+
+The [CI action](@/docs/ci.md) installs `devplane-<target>.tar.xz` and checks it against its `.sha256`
+before unpacking.
 
 ## The window
 
-```sh
-cargo install --locked devplane --features app
-devplane app
+The desktop app is the same program with a window: it hosts while it is open, and its executable
+also runs every command. Started from Finder, the Start menu or a launcher, it opens its window; typed
+in a terminal, it is the command line (`devplane` alone runs `status`). The command line installed
+above links no graphical toolkit; each copy's `devplane doctor` says which it is.
+
+| Platform | Package | Install |
+|---|---|---|
+| macOS, Apple Silicon | `Devplane_<version>_aarch64.dmg` | open it, drag Devplane to Applications, open it from there |
+| Windows x86_64 | `Devplane_<version>_x64-setup.exe` | run it; it installs for you alone, without administrator rights |
+| Linux x86_64, Debian and Ubuntu | `Devplane_<version>_amd64.deb` | open it in your software installer |
+| Linux x86_64, other distributions | `Devplane_<version>_amd64.AppImage` | mark it executable and open it |
+
+- **Linux needs WebKitGTK** (`libwebkit2gtk-4.1-0`). The `.deb` declares it; the AppImage carries its own.
+- **On an Intel Mac**, build the app from source ([below](#the-window-from-source)).
+- **Move Devplane to Applications before connecting an agent.** Opened from the disk image or from
+  Downloads, macOS runs a temporary copy, and `agent connect` refuses a path that disappears.
+- **An AppImage connects by its own file**: move or rename it and `devplane doctor` reports the gate
+  off until you connect again. It registers `devplane://` links on first run; the other packages
+  register them when installed.
+
+### Signed and unsigned packages
+
+A package built without the signing credentials, or without the release key in `tauri.conf.json`
+(`plugins.updater.pubkey`, empty in this repository), is unsigned:
+
+- its file name says so before the extension: `Devplane_<version>_aarch64-unsigned.dmg`;
+- the release notes list it as unsigned, and your system warns before opening it;
+- the app never checks for updates, and the release never replaces a signed one as the default download.
+
+A signed release's macOS app and disk image are notarised, its Windows installer names its publisher,
+and its update packages and `.deb` carry a `.sig` from the release key. The release notes list every package with its
+platform, whether it is signed, and its SHA-256.
+
+### Update checks
+
+Off until you answer. Setup asks, naming the one address it fetches
+(`https://github.com/hupe1980/devplane/releases/latest/download/latest.json`) and that it sends
+nothing about you, this machine or your projects. Your answer is one line in your own file, shown
+before it is written:
+
+```toml
+# ~/.devplane/app.toml
+[app]
+updates = "on"   # or "off"; absent means not asked, and nothing is checked
 ```
 
-The same host as `devplane serve`, with a native window, a tray item, notifications, one global
-shortcut and `devplane://` links. Closing the window keeps hosting. See
-[`devplane app`](@/docs/cli.md#devplane-app).
+With checks on, the app checks once at start and downloads nothing until you choose **Install and
+restart**. The update is verified against the release key before anything is replaced, and the restart
+says first which agents it would stop. A `.deb` install, or an app run from its disk image, is told
+where to get the new version instead. The command line never checks.
 
-- On Linux the build needs `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
-  librsvg2-dev`.
-- There is no signed app bundle, installer or updater, so on macOS `devplane://` links do not open
-  the app.
-- Without the window, `devplane open` shows the same workbench in your browser.
+### Removing the app
 
-The window's settings live in `~/.devplane/app.toml`:
+- **macOS**: drag Devplane from Applications to the Bin.
+- **Windows**: *Settings → Apps → Installed apps → Devplane → Uninstall*.
+- **Linux**: `sudo apt remove devplane`, or delete the AppImage.
+
+Each leaves `~/.devplane` in place. Run `agent disconnect` first ([Uninstall](#uninstall)), or another
+install's `devplane doctor` reports the hooks as **gate off**.
+
+### The window from source
+
+```sh
+cargo install --locked devplane --features app
+devplane up --window
+```
+
+A Linux build needs `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev`.
+A source build is not a bundle: on macOS `devplane://` links do not open it. See
+[`devplane up --window`](@/docs/cli.md#devplane-up).
+
+The window's port is `[app] port` (default 47831); `--port` overrides it. Run `agent connect` again
+after changing it, so telemetry follows:
 
 ```toml
 # ~/.devplane/app.toml
@@ -87,52 +151,55 @@ The window's settings live in `~/.devplane/app.toml`:
 port = 47831
 ```
 
-The window's host listens on 47831 by default, the same port `devplane serve` uses and `devplane
-connect` writes into the telemetry settings. If you change it, run `connect` again so telemetry
-follows. `devplane app --port` overrides the file.
+### Building signed packages
+
+`.github/workflows/release.yml` builds every package on a `v*` tag, after CI passed on that commit. It
+signs with these secrets of the repository's `release` environment, which a pull request cannot read.
+A platform missing any it needs is built unsigned, and the job summary names what was missing.
+
+| Secret | Platform | What it is |
+|---|---|---|
+| `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD` | macOS | the Developer ID Application certificate as a base64 `.p12`, and its password |
+| `APPLE_SIGNING_IDENTITY` | macOS | `Developer ID Application: <name> (<team id>)` |
+| `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | macOS | the Apple ID notarisation runs as, an app-specific password for it, the team id |
+| `WINDOWS_SIGN_COMMAND` | Windows | a command that signs the file `%1` in place |
+| `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID` | Windows, optional | passed to a cloud signing tool the command runs |
+| `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | every platform | the release key that signs updates (`cargo tauri signer generate`) |
+
+Its public half goes in `plugins.updater.pubkey` in `tauri.conf.json`. Signed packages are checked
+with `codesign`, `spctl`, `stapler` and `signtool` before upload; a failure fails the release.
 
 ## Inside Claude Code, as a plugin
-
-In a terminal:
 
 ```sh
 claude plugin marketplace add hupe1980/devplane
 claude plugin install devplane@devplane
 ```
 
-The plugin adds two things:
-
-- Devplane's MCP server, with five tools: what needs a person, a change's state and whether it is
-  verified, what the gate would decide about a call, what was decided and by whom, and reports
-  between projects. It records each `explain` question in the decision log and writes nothing else.
-- The `devplane-gate` skill, which runs the repository's gates and reports what they exited with.
-
-It installs no hooks (run `devplane connect claude` for those) and needs the binary installed first.
+- Adds Devplane's MCP server ([`devplane mcp`](@/docs/cli.md#devplane-mcp)) and the
+  `devplane-gate` skill, which runs the gates and reports the exit.
+- Installs no hooks (use `devplane agent connect claude`); needs the binary installed first.
 
 ## Check it works
 
 ```sh
 devplane doctor
-devplane ls
+devplane status
 ```
 
-`doctor` says whether a host answers, which channels are arriving, and whether the permission gate is
-installed **and answering**. `ls` lists running Claude Code sessions with no host and no
-configuration. Next: [the quickstart](@/docs/quickstart.md). When something looks wrong:
-[Troubleshooting](@/docs/troubleshooting.md).
+`status` lists running Claude Code sessions with no host or configuration. Next:
+[the quickstart](@/docs/quickstart.md), or [Troubleshooting](@/docs/troubleshooting.md).
 
 ## Finding the `claude` binary
 
-Watching Claude Code and `devplane attach` need `claude`, which is often not on `PATH` (the VS Code
-extension ships its own copy). Devplane looks, in order, at:
+Watching Claude Code and `devplane run attach` need `claude`. Looked up in order:
 
 1. `$DEVPLANE_CLAUDE_BIN`
 2. `PATH`
 3. `~/.claude/local/claude`
 4. the newest `anthropic.claude-code-*` extension in VS Code, VS Code Insiders or Cursor
 
-Devplane runs without Claude Code: it drives any ACP agent. Which vendors can also be *watched* is on
-[Watching sessions](@/docs/observe.md).
+Devplane runs without Claude Code; see [Watching sessions](@/docs/observe.md) for other vendors.
 
 ## Shell completion
 
@@ -142,77 +209,69 @@ devplane completions bash > ~/.local/share/bash-completion/completions/devplane
 devplane completions fish > ~/.config/fish/completions/devplane.fish
 ```
 
-Needs no host. Completing an id (a waiting question, a session, a change) asks a running host, or
-else reads the store without starting a host, and gives up after 150 ms. zsh and fish show a sentence
-beside each id; bash completes the id alone.
+Completing an id asks a running host or reads the store (never starting a host), giving up after
+150 ms. zsh and fish describe each id; bash completes the id alone.
 
 ## Where it keeps things
 
-Everything lives in `~/.devplane`, mode `0700`; the files in it are `0600`:
+`~/.devplane` (mode `0700`, files `0600`):
 
 | File | What |
 |---|---|
-| `devplane.db` (with `-wal`, `-shm`) | SQLite: events, runs, changes, transcripts, asks, reports, the decision log. Hooks write it directly; the host tails it |
-| `devplane.v<n>.<time>.bak` | a store from an older schema, moved aside rather than migrated, and never deleted by Devplane (an empty one is). Delete them once you have what you need |
+| `devplane.db` (with `-wal`, `-shm`) | SQLite: events, runs, changes, transcripts, asks, the decision log. Hooks write it directly; the host tails it |
+| `devplane.v<n>.<time>.bak` | an older-schema store moved aside ([after an upgrade](@/docs/troubleshooting.md#the-ledger-is-empty-after-an-upgrade)) |
 | `token` | the bearer token for the local API |
-| `host.json`, `host.lock` | the running host (port, version, start time, binary and pid) and the lock that keeps it the only one |
+| `telemetry-token` | a token that opens only the telemetry routes, written into agents' settings |
+| `host.json`, `host.lock` | the running host (port, version, start time, binary, pid) and the lock that keeps it the only one |
 | `pending-decisions.jsonl` | decisions a hook took while the store would not open; the next host files them |
-| `policy.toml` | optional machine-wide `[policy]` rules |
-| `agents.toml` | optional extra agents; see [Driving agents](@/docs/agents.md#adding-an-agent) |
-| `app.toml` | optional settings for the window |
+| `policy.toml` | optional machine-wide `[policy]` rules and your [grants](@/docs/permissions.md#grants-your-own-rule-per-project) |
+| `agents.toml` | optional extra agents ([Driving agents](@/docs/agents.md#adding-an-agent)) |
+| `app.toml` | optional settings for the window and GitHub |
+| `trusted.toml` | the repositories you trusted |
 
-Outside it: `devplane connect claude` keeps a backup of your settings at
-`~/.claude/settings.json.devplane-backup`, and each change's worktree is under the repository's
-`.claude/worktrees/`.
+Outside it: `~/.claude/settings.json.devplane-backup` (from `agent connect claude`) and each change's
+worktree under the repository's `.claude/worktrees/`.
 
-`DEVPLANE_HOME` moves all of it, for a throwaway instance beside your real one. Each home has at most
-one host, and a second home needs its own port:
+`DEVPLANE_HOME` moves all of it. One host per home; a second home needs its own port:
 
 ```sh
-DEVPLANE_HOME=/tmp/vp devplane serve --port 47832
+DEVPLANE_HOME=/tmp/vp devplane up --no-browser --port 47832
 ```
 
-The default port is 47831 (`--port` or `DEVPLANE_PORT`). A port another process holds is refused;
-the host never moves to another one on its own.
+Default port 47831 (`--port` or `DEVPLANE_PORT`); a taken port is refused.
 
 ## Upgrading
 
 Install the new version the way you installed the old one, then:
 
 ```sh
-devplane quit                # the old host, if one runs
-devplane connect claude      # and codex, copilot: the hooks name the binary's path
+devplane down                  # the old host, if one runs
+devplane agent connect claude  # and codex, copilot: the hooks name the binary's path
 devplane doctor
 ```
 
-- **Re-run `connect` whenever the binary moves** (a different install method, a new path). Until you
-  do, `doctor` reports the gate as **off** for every hook whose binary is gone, or **out of date**
-  when the hooks are not the ones this version writes.
-- **A schema change starts a new store.** The old file is moved aside as
-  `devplane.v<n>.<time>.bak`; `devplane audit` and the Ledger start empty, and the old log stays
-  readable with `sqlite3`. The [changelog](https://github.com/hupe1980/devplane/blob/main/CHANGELOG.md)
-  says which releases do this.
+- **Re-run `agent connect` whenever the binary moves**; until then `doctor` reports **gate off** or
+  **out of date**.
+- **A schema change starts a new store**
+  ([reading the old one](@/docs/troubleshooting.md#the-ledger-is-empty-after-an-upgrade)); the
+  [changelog](https://github.com/hupe1980/devplane/blob/main/CHANGELOG.md) says which releases do this.
 
 ## Uninstall
 
 ```sh
-devplane disconnect claude    # undoes exactly what connect added
-devplane disconnect codex
-devplane disconnect copilot   # deletes the one file it wrote
-devplane quit                 # stops the host and the agents it started
+devplane agent disconnect claude   # undoes exactly what connect added
+devplane agent disconnect codex
+devplane agent disconnect copilot  # deletes the one file it wrote
+devplane down                      # stops the host and the agents it started
 rm -rf ~/.devplane
 ```
 
-Each `disconnect` shows the diff, asks on a terminal (pass `--yes` in a script), and leaves hooks
-you configured yourself alone. Then remove the rest:
+`agent disconnect` shows the diff and asks (`--yes` in a script). Then remove:
 
-- **The binary**, the way you installed it: `rm ~/.cargo/bin/devplane` (the installer),
-  `npm uninstall -g devplane`, or `cargo uninstall devplane`.
-- **The plugin**: `claude plugin uninstall devplane@devplane`, then
-  `claude plugin marketplace remove devplane`.
-- **`~/.claude/settings.json.devplane-backup`**, once you no longer want the backup.
-- **In each repository**: the worktrees under `.claude/worktrees/` (`git worktree list`), the
-  `change/*` branches you do not want, the `devplane-gate` entry in `.specify/extensions.yml`, and
-  any `.claude/skills/devplane-gate/` you copied.
-- **Shell completion files** you wrote with `devplane completions`.
-- **OpenTelemetry variables** you exported for Copilot.
+- **The binary**: `rm ~/.cargo/bin/devplane`, `npm uninstall -g devplane`, or `cargo uninstall devplane`;
+  the app as in [Removing the app](#removing-the-app).
+- **The plugin**: `claude plugin uninstall devplane@devplane`, `claude plugin marketplace remove devplane`.
+- `~/.claude/settings.json.devplane-backup`.
+- **Per repository**: `.claude/worktrees/` (`git worktree list`), unwanted `change/*` branches, the
+  `devplane-gate` entry in `.specify/extensions.yml`, `.claude/skills/devplane-gate/`.
+- Completion files, and OpenTelemetry variables exported for Copilot.

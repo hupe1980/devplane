@@ -1,0 +1,914 @@
+//! `devplane config`: reading a repository's `devplane.toml` back, and asking
+//! what its rules would decide about one call.
+
+use crate::render;
+use crate::render::{BOLD, DIM, YELLOW, paint};
+use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
+
+/// Where the rules governing a directory came from, and whether they loaded.
+/// Kept apart so a typo in a deny rule never reads as "no rule answers this".
+enum Rules {
+    /// No `devplane.toml` governs this directory at all.
+    None { root: PathBuf },
+    /// One was found and will not load, so *nothing* is in force here.
+    Broken { path: PathBuf, error: String },
+    /// Loaded. `problems` are the rules that cannot do what they say.
+    Loaded {
+        path: PathBuf,
+        count: usize,
+        problems: Vec<crate::core::config::Problem>,
+        /// Rules that provably do nothing (`Policy::redundancies`), carried so
+        /// `--json` reports them too.
+        unused: Vec<String>,
+        /// Allow rules that grant an arbitrary program (`Policy::overbroad`).
+        overbroad: Vec<crate::core::policy::Overbroad>,
+    },
+}
+
+impl Rules {
+    fn at(dir: &Path) -> Self {
+        let root = crate::repo::governing_root(dir).unwrap_or_else(|| dir.to_path_buf());
+        let path = root.join(crate::core::config::CONFIG_FILE);
+        match crate::core::ProjectConfig::load(&root) {
+            Err(e) => Rules::Broken {
+                path,
+                error: e.to_string(),
+            },
+            Ok(_) if !path.is_file() => Rules::None { root },
+            Ok(c) => {
+                let p = c.policy();
+                Rules::Loaded {
+                    count: p.deny_rules().len() + p.ask_rules().len(),
+                    problems: c.validate(),
+                    unused: p.redundancies(),
+                    overbroad: crate::core::policy::overbroad(&vendor_allow_rules(root.as_path())),
+                    path,
+                }
+            }
+        }
+    }
+
+    fn problems(&self) -> Vec<crate::core::config::Problem> {
+        match self {
+            Rules::Loaded { problems, .. } => problems.clone(),
+            // A file that will not load has no problems to list; `load_error`
+            // reports that case instead of "0 problems".
+            _ => Vec::new(),
+        }
+    }
+
+    fn load_error(&self) -> Option<String> {
+        match self {
+            Rules::Broken { error, .. } => Some(error.clone()),
+            _ => None,
+        }
+    }
+
+    /// The sentence printed when no rule answered — one per situation.
+    fn why_nothing_answered(&self) -> &'static str {
+        match self {
+            Rules::None { .. } => {
+                "no devplane.toml governs this directory, so nothing here decides anything"
+            }
+            Rules::Broken { .. } => {
+                "this project's rules are NOT in force — the file below will not load"
+            }
+            Rules::Loaded { count: 0, .. } => {
+                "this project's devplane.toml declares no [policy] rules"
+            }
+            Rules::Loaded { .. } => {
+                "its rules loaded and none answers this one, so the provider's own \
+                 dialog decides and it reaches your inbox"
+            }
+        }
+    }
+
+    fn as_json(&self) -> serde_json::Value {
+        match self {
+            Rules::None { root } => serde_json::json!({
+                "state": "none", "searched_from": root.display().to_string()
+            }),
+            Rules::Broken { path, error } => serde_json::json!({
+                "state": "broken", "path": path.display().to_string(), "error": error,
+                "in_force": false
+            }),
+            Rules::Loaded {
+                path,
+                count,
+                problems,
+                unused,
+                overbroad,
+            } => serde_json::json!({
+                "state": "loaded", "path": path.display().to_string(),
+                "rules": count,
+                "problems": problems.iter().map(|p| format!("{}: {}", p.where_, p.what)).collect::<Vec<_>>(),
+                "unused": unused,
+                "overbroad": overbroad.iter().map(|o| serde_json::json!({
+                    "rule": o.rule, "why": o.why, "suggestion": o.suggestion
+                })).collect::<Vec<_>>(),
+                "in_force": true
+            }),
+        }
+    }
+}
+
+/// `devplane config explain` — what the gate would decide about one call, and why.
+///
+/// Offline and host-free, so rules can be tested while being written and the
+/// answer is scriptable. The interesting output is an `undecided` that looks
+/// like an allow: a rule can match and still not answer.
+pub fn cmd_explain(
+    path: PathBuf,
+    tool: String,
+    call: Vec<String>,
+    input: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let dir = path.canonicalize().context("that path does not exist")?;
+    // The tool's input as the agent would send it: arbitrary JSON, typed by
+    // the tool, so it stays a JSON value.
+    let input = match input {
+        Some(raw) => serde_json::from_str(&raw).context("--input is not JSON")?,
+        None => {
+            let text = call.join(" ");
+            if text.is_empty() {
+                anyhow::bail!("say what to explain: a command, or --input '{{…}}'");
+            }
+            match crate::core::policy::rule_content_field(&tool) {
+                Some(field) => serde_json::json!({ field: text }),
+                None => anyhow::bail!(
+                    "`{tool}` takes no plain specifier, so pass the call as --input '{{…}}'"
+                ),
+            }
+        }
+    };
+
+    // The machine-wide policy is included: this is the gate as enforced.
+    let (cache, global_error) = crate::policy_cache::PolicyCache::from_disk();
+    // Where a person was about to be asked, the person's own grants answer too.
+    let verdict = cache.decide(&dir, &tool, &input);
+
+    // Where the rules came from and whether they loaded: a broken
+    // `devplane.toml` has no rules in force, and must not read as "no rule
+    // answers this one".
+    let rules = Rules::at(&dir);
+    let problems = rules.problems();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "dir": dir.display().to_string(),
+                "tool": tool,
+                "input": input,
+                "verdict": verdict.as_str(),
+                "rule": verdict.rule(),
+                // Set only for `unresolved`, where there is no rule to name.
+                "why": verdict.why(),
+                // Which `undecided` situation this is.
+                "rules": rules.as_json(),
+            }))?
+        );
+        return Ok(());
+    }
+
+    let (colour, headline) = match &verdict {
+        crate::core::Verdict::Deny { .. } => (render::RED, "deny"),
+        crate::core::Verdict::Ask { .. } => (YELLOW, "ask"),
+        crate::core::Verdict::Unresolved { .. } => (YELLOW, "ask — unreadable"),
+        crate::core::Verdict::Undecided => (DIM, "undecided"),
+        crate::core::Verdict::Allow { .. } => (render::GREEN, "allow — your grant"),
+    };
+    println!("{}  {}", paint(colour, headline), paint(BOLD, &tool));
+    match (verdict.rule(), verdict.why()) {
+        (Some(r), _) => println!("        {}", paint(DIM, &format!("by {r}"))),
+        // No rule, but a reason: the matcher could not read the command, so
+        // "no rule covers this" would be false.
+        (None, Some(why)) => println!("        {}", paint(DIM, &format!("because {why}"))),
+        (None, None) => println!("        {}", paint(DIM, rules.why_nothing_answered())),
+    }
+    if let Some(e) = &global_error {
+        println!(
+            "\n{}\n{}",
+            paint(
+                render::RED,
+                "the machine-wide rules would not load, so every call is asked"
+            ),
+            paint(DIM, e)
+        );
+    }
+    if let Some(broken) = rules.load_error() {
+        println!("\n{}", paint(render::RED, &broken));
+        println!(
+            "{}",
+            paint(
+                DIM,
+                "every call here is asked until it parses — devplane config check"
+            )
+        );
+    }
+    if !problems.is_empty() {
+        println!(
+            "\n{}",
+            paint(
+                YELLOW,
+                &format!(
+                    "{} rule(s) in this project cannot do what they say — devplane config check",
+                    problems.len()
+                )
+            )
+        );
+    }
+    Ok(())
+}
+
+/// Replay every tool call this machine has seen against the current rules,
+/// and suggest the rules that would stop repeated prompts.
+///
+/// Offline: opens the store read-only and asks no agent anything.
+pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
+    let dir = dir.canonicalize().context("that path does not exist")?;
+    let store = crate::store::Store::open(&crate::config::db_path()?).await?;
+    // Scoped to the repository root containing `--dir`, so a session started
+    // in `src/` counts toward the same project.
+    let scope = crate::repo::find_repo_root(&dir).unwrap_or_else(|| dir.clone());
+    let named = scope
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| scope.display().to_string());
+    let calls = store.observed_tool_calls(Some(&scope), limit).await?;
+
+    // Includes the machine-wide policy, as the gate does.
+    let (cache, _) = crate::policy_cache::PolicyCache::from_disk();
+    // The third bucket is "no rule here decides" — not "interrupted a person":
+    // the agent's own settings answer most of these silently.
+    let mut counts = [0usize; 3]; // ask, deny, no rule here
+    // Undecided commands by rule family; `BTreeMap` for stable output.
+    let mut open: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+
+    for c in &calls {
+        let verdict = cache.restrictive(&c.cwd, &c.tool, &c.input);
+        let slot = match verdict {
+            crate::core::Verdict::Ask { .. } | crate::core::Verdict::Unresolved { .. } => 0,
+            crate::core::Verdict::Deny { .. } => 1,
+            crate::core::Verdict::Undecided | crate::core::Verdict::Allow { .. } => 2,
+        };
+        counts[slot] += 1;
+        if slot != 2 {
+            continue;
+        }
+        let Some(text) = crate::core::policy::rule_content(&c.tool, &c.input) else {
+            continue;
+        };
+        // Grouped by the family a rule would name (program and subcommand),
+        // not by tool, so `suggest_rule_for` is not asked to cover unrelated
+        // commands in one rule.
+        let family = crate::core::command::rule_family(&c.tool, &text);
+        open.entry(format!("{}\u{0}{}", c.tool, family))
+            .or_default()
+            .push(text);
+    }
+
+    // A rule is suggested only for a prompt that keeps coming back: below
+    // three, a standing grant costs more than the interruption it saves.
+    const WORTH_A_RULE: usize = 3;
+    let mut advice: Vec<(usize, String, String)> = Vec::new();
+    for (key, commands) in &open {
+        let (tool, _) = key.split_once('\u{0}').unwrap_or((key.as_str(), ""));
+        if commands.len() < WORTH_A_RULE {
+            continue;
+        }
+        if let Some(sp) = crate::core::command::suggest_rule_for(tool, commands) {
+            advice.push((commands.len(), tool.to_string(), sp));
+        }
+    }
+    advice.sort_by(|a, b| b.0.cmp(&a.0).then(a.2.cmp(&b.2)));
+
+    let total = calls.len();
+    let answerable: usize = advice.iter().map(|a| a.0).sum();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "dir": scope.display().to_string(),
+                "calls": total,
+                "ask": counts[0], "deny": counts[1], "undecided": counts[2],
+                "suggestions": advice.iter().map(|(n, tool, rule)| serde_json::json!({
+                    "calls": n, "tool": tool, "rule": format!("{tool}({rule})"),
+                })).collect::<Vec<_>>(),
+            }))?
+        );
+        return Ok(());
+    }
+
+    if total == 0 {
+        println!(
+            "{}",
+            paint(
+                DIM,
+                &format!(
+                    "no tool calls observed in {named} — `devplane agent connect claude`, then come back"
+                )
+            )
+        );
+        return Ok(());
+    }
+
+    let pct = |n: usize| (n as f64 * 100.0 / total as f64).round() as u64;
+    println!("{total} tool calls in {named} replayed against the rules as they are now\n");
+    for (n, label, colour) in [
+        (counts[0], "ask", YELLOW),
+        (counts[1], "deny", render::RED),
+        (counts[2], "no rule here", DIM),
+    ] {
+        if n > 0 {
+            println!("  {:>6}  {:>3}%  {}", n, pct(n), paint(colour, label));
+        }
+    }
+
+    if advice.is_empty() {
+        println!("\n{}", paint(DIM, "nothing here has a rule worth writing"));
+        return Ok(());
+    }
+
+    const SHOWN: usize = 12;
+    println!(
+        "\n{}",
+        paint(BOLD, "one rule each, most interruptions first")
+    );
+    for (n, tool, rule) in advice.iter().take(SHOWN) {
+        println!(
+            "  {:>5}×  {}",
+            n,
+            paint(render::GREEN, &format!("{tool}({rule})"))
+        );
+    }
+    if advice.len() > SHOWN {
+        println!(
+            "  {}",
+            paint(DIM, &format!("… and {} more", advice.len() - SHOWN))
+        );
+    }
+    let shown: usize = advice.iter().take(SHOWN).map(|a| a.0).sum();
+    println!(
+        "\n{}",
+        paint(
+            DIM,
+            &format!(
+                "{shown} of the {} calls Devplane leaves to your agent · \
+                 paste into permissions.allow in your agent's settings",
+                counts[2]
+            )
+        )
+    );
+    let _ = answerable;
+    Ok(())
+}
+
+pub async fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
+    let root = path.canonicalize().context("that path does not exist")?;
+    let root = crate::repo::find_repo_root(&root).unwrap_or(root);
+    let file = root.join(crate::core::config::CONFIG_FILE);
+
+    let config = match crate::core::ProjectConfig::load(&root) {
+        Ok(c) => c,
+        Err(e) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({ "ok": false, "error": e.to_string() })
+                    )?
+                );
+                return Err(crate::cli::Exit(1).into());
+            }
+            anyhow::bail!("{e}");
+        }
+    };
+    let problems = config.validate();
+    let persons = PersonsFile::read(&root);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "file": file.display().to_string(),
+                "exists": file.exists(),
+                "ok": !problems.iter().any(|p| p.fatal) && persons.error.is_none(),
+                // The same read-back the board shows; it carries `problems`.
+                "describes": config.describe(),
+                "persons_file": {
+                    "error": persons.error,
+                    "grants": persons.grants,
+                    "widening": persons.widening,
+                },
+            }))?
+        );
+        if problems.iter().any(|p| p.fatal) || persons.error.is_some() {
+            return Err(crate::cli::Exit(1).into());
+        }
+        return Ok(());
+    }
+    if let Some(e) = &persons.error {
+        println!("{} {e}", paint(render::RED, "error  "));
+        anyhow::bail!(
+            "{} will not load, so until it does every call is asked",
+            crate::core::grant::FILE
+        );
+    }
+    persons.print();
+
+    if !file.exists() {
+        println!(
+            "{}\n\nNothing is verified and nothing pretends to be. \
+             Add a devplane.toml when you want gates.",
+            paint(DIM, &format!("no {}", file.display()))
+        );
+        // The specifications are read without one: the layout is the tool's own.
+        let layouts = config.spec.layouts(&root);
+        if layouts.is_empty() {
+            println!("\n  {:<9} {}", "spec", crate::spec::NO_LAYOUT);
+        }
+        for layout in &layouts {
+            let n = crate::spec::changes(&root, layout).len();
+            println!(
+                "\n  {:<9} {} in {}/ ({n} found, by {})",
+                "spec", layout.name, layout.root, layout.detected_by
+            );
+            print_elsewhere(layout);
+        }
+        return Ok(());
+    }
+
+    for p in &problems {
+        println!(
+            "{} {} {}",
+            match p.fatal {
+                true => paint(render::RED, "error  "),
+                false => paint(render::YELLOW, "warning"),
+            },
+            paint(BOLD, &p.where_),
+            p.what
+        );
+    }
+    if problems.iter().any(|p| p.fatal) {
+        println!();
+        anyhow::bail!("{} cannot do what it says", file.display());
+    }
+
+    println!("{}", paint(render::GREEN, "ok"));
+    println!(
+        "  gates     {}",
+        match config.gates.check.is_empty() {
+            true => paint(DIM, "none — nothing is verified"),
+            false => config.gates.check.join(" && "),
+        }
+    );
+    for (name, gate) in &config.gates.named {
+        println!("            {name}: {}", gate.run.join(" && "));
+    }
+    println!(
+        "  pull req  {}",
+        match config.github.pull_request {
+            true => "yes, as a draft",
+            false => "no",
+        }
+    );
+    // What happens to an unanswered question. An unparsable value is already
+    // listed as a problem above, so it is not repeated here.
+    if let Some(d) = config.questions.deadline() {
+        println!("  questions {}", crate::core::ask::Deadline::says(d));
+    }
+
+    // Every specification layout found — by the tool's own marker, or the
+    // `[spec] plans` key — with how many changes each holds; or the sentence
+    // naming what would have been recognised.
+    let layouts = config.spec.layouts(&root);
+    if layouts.is_empty() {
+        println!("  {:<9} {}", "spec", crate::spec::NO_LAYOUT);
+    }
+    for layout in &layouts {
+        let n = crate::spec::changes(&root, layout).len();
+        println!(
+            "  {:<9} {} in {}/ ({n} found, by {})",
+            "spec", layout.name, layout.root, layout.detected_by
+        );
+        print_elsewhere(layout);
+    }
+    if !config.spec.open_questions.is_empty() {
+        // Padded by width, not spaces in the literal: `purity` rejects runs of
+        // spaces in strings as a dropped `\` continuation.
+        println!(
+            "  {:<9} unresolved when a line says: {}",
+            "spec",
+            config.spec.open_questions.join(", ")
+        );
+    }
+
+    // What the rules actually do: a rule can parse and still cover nothing
+    // anybody expected.
+    let policy = config.policy();
+    if !policy.is_empty() {
+        println!(
+            "  policy    {} deny, {} ask",
+            policy.deny_rules().len(),
+            policy.ask_rules().len()
+        );
+        // Printed in evaluation order. A negation is labelled `except`, since
+        // `deny  !Bash(git status)` would otherwise read as its opposite.
+        let badge = |rule: &crate::core::policy::Rule, colour: &'static str, word: &'static str| {
+            if rule.is_negated() {
+                paint(render::DIM, "except")
+            } else {
+                paint(colour, word)
+            }
+        };
+        for rule in policy.deny_rules() {
+            println!(
+                "            {} {}",
+                badge(rule, render::RED, "deny  "),
+                rule
+            );
+        }
+        for rule in policy.ask_rules() {
+            println!(
+                "            {} {}",
+                badge(rule, render::YELLOW, "ask   "),
+                rule
+            );
+        }
+        for finding in &policy.redundancies() {
+            let mut lines = crate::core::text::wrap(finding, 66).into_iter();
+            if let Some(first) = lines.next() {
+                println!("  {}{}", render::pad(&paint(BOLD, "unused"), 10), first);
+            }
+            for rest in lines {
+                println!("  {:<10}{}", "", rest);
+            }
+        }
+        // Allow rules that provably grant more than they read as granting
+        // (pattern containment, not a heuristic).
+        let wide = crate::core::policy::overbroad(&vendor_allow_rules(root.as_path()));
+        if !wide.is_empty() {
+            println!();
+        }
+        for finding in &wide {
+            println!(
+                "  {}{}",
+                render::pad(&paint(BOLD, "overbroad"), 10),
+                finding.rule
+            );
+            for line in crate::core::text::wrap(&finding.why, 66) {
+                println!("  {:<10}{}", "", line);
+            }
+            println!(
+                "  {:<10}{}",
+                "",
+                paint(DIM, &format!("narrow it, e.g. {}", finding.suggestion))
+            );
+        }
+
+        let half = policy.half_protected_paths();
+        if !half.is_empty() {
+            let add = half
+                .iter()
+                .map(|p| format!("\"Edit({p})\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let first = &half[0];
+            println!(
+                "\n  {:<10}those denies reach reads and the operands of writers — a redirection like `echo x > {first}` still runs",
+                paint(BOLD, "note")
+            );
+            println!(
+                "  {:<10}{}",
+                "",
+                paint(
+                    DIM,
+                    &format!("add {add} to [policy] deny to stop writes too")
+                )
+            );
+        }
+    }
+    if !problems.is_empty() {
+        println!();
+    }
+    Ok(())
+}
+
+/// The part of Claude Code's `settings.json` read here: its allow rules.
+#[derive(serde::Deserialize)]
+struct ClaudeSettings {
+    #[serde(default)]
+    permissions: Option<ClaudePermissions>,
+}
+
+#[derive(serde::Deserialize)]
+struct ClaudePermissions {
+    #[serde(default)]
+    allow: Option<Vec<AllowRule>>,
+}
+
+/// One entry of `permissions.allow`: a rule, or something that is not one
+/// and is skipped.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum AllowRule {
+    Text(String),
+    Other(serde::de::IgnoredAny),
+}
+
+/// A layout's *the changes are elsewhere* sentence, beneath its line: an
+/// OpenSpec store-only project says where its changes are rather than
+/// showing `0 found` alone.
+fn print_elsewhere(layout: &crate::spec::Detected) {
+    if let Some(e) = &layout.elsewhere {
+        println!("  {:<9} {e}", "");
+    }
+}
+
+/// Allow rules from the agent's own settings: `devplane.toml` has no allow
+/// list, so these are the rules that actually grant.
+fn vendor_allow_rules(root: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for &rel in &[".claude/settings.json", ".claude/settings.local.json"] {
+        let Ok(text) = std::fs::read_to_string(root.join(rel)) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<ClaudeSettings>(&text) else {
+            continue;
+        };
+        let allow = v.permissions.and_then(|p| p.allow).unwrap_or_default();
+        out.extend(allow.into_iter().filter_map(|r| match r {
+            AllowRule::Text(r) => Some(r),
+            AllowRule::Other(_) => None,
+        }));
+    }
+    out
+}
+
+/// The person's own `~/.devplane/policy.toml` as it bears on one project: why
+/// it will not load (a refused grant, a global switch, a threshold below 2,
+/// each by name), the grants it holds for the project, and which of them
+/// widen the agent beyond its own settings.
+struct PersonsFile {
+    error: Option<String>,
+    grants: Vec<String>,
+    widening: Vec<String>,
+}
+
+impl PersonsFile {
+    fn read(root: &Path) -> Self {
+        let home = match crate::config::home() {
+            Ok(h) => h,
+            Err(e) => {
+                return Self {
+                    error: Some(e.to_string()),
+                    grants: Vec::new(),
+                    widening: Vec::new(),
+                };
+            }
+        };
+        let loaded = crate::core::GlobalConfig::load(&home)
+            .map_err(|e| e.to_string())
+            .and_then(|g| g.grants());
+        match loaded {
+            Err(error) => Self {
+                error: Some(error),
+                grants: Vec::new(),
+                widening: Vec::new(),
+            },
+            Ok(g) => {
+                let grants: Vec<String> = g
+                    .in_project(root)
+                    .iter()
+                    .map(|g| g.rule().to_string())
+                    .collect();
+                let agent =
+                    crate::policy_cache::agent_allow_rules(root, dirs::home_dir().as_deref());
+                let widening = grants
+                    .iter()
+                    .filter(|r| crate::policy_cache::widens_the_agent(r, &agent))
+                    .cloned()
+                    .collect();
+                Self {
+                    error: None,
+                    grants,
+                    widening,
+                }
+            }
+        }
+    }
+
+    fn print(&self) {
+        if self.grants.is_empty() {
+            return;
+        }
+        println!(
+            "  {:<9} {} in {}: {}",
+            "grants",
+            self.grants.len(),
+            crate::core::grant::FILE,
+            self.grants.join(", ")
+        );
+        if !self.widening.is_empty() {
+            println!(
+                "  {:<9} {}",
+                "",
+                paint(YELLOW, &widening_line(&self.widening))
+            );
+        }
+    }
+}
+
+/// *widening the agent: 2 grants — `a`, `b`*: said by count and by rule.
+pub(crate) fn widening_line(rules: &[String]) -> String {
+    format!(
+        "widening the agent: {} {} — {}; where {} the agent's own settings would have asked",
+        rules.len(),
+        if rules.len() == 1 { "grant" } else { "grants" },
+        rules
+            .iter()
+            .map(|r| format!("`{r}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        if rules.len() == 1 {
+            "it answers,"
+        } else {
+            "they answer,"
+        }
+    )
+}
+
+/// `devplane config grants`: every grant in the person's file, with what it
+/// decided and, where observable, how many of those were reversed.
+pub async fn cmd_grants(json: bool) -> Result<()> {
+    let home = crate::config::home()?;
+    let g = crate::core::GlobalConfig::load(&home)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .grants()
+        .map_err(|e| anyhow::anyhow!("{} will not load: {e}", crate::core::grant::FILE))?;
+    let store = crate::store::Store::open(&crate::config::db_path()?).await?;
+    let rows = crate::view::grant_rows(&store, &g, jiff::Timestamp::now()).await;
+    let widening: Vec<String> = rows
+        .iter()
+        .filter(|r| r.widens && !r.lapsed)
+        .map(|r| r.rule.clone())
+        .collect();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "grants": rows,
+                "widening": widening,
+                "reversals_counted": crate::view::REVERSALS_COUNTED,
+            }))?
+        );
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!(
+            "{}",
+            paint(
+                DIM,
+                &format!(
+                    "{} grants nothing. A grant is offered in the inbox after you answer the \
+                     same call the same way several times.",
+                    crate::core::grant::FILE
+                )
+            )
+        );
+        return Ok(());
+    }
+    let mut root = String::new();
+    for r in &rows {
+        if r.root != root {
+            root = r.root.clone();
+            println!("{}", paint(BOLD, &root));
+        }
+        let decided = format!(
+            "decided {} {}",
+            r.decided,
+            if r.decided == 1 { "call" } else { "calls" }
+        );
+        let reversed = match r.reversed {
+            Some(n) => format!(" · {n} reversed of the {}", r.decided),
+            None => String::new(),
+        };
+        let lapsed = match (&r.until, r.lapsed) {
+            (Some(u), true) => format!(" · lapsed {u} — calls it matched are asked again"),
+            (Some(u), false) => format!(" · until {u}"),
+            _ => String::new(),
+        };
+        println!("  {:<32} {decided}{reversed}{lapsed}", r.rule);
+        for rev in &r.reversals {
+            println!("    {}", paint(DIM, &rev.cause));
+        }
+    }
+    if !widening.is_empty() {
+        println!("{}", paint(YELLOW, &widening_line(&widening)));
+    }
+    println!("{}", paint(DIM, crate::view::REVERSALS_COUNTED));
+    Ok(())
+}
+
+/// `devplane config revoke`: removes a grant from the person's file and lists
+/// every decision it made. Refused inside an agent's session: the file is the
+/// person's, and an agent may not edit what governs it.
+pub async fn cmd_revoke(rule: String, dir: PathBuf, json: bool) -> Result<()> {
+    if let Some(var) = crate::hook::agent_session() {
+        anyhow::bail!(
+            "refused: `{var}` is set, so this is running inside an agent's session, and an agent \
+             may not change the person's grants. Revoke it from the Devplane window or a \
+             terminal of your own."
+        );
+    }
+    let dir = dir.canonicalize().context("that path does not exist")?;
+    let root = crate::repo::governing_root(&dir)
+        .map(|r| r.canonicalize().unwrap_or(r))
+        .unwrap_or(dir);
+    let root_text = root.display().to_string();
+    let home = crate::config::home()?;
+    if !crate::grant_file::remove(&home, &root_text, &rule)? {
+        anyhow::bail!(
+            "{} grants no `{rule}` for {root_text}; `devplane config grants` lists what it does",
+            crate::core::grant::FILE
+        );
+    }
+    let name = crate::core::grant::name_of(&rule, &root);
+    let store = crate::store::Store::open(&crate::config::db_path()?).await?;
+    let decided = store.decisions_by_grant(&name).await?;
+    store
+        .append_decision(
+            &crate::core::Decision::new(
+                crate::core::Authority::Person,
+                "policy:revoke",
+                name.clone(),
+                "revoked",
+            )
+            .because(format!(
+                "removed from {} in a terminal; it had decided {} {}",
+                crate::core::grant::FILE,
+                decided.len(),
+                if decided.len() == 1 { "call" } else { "calls" }
+            )),
+        )
+        .await?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "revoked": name, "decided": decided,
+            }))?
+        );
+        return Ok(());
+    }
+    println!(
+        "revoked {name}; it decided {} {}{}",
+        decided.len(),
+        if decided.len() == 1 { "call" } else { "calls" },
+        if decided.is_empty() { "." } else { ":" }
+    );
+    for d in &decided {
+        println!(
+            "  {}  {}  {}{}",
+            d.at.strftime("%Y-%m-%d %H:%M"),
+            d.outcome,
+            d.subject,
+            d.run_id
+                .as_ref()
+                .map(|r| format!("   (run {})", r.as_str()))
+                .unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+/// Across every project in the person's file: why it will not load, or the
+/// grants broader than the agent's own settings — for `devplane doctor`.
+pub(crate) fn grants_widening() -> (Option<String>, Vec<String>) {
+    let Ok(home) = crate::config::home() else {
+        return (None, Vec::new());
+    };
+    let g = match crate::core::GlobalConfig::load(&home)
+        .map_err(|e| e.to_string())
+        .and_then(|g| g.grants())
+    {
+        Ok(g) => g,
+        Err(e) => return (Some(e), Vec::new()),
+    };
+    let now = jiff::Timestamp::now();
+    let user = dirs::home_dir();
+    let widening = g
+        .all()
+        .filter(|g| !g.is_lapsed(now))
+        .filter(|g| {
+            let agent = crate::policy_cache::agent_allow_rules(g.root(), user.as_deref());
+            crate::policy_cache::widens_the_agent(g.rule(), &agent)
+        })
+        .map(|g| g.name())
+        .collect();
+    (None, widening)
+}

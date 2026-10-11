@@ -24,6 +24,11 @@ export type Live = {
   unauthorised: boolean;
 };
 
+/// Whether the feed failed before anything was ever read: a skeleton would
+/// then promise data that is not coming, so `Skeleton` says *not read*
+/// instead. Read by shared components, which must not hold the feed itself.
+export const unread = $state({ failed: false });
+
 /// Reads the feed now, outside the poll's rhythm: a surface calls it after a
 /// write, so what it just changed is not shown live for another two seconds.
 let poke: (() => void) | null = null;
@@ -74,6 +79,7 @@ export function live(looking: () => boolean): {
       if (!same($state.snapshot(state.board), board)) state.board = board;
       if (!same($state.snapshot(state.inbox), inbox)) state.inbox = inbox;
       state.loaded = true;
+      unread.failed = false;
       state.error = null;
       state.stale_since = null;
       lastGood = new Date().toISOString();
@@ -81,13 +87,15 @@ export function live(looking: () => boolean): {
       if (e instanceof Unauthorised) {
         // Nothing this tab sends will be accepted again: stop and say why.
         state.unauthorised = true;
-        state.error = "This tab has no token. Run `devplane open` again for a fresh link.";
+        state.error = "This tab has no token. Run `devplane up` again for a fresh link.";
+        unread.failed = !state.loaded;
         if (timer !== null) clearInterval(timer);
         timer = null;
         return;
       }
       state.error = e instanceof Error ? e.message : String(e);
       state.stale_since = lastGood;
+      if (!state.loaded) unread.failed = true;
     } finally {
       inflight = false;
       if (queued !== null && !state.unauthorised) {

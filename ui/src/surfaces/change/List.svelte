@@ -6,10 +6,10 @@
   import { resource } from "../../lib/resource.svelte";
   import Failed from "../../lib/Failed.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
-  import Pill from "../../lib/ui/Pill.svelte";
-  import Qualifier from "../../lib/Qualifier.svelte";
+  import ChangeState from "../../lib/ChangeState.svelte";
   import type { Qualifier as Q } from "../../wire/Qualifier";
   import { run } from "../../lib/keys";
+  import { cursor } from "../../lib/cursor";
 
   type Brief = { id: string; state: string };
   type Row = {
@@ -24,6 +24,8 @@
     updated_at?: string;
     counts_says?: string | null;
     qualifier?: Q | null;
+    /// The agent's open stop claim: its label, read after the state.
+    stop_claim?: { says: string } | null;
   };
 
   let {
@@ -70,23 +72,23 @@
   const archived = $derived((rows ?? []).filter((r) => r.archived_at).length);
   let folded = $state<Record<string, boolean>>({});
 
-  function key(e: KeyboardEvent) {
-    const flat = groups.flatMap(([g, rs]) => (folded[g] ? [] : rs));
-    if (flat.length === 0) return;
-    const i = flat.findIndex((r) => r.id === focus);
-    let next = i;
-    if (e.key === "ArrowDown" || e.key === "j") next = Math.min(flat.length - 1, i + 1);
-    else if (e.key === "ArrowUp" || e.key === "k") next = Math.max(0, i - 1);
-    else if (e.key === "Enter" && i !== -1) {
-      e.stopPropagation();
-      open(flat[i].id, true);
-      return;
-    } else return;
-    // Taken here: the page's own j/k (the review's next hunk) must not also move.
-    e.preventDefault();
-    e.stopPropagation();
-    open(flat[next].id);
-  }
+  /// The rows in reading order, as the keys walk them: folded groups skipped.
+  const flat = $derived(groups.flatMap(([g, rs]) => (folded[g] ? [] : rs)));
+  // The registry's list keys (`bindList("change")`), wherever focus is: `j`
+  // and `k` glance at the next change, Enter keeps it as a tab of its own. In
+  // the Review tab the review's mode takes `j` and `k` first.
+  $effect(() =>
+    cursor({
+      scope: "change",
+      size: () => flat.length,
+      at: () => flat.findIndex((r) => r.id === focus),
+      go: (i) => {
+        open(flat[i].id);
+        queueMicrotask(() => document.getElementById(optionId(flat[i].id))?.scrollIntoView({ block: "nearest" }));
+      },
+      open: (i) => open(flat[i].id, true),
+    }),
+  );
   const optionId = (id: string) => `change-row-${id.replace(/[^\w-]/g, "_")}`;
   const active = $derived(visible.some((r) => r.id === focus) ? optionId(focus) : undefined);
 </script>
@@ -105,7 +107,7 @@
     <input bind:value={filter} placeholder="Filter by title, branch, project, state" aria-label="filter the changes" />
   </label>
 
-  <div class="rows" role="listbox" aria-label="changes" tabindex="0" onkeydown={key} aria-activedescendant={active}>
+  <div class="rows" role="listbox" aria-label="changes" tabindex="0" aria-activedescendant={active}>
     {#if read.failure}
       <div class="fail"><Failed what="the changes" failure={read.failure} at={read.at} stale={read.data !== null} /></div>
     {:else if rows === null}
@@ -124,6 +126,8 @@
         </button>
         {#if !folded[g]}
           {#each rs as r (r.id)}
+            <!-- The keys are the registry's, answered above for the whole list. -->
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
             <div
               class="row"
               role="option"
@@ -132,20 +136,15 @@
               aria-selected={r.id === focus}
               onclick={() => open(r.id)}
               ondblclick={() => open(r.id, true)}
-              onkeydown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  open(r.id, e.key === "Enter");
-                }
-              }}
             >
-              <span class="title">{r.title || r.id}</span>
+              <span class="title" title={r.title || r.id}>{r.title || r.id}</span>
               <span class="meta">
-                <Pill word={r.state} /><Qualifier q={r.qualifier} />
+                <ChangeState state={r.state} q={r.qualifier} />
                 {#if r.waiting_says}<span class="wait">{r.waiting_says}</span>{/if}
                 {#if r.in_place}<span class="dim">in place</span>{/if}
               </span>
+              <!-- After the state and its weakened checks, never before them. -->
+              {#if r.stop_claim}<span class="claimed">{r.stop_claim.says}</span>{/if}
               {#if r.branch}<span class="branch"><Icon name="change" size={11} /> {r.branch}</span>{/if}
             </div>
           {/each}
@@ -282,6 +281,7 @@
     white-space: nowrap;
   }
   .meta {
+    flex-wrap: wrap;
     display: flex;
     align-items: center;
     gap: var(--s-2);
@@ -290,6 +290,13 @@
   }
   .wait {
     color: var(--wait);
+  }
+  .claimed {
+    color: var(--wait);
+    font-size: var(--t-xs);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .dim {
     color: var(--faint);

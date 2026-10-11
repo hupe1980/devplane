@@ -10,7 +10,7 @@ use serde_json::Value;
 /// How many of each list one poll reads; the rest is a count.
 pub const PAGE: u32 = 20;
 
-const PR_FIELDS: &str = "number title url state isDraft headRefName reviewDecision \
+const PR_FIELDS: &str = "number title url state isDraft headRefName headRefOid baseRefName reviewDecision \
 mergeStateStatus updatedAt author { login } \
 commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 50) { nodes { \
 __typename \
@@ -135,6 +135,10 @@ struct GqlPr {
     is_draft: bool,
     #[serde(default, rename = "headRefName")]
     head_ref: String,
+    #[serde(default, rename = "headRefOid")]
+    head_oid: Option<String>,
+    #[serde(default, rename = "baseRefName")]
+    base_ref: Option<String>,
     #[serde(default, rename = "reviewDecision")]
     review_decision: Option<String>,
     #[serde(default, rename = "mergeStateStatus")]
@@ -227,6 +231,8 @@ fn pr(g: GqlPr) -> PullRequest {
         checks,
         author: g.author,
         updated_at: g.updated_at,
+        head_oid: g.head_oid.filter(|h| !h.is_empty()),
+        base_ref: g.base_ref.filter(|b| !b.is_empty()),
     }
 }
 
@@ -368,6 +374,8 @@ pub fn rest_pr(v: &Value) -> Option<PullRequest> {
             login: l.to_string(),
         }),
         updated_at: v["updated_at"].as_str().map(str::to_string),
+        head_oid: v["head"]["sha"].as_str().map(str::to_string),
+        base_ref: v["base"]["ref"].as_str().map(str::to_string),
     })
 }
 
@@ -383,6 +391,7 @@ mod tests {
                 "number": 142, "title": "Fix the flaky login test",
                 "url": "https://github.com/acme/app/pull/142", "state": "OPEN",
                 "isDraft": false, "headRefName": "fix/flaky-login-a1b2c3",
+                "headRefOid": "b71c0de", "baseRefName": "main",
                 "reviewDecision": null, "mergeStateStatus": "BLOCKED",
                 "author": {"login": "hupe1980"}, "updatedAt": "2026-09-15T10:00:00Z",
                 "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {"nodes": [
@@ -411,6 +420,8 @@ mod tests {
         assert_eq!(pr.checks[2].state, "IN_PROGRESS");
         assert_eq!(pr.checks[3].name, "ci/legacy");
         assert_eq!(pr.review_decision, None);
+        assert_eq!(pr.head_oid.as_deref(), Some("b71c0de"));
+        assert_eq!(pr.base_ref.as_deref(), Some("main"));
         assert_eq!(pr.status(), super::super::PrStatus::Failing);
         assert_eq!(pr.failing_checks()[0].name, "test");
         let i = &s.issues.items[0];

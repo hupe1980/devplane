@@ -26,7 +26,20 @@ pub async fn dispatch_for_change(
     change: &crate::core::ChangeId,
     sent: Vec<crate::spec::SentTask>,
 ) -> Result<RunId> {
-    start(state, spec, cwd, None, Some(change), sent).await
+    dispatch_for_change_with(state, spec, cwd, change, sent, None).await
+}
+
+/// [`dispatch_for_change`], first asking the agent to sign in with the method
+/// the person chose (an agent-handled one, by its id).
+pub async fn dispatch_for_change_with(
+    state: &Shared,
+    spec: &AgentSpec,
+    cwd: PathBuf,
+    change: &crate::core::ChangeId,
+    sent: Vec<crate::spec::SentTask>,
+    sign_in: Option<String>,
+) -> Result<RunId> {
+    start(state, spec, cwd, None, Some(change), sent, sign_in).await
 }
 
 /// Starts an agent on an ad-hoc prompt, with no change behind it; safe to
@@ -38,7 +51,7 @@ pub async fn dispatch(
     prompt: Option<String>,
     sent: Vec<crate::spec::SentTask>,
 ) -> Result<RunId> {
-    start(state, spec, cwd, prompt, None, sent).await
+    start(state, spec, cwd, prompt, None, sent, None).await
 }
 
 /// Starts an agent and registers it as a run. Every start comes through here,
@@ -51,6 +64,7 @@ async fn start(
     for_change: Option<&crate::core::ChangeId>,
     // Recorded on the run before any prompt reaches the agent.
     sent: Vec<crate::spec::SentTask>,
+    sign_in: Option<String>,
 ) -> Result<RunId> {
     if !cwd.is_dir() {
         anyhow::bail!("{} is not a directory", cwd.display());
@@ -82,10 +96,15 @@ async fn start(
     let owned = lock.lock().await;
     let before = crate::observe::procs::own_group_leading_children();
     let env = agent_env(state, for_change, &run_id).await;
-    let (session, events) =
-        crate::acp::spawn(spec, cwd.clone(), &env, mcp_offer(&run_id, for_change))
-            .await
-            .with_context(|| format!("starting {}", spec.id))?;
+    let offer = mcp_offer(&run_id, for_change);
+    let offered = offer.is_some();
+    let launch = crate::acp::session::Launch {
+        additional_directories: declared_for(state, for_change, &cwd).await,
+        authenticate: sign_in,
+    };
+    let (session, events) = crate::acp::session::spawn_with(spec, cwd.clone(), &env, offer, launch)
+        .await
+        .with_context(|| format!("starting {}", spec.id))?;
     let agent_pid = crate::observe::procs::one_new_child(
         &before,
         &crate::observe::procs::own_group_leading_children(),
@@ -129,6 +148,18 @@ async fn start(
             )
             .await;
     }
+    // Said on the change: the agent cannot ask Devplane about its work.
+    if !offered {
+        state
+            .ingest(
+                run_id.clone(),
+                Source::Host,
+                Event::ToolsNotOffered,
+                Some(cwd.clone()),
+                RunMode::Driven,
+            )
+            .await;
+    }
     // Recorded only when the dispatch named tasks; never inferred.
     if !sent.is_empty() {
         state
@@ -149,6 +180,7 @@ async fn start(
         session.clone(),
         events,
         keep_transcript,
+        spec,
     )
     .await;
     drop(owned);
@@ -160,8 +192,8 @@ async fn start(
 }
 
 /// The environment an agent Devplane starts is given: its run id in
-/// [`RUN_ENV`], so `devplane report` reads an origin the host set rather than
-/// one the model typed, plus its change's build-cache variables.
+/// [`RUN_ENV`], so a hook it runs knows it is inside an agent's session, plus
+/// its change's build-cache variables.
 async fn agent_env(
     state: &Shared,
     for_change: Option<&crate::core::ChangeId>,
@@ -172,22 +204,96 @@ async fn agent_env(
     env
 }
 
+/// The folders a change's session must be told about because they are not in
+/// its working directory: its specification folder, when the worktree was made
+/// from a base that does not have it but the project's checkout does. Confined
+/// to the project — nothing outside it is ever declared.
+async fn declared_for(
+    state: &Shared,
+    change: Option<&crate::core::ChangeId>,
+    cwd: &Path,
+) -> Vec<PathBuf> {
+    let Some(id) = change else {
+        return Vec::new();
+    };
+    let Some((spec, project)) = state
+        .changes
+        .lock()
+        .await
+        .get(id)
+        .and_then(|c| Some((c.spec.clone()?, c.project_id.clone())))
+    else {
+        return Vec::new();
+    };
+    if cwd.join(&spec).exists() {
+        return Vec::new();
+    }
+    let Some(root) = state
+        .world
+        .lock()
+        .await
+        .project(&project)
+        .map(|p| p.root.clone())
+    else {
+        return Vec::new();
+    };
+    match crate::spec::confine(&root, &spec) {
+        Ok(folder) if folder.is_dir() => vec![folder.canonicalize().unwrap_or(folder)],
+        _ => Vec::new(),
+    }
+}
+
 /// The variable every agent Devplane starts carries its run id in.
 pub const RUN_ENV: &str = "DEVPLANE_RUN";
 
 /// The variable Devplane's MCP server reads the change it serves from.
 pub const CHANGE_ENV: &str = "DEVPLANE_CHANGE";
 
-/// Devplane's own read-only MCP server, as a stdio server the agent launches:
-/// this executable's `mcp`, told the run and the change it belongs to. Every
-/// ACP agent must accept stdio servers, so it is always offered; the agent's
-/// own configured servers stay as they are.
+/// The variable the stop tool proves its run with: a secret minted for each
+/// offer of Devplane's MCP server, in that server's environment only — never
+/// the agent's own ([`agent_env`]) — and held by the host beside the session.
+/// The agent can read its own; another run's server does not have it.
+pub const CLAIM_KEY_ENV: &str = "DEVPLANE_CLAIM_KEY";
+
+/// The key minted for each run's current offer, by run. In memory only: never
+/// stored, logged or serialised, and replaced on every start and resume.
+static CLAIM_KEYS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<RunId, String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Whether `key` is the one minted for `run`'s current session. Compared over
+/// every byte, with no early exit.
+pub fn claim_key_matches(run: &RunId, key: &str) -> bool {
+    let keys = CLAIM_KEYS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(minted) = keys.get(run) else {
+        return false;
+    };
+    minted.len() == key.len()
+        && minted
+            .bytes()
+            .zip(key.bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
+}
+
+/// Devplane's own MCP server, as a stdio server the agent launches: this
+/// executable's `mcp`, told the run and the change it belongs to and the key
+/// its stop tool proves the run with. Every ACP agent must accept stdio
+/// servers, so it is always offered; the agent's own configured servers stay
+/// as they are.
 fn mcp_offer(run: &RunId, change: Option<&crate::core::ChangeId>) -> Option<crate::acp::McpOffer> {
     let command = std::env::current_exe().ok()?;
     let mut env = vec![(RUN_ENV.to_string(), run.to_string())];
     if let Some(c) = change {
         env.push((CHANGE_ENV.to_string(), c.to_string()));
     }
+    // 128 random bits per offer, so a resumed session's server holds a key
+    // the previous one's does not.
+    let key = uuid::Uuid::new_v4().simple().to_string();
+    CLAIM_KEYS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(run.clone(), key.clone());
+    env.push((CLAIM_KEY_ENV.to_string(), key));
     Some(crate::acp::McpOffer {
         name: "devplane".into(),
         command,
@@ -309,17 +415,35 @@ async fn resume_run(state: &Shared, run: &RunId, join: bool) -> Result<bool> {
     let keep_transcript = transcripts_wanted(&cwd);
 
     let env = agent_env(state, change.as_ref(), run).await;
-    let (session, events) = crate::acp::resume(
+    let offer = mcp_offer(run, change.as_ref());
+    let offered = offer.is_some();
+    let launch = crate::acp::session::Launch {
+        additional_directories: declared_for(state, change.as_ref(), &cwd).await,
+        authenticate: None,
+    };
+    let (session, events) = crate::acp::session::resume_with(
         &spec,
         cwd.clone(),
         agent_session.clone(),
         &env,
-        mcp_offer(run, change.as_ref()),
+        offer,
+        launch,
     )
     .await
     .with_context(|| format!("resuming {}", spec.id))?;
+    if !offered {
+        state
+            .ingest(
+                run.clone(),
+                Source::Host,
+                Event::ToolsNotOffered,
+                Some(cwd.clone()),
+                RunMode::Driven,
+            )
+            .await;
+    }
 
-    register(state, run, &cwd, session, events, keep_transcript).await;
+    register(state, run, &cwd, session, events, keep_transcript, &spec).await;
 
     state
         .record(
@@ -368,6 +492,7 @@ async fn register(
     session: crate::acp::Session,
     mut events: tokio::sync::mpsc::Receiver<crate::acp::AcpEvent>,
     keep_transcript: bool,
+    spec: &AgentSpec,
 ) {
     state
         .sessions
@@ -380,9 +505,13 @@ async fn register(
     let pump_run = run_id.clone();
     let pump_cwd = cwd.to_path_buf();
     let pump_session = session;
+    let pump_agent = spec.name.clone();
+    let pump_preference = spec.mode.clone();
     tokio::spawn(async move {
         let mut pump = Pump {
             keep_transcript,
+            agent: pump_agent,
+            preference: pump_preference,
             ..Pump::default()
         };
         while let Some(event) = events.recv().await {
@@ -499,11 +628,7 @@ pub async fn context_for(
 ) -> crate::core::context::Context {
     use crate::core::context::{Context, Field, Value};
     let now = jiff::Timestamp::now();
-    // A project-wide prompt belongs to no change, so it has no answered reports.
-    let mut ctx = Context::default().with(
-        Field::Reports,
-        Value::new(crate::core::context::NO_REPORTS, now),
-    );
+    let mut ctx = Context::default();
 
     {
         let w = state.world.lock().await;
@@ -617,7 +742,7 @@ pub async fn context_for(
 fn transcripts_wanted(cwd: &Path) -> bool {
     let root = crate::repo::governing_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
     crate::core::ProjectConfig::load(&root)
-        .map(|c| c.transcripts.keep)
+        .map(|c| c.agent.keep_transcripts)
         // An unparseable file is reported elsewhere; default to keeping.
         .unwrap_or(true)
 }
@@ -638,14 +763,14 @@ pub async fn require_trust(state: &Shared, cwd: &Path) -> Result<()> {
     }
     anyhow::bail!(
         "{} is not trusted yet. Starting an agent there runs that repository's own hooks \
-         and MCP servers without asking. Run `devplane trust {}` if you meant to.",
+         and MCP servers without asking. Run `devplane project trust {}` if you meant to.",
         root.display(),
         root.display()
     )
 }
 
 /// Refuses when a project already has as many agents running as its
-/// `max_parallel_runs` allows.
+/// `[agent] max_parallel` allows.
 async fn require_capacity(
     state: &Shared,
     cwd: &Path,
@@ -656,7 +781,7 @@ async fn require_capacity(
     let Ok(config) = crate::core::ProjectConfig::load(&root) else {
         return Ok(());
     };
-    let Some(limit) = config.policy.max_parallel_runs else {
+    let Some(limit) = config.agent.max_parallel else {
         return Ok(());
     };
 
@@ -687,7 +812,7 @@ async fn require_capacity(
     if live >= limit {
         anyhow::bail!(
             "{} already has {live} change(s) with an agent in them and allows \
-             {limit}. Finish one, or raise max_parallel_runs in devplane.toml.",
+             {limit}. Finish one, or raise `[agent] max_parallel` in devplane.toml.",
             root.display()
         );
     }
@@ -695,12 +820,31 @@ async fn require_capacity(
 }
 
 /// Sends a prompt to a driven run.
-///
-/// Reports its change filed that were answered since it last heard are
-/// appended (unless the prompt carries them via `{reports}`) and marked told
-/// once the prompt has gone, so each verdict arrives once.
 pub async fn prompt(state: &Shared, run: &RunId, text: String) -> Result<()> {
     send_prompt(state, run, text, true).await
+}
+
+/// A new run's first prompt. A session that ended before it could take one —
+/// an agent that needs signing in, a folder it cannot be told about, a
+/// protocol it does not speak — is not an error here: the run's own ending
+/// says why, and the change shows it.
+pub async fn prompt_first(state: &Shared, run: &RunId, text: String) -> Result<()> {
+    match prompt(state, run, text).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let live = match state.sessions.lock().await.get(run) {
+                Some(s) => s.is_live(),
+                None => false,
+            };
+            match live {
+                true => Err(e),
+                false => {
+                    tracing::info!(run = %run, error = %e, "the session ended before its first prompt");
+                    Ok(())
+                }
+            }
+        }
+    }
 }
 
 /// [`prompt`], superseding what the agent waits on only when `supersede`: an
@@ -737,28 +881,6 @@ async fn send_prompt(state: &Shared, run: &RunId, text: String, supersede: bool)
             .await;
         }
     }
-    let change = state.change_of_run.lock().await.get(run).cloned();
-    let owed = match &change {
-        Some(c) => crate::reports::owed(state, c).await,
-        None => Vec::new(),
-    };
-    let fresh: Vec<&String> = owed
-        .iter()
-        .map(|(_, p)| p)
-        .filter(|p| !text.contains(p.as_str()))
-        .collect();
-    let text = match fresh.is_empty() {
-        true => text,
-        false => format!(
-            "{}\n\nWhat became of reports this change filed about other projects:\n\n{}\n",
-            text.trim_end(),
-            fresh
-                .iter()
-                .map(|p| p.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        ),
-    };
     state
         .ingest(
             run.clone(),
@@ -786,12 +908,6 @@ async fn send_prompt(state: &Shared, run: &RunId, text: String, supersede: bool)
             .await;
     }
     session.prompt(text).await?;
-    if let Some(c) = &change
-        && !owed.is_empty()
-    {
-        let ids: Vec<crate::core::ReportId> = owed.into_iter().map(|(id, _)| id).collect();
-        crate::reports::told(state, c, &ids).await;
-    }
     Ok(())
 }
 
@@ -959,7 +1075,7 @@ impl FieldAnswer {
 /// What a surface said, turned into an [`Answer`] the row can take — or the
 /// sentence saying why it cannot.
 ///
-/// The one parser for every surface (API and host-less `devplane answer`): a
+/// The one parser for every surface (API and host-less `devplane inbox answer`): a
 /// permission with nothing said is refused, and an option must be one the
 /// request offered.
 pub fn parse_answer(
@@ -1036,7 +1152,7 @@ pub async fn answer_without_host(
     store: &crate::store::Store,
     ask_id: &str,
     answer: Answer,
-    from: &str,
+    from: crate::core::ask::AnswerPath,
 ) -> Result<crate::core::ask::Ask> {
     use crate::core::ask::Delivery;
 
@@ -1086,10 +1202,41 @@ pub async fn answer_without_host(
                     |d| d.says()
                 )
             ))
-            .for_run(&ask.run),
+            .for_run(&ask.run)
+            .for_call(call_of(&ask.payload)),
         )
         .await?;
     Ok(ask)
+}
+
+/// An answer in words, as the person gave it: `allow`, `deny`, the option's
+/// label where the question named one, or their own words quoted. For the
+/// line that says what is being held, and for the quit sentence.
+pub fn answer_says(ask: &crate::core::ask::Ask, answer: &Answer) -> String {
+    match answer {
+        Answer::Permission(d) => match (d.label(), d.option_id()) {
+            (Some(l), _) => l.to_string(),
+            (None, Some(id)) => format!("option {id}"),
+            (None, None) => "an answer".to_string(),
+        },
+        Answer::Question(choices) => {
+            let form = form_of(ask);
+            choices
+                .iter()
+                .map(|(field, c)| match c {
+                    crate::core::question::Chosen::Option(v) => form
+                        .iter()
+                        .find(|q| &q.field == field)
+                        .and_then(|q| q.options.iter().find(|o| &o.value == v))
+                        .map_or_else(|| v.clone(), |o| o.label.clone()),
+                    crate::core::question::Chosen::Custom(t) => {
+                        format!("\u{201c}{}\u{201d}", crate::core::text::clip(t, 80))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        }
+    }
 }
 
 /// Whether an answer could let a call through: any permission answer but a
@@ -1106,7 +1253,7 @@ async fn lost_the_race(
     store: &crate::store::Store,
     ask_id: &str,
     recorded: serde_json::Value,
-    from: &str,
+    from: crate::core::ask::AnswerPath,
 ) -> String {
     match store.ask(ask_id).await {
         Ok(Some(mut now)) => match now.answer(recorded, from, jiff::Timestamp::now()) {
@@ -1150,7 +1297,7 @@ pub async fn answer_ask(
     state: &Shared,
     ask_id: &str,
     answer: Answer,
-    from: &str,
+    from: crate::core::ask::AnswerPath,
 ) -> Result<crate::core::ask::Ask> {
     use crate::core::ask::Ended;
 
@@ -1201,7 +1348,8 @@ pub async fn answer_ask(
                 "answered",
             )
             .because(format!("answered from the {from} — {}", delivery.says()))
-            .for_run(&ask.run),
+            .for_run(&ask.run)
+            .for_call(call_of(&ask.payload)),
         )
         .await;
 
@@ -1415,7 +1563,7 @@ fn question_content(
 /// Whether `answer` can be delivered to what `ask` asked, checked before the
 /// ask is closed: an answer refused after the close would leave the row
 /// answered and the agent waiting for ever.
-fn check_answer(ask: &crate::core::ask::Ask, answer: &Answer) -> Result<()> {
+pub(crate) fn check_answer(ask: &crate::core::ask::Ask, answer: &Answer) -> Result<()> {
     match answer {
         // A held permission is read by the hook, which offers no options.
         Answer::Permission(_) if ask.request_id.is_empty() => Ok(()),
@@ -1474,7 +1622,8 @@ async fn decide(state: &Shared, ask: &crate::core::ask::Ask, want: Decision) -> 
         subject.clone(),
         decision,
     )
-    .for_run(run);
+    .for_run(run)
+    .for_call(call_of(&ask.payload));
     if is_standing {
         // A standing grant's later effects happen inside the agent, unseen,
         // so the log says so explicitly.
@@ -1625,7 +1774,8 @@ async fn end_unanswered(
                 outcome,
             )
             .because(because)
-            .for_run(run),
+            .for_run(run)
+            .for_call(call_of(&ask.payload)),
         )
         .await;
     // Only the run's own block is cleared; a parallel request stays shown.
@@ -1706,14 +1856,127 @@ pub async fn retire(state: &Shared, run: &RunId) -> Result<()> {
 /// run as a person's doing.
 const STOPPED_BY_PERSON: &str = "stopped";
 
+/// What [`stop_claimed`] tells the session: the agent ended its own run by
+/// saying the spec and the tests conflict. Nobody decided it.
+pub(crate) const AGENT_CLAIMED: &str = "claimed";
+
+/// Stops a run whose agent has just recorded a stop claim. Not a person's
+/// stop and nobody's decision: no row is written, and the pump ends the run
+/// as the agent's own doing, then runs the change's `check` once.
+pub async fn stop_claimed(state: &Shared, run: &RunId) {
+    let lock = lifecycle(run);
+    let _owned = lock.lock().await;
+    let session = state.sessions.lock().await.get(run).cloned();
+    match session {
+        // A person's stop that got there first wins.
+        Some(s) if !s.is_stopping() => s.stop_because(AGENT_CLAIMED),
+        Some(_) => {}
+        None => tracing::info!(run = %run, "the run that claimed had already ended"),
+    }
+}
+
+/// Whether `run` is one this host drives and is being stopped, read before a
+/// claim is recorded: `None` when this host has no session for it.
+pub async fn stopping(state: &Shared, run: &RunId) -> Option<bool> {
+    state
+        .sessions
+        .lock()
+        .await
+        .get(run)
+        .map(|s| s.is_stopping())
+}
+
+/// Takes the run's lifecycle lock, so a claim is recorded while no start,
+/// resume or stop of the same run is half done.
+pub(crate) async fn hold_lifecycle<T>(run: &RunId, f: impl std::future::Future<Output = T>) -> T {
+    let lock = lifecycle(run);
+    let _owned = lock.lock().await;
+    f.await
+}
+
 /// What to call a tool call on the board: the policy vocabulary (`Bash`,
 /// `Edit`, ...) where the call maps into it, so the board and the audit log
 /// agree; the agent's title otherwise.
 fn tool_label(call: &crate::acp::ToolRequest) -> String {
     match call.policy_subject() {
         Some((tool, _)) => tool.to_string(),
-        None => crate::core::text::clip(&call.title, 60),
+        None => crate::core::text::clip(&call.shown_title(), 60),
     }
+}
+
+/// How many finished calls a pump remembers, so a late update merges into its
+/// record instead of opening a second row.
+const FINISHED_KEPT: usize = 1024;
+
+/// One tool call as every report so far adds up: what the policy matcher, the
+/// ask row and the ledger read.
+#[derive(Debug, Default)]
+struct Held {
+    call: crate::acp::ToolRequest,
+    /// The label the call's row opened under, while it is open.
+    row: Option<String>,
+    finished: bool,
+}
+
+impl Held {
+    /// Whether the merged record says enough to open the call's row: an
+    /// input (not the empty placeholder an adapter sends while the input
+    /// streams in), or a status past `pending` — the call started.
+    fn ready(&self, status: Option<&str>) -> bool {
+        let has_input = self
+            .call
+            .raw_input
+            .as_ref()
+            .is_some_and(|v| !(v.is_null() || v.as_object().is_some_and(|o| o.is_empty())));
+        has_input || status.is_some_and(|s| s != "pending")
+    }
+}
+
+/// The record for one call, created on its first report.
+fn held<'a>(pump: &'a mut Pump, id: &str) -> &'a mut Held {
+    pump.calls.entry(id.to_string()).or_insert_with(|| Held {
+        call: crate::acp::ToolRequest {
+            id: id.to_string(),
+            ..Default::default()
+        },
+        ..Held::default()
+    })
+}
+
+/// Opens a call's row with the merged input known now, once.
+async fn open_row(state: &Shared, run: &RunId, cwd: &Path, pump: &mut Pump, id: &str) {
+    let h = held(pump, id);
+    if h.row.is_some() || h.finished {
+        return;
+    }
+    // Labelled for people; the arguments are what rules matched.
+    let label = tool_label(&h.call);
+    h.row = Some(label.clone());
+    let input = h.call.raw_input.clone().unwrap_or(serde_json::Value::Null);
+    state
+        .ingest(
+            run.clone(),
+            Source::Host,
+            Event::ToolStarted {
+                tool: label,
+                input,
+                // The protocol does not say where a server came from.
+                server_source: None,
+                agent_id: None,
+                call_id: Some(id.to_string()),
+            },
+            Some(cwd.to_path_buf()),
+            RunMode::Driven,
+        )
+        .await;
+}
+
+/// Whether a call is a command the agent sent no readable command for: the
+/// call says it executes, or its input has a `command` that is not text.
+fn hides_its_command(call: &crate::acp::ToolRequest) -> bool {
+    let command = call.raw_input.as_ref().and_then(|v| v.get("command"));
+    let says_execute = call.kind.as_deref() == Some("execute");
+    (says_execute || command.is_some()) && !command.is_some_and(serde_json::Value::is_string)
 }
 
 /// What this pump is holding between chunks: the running cost it has already
@@ -1722,9 +1985,21 @@ fn tool_label(call: &crate::acp::ToolRequest) -> String {
 struct Pump {
     cost: f64,
     transcript: crate::core::Coalescer,
-    /// Tool calls in flight by protocol id, with the label their row opened
-    /// under; updates need not repeat the title.
-    open_calls: std::collections::HashMap<String, String>,
+    /// Every call by protocol id, merged field by field from each report:
+    /// an update carries only what changed, and a permission request may
+    /// name the call by its id alone.
+    calls: std::collections::HashMap<String, Held>,
+    /// Finished call ids, oldest first, bounded by [`FINISHED_KEPT`].
+    finished: std::collections::VecDeque<String>,
+    /// The agent's display name, for the mode statement.
+    agent: String,
+    /// The mode the person chose for this agent, if any.
+    preference: Option<String>,
+    /// What the set-up said about the mode, for later changes.
+    mode_profile: Option<&'static crate::acp::modes::ModeProfile>,
+    mode_advertised: Option<crate::acp::modes::Advertised>,
+    /// The mode the last statement named; `None` until set-up stated one.
+    stated: Option<Option<String>>,
     /// Whether this repository keeps transcripts, fixed when the agent starts.
     keep_transcript: bool,
     /// The diffs each call's content reported last, by call id: content is
@@ -1732,6 +2007,9 @@ struct Pump {
     /// Written to the log when the call ends; always empty when the
     /// repository keeps no transcript.
     diffs: std::collections::HashMap<String, Vec<crate::acp::ReportedDiff>>,
+    /// Whether a turn ended while the session was being stopped: that turn
+    /// end already sent the change to its gates.
+    turn_ended_stopping: bool,
 }
 
 /// Writes the diffs one call reported to the run's log, each as the agent's
@@ -1741,27 +2019,15 @@ async fn keep_diffs(state: &Shared, run: &RunId, cwd: &Path, call_id: &str, pump
         return;
     };
     for d in diffs {
-        let mut omitted: u64 = 0;
-        let mut clip = |text: String| -> String {
-            if text.len() <= crate::acp::DIFF_KEPT_BYTES {
-                return text;
-            }
-            let mut end = crate::acp::DIFF_KEPT_BYTES;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            omitted += (text.len() - end) as u64;
-            text[..end].to_string()
-        };
-        let old_text = d.old_text.map(&mut clip);
-        let new_text = clip(d.new_text);
+        let path = d.path.clone();
+        let (old_text, new_text, omitted) = clipped(d);
         state
             .ingest(
                 run.clone(),
                 Source::Host,
                 Event::EditReported {
                     call_id: call_id.to_string(),
-                    path: d.path,
+                    path,
                     old_text,
                     new_text,
                     omitted_bytes: omitted,
@@ -1771,6 +2037,26 @@ async fn keep_diffs(state: &Shared, run: &RunId, cwd: &Path, call_id: &str, pump
             )
             .await;
     }
+}
+
+/// One reported diff clipped to [`crate::acp::DIFF_KEPT_BYTES`] per side,
+/// with the bytes dropped from either side.
+fn clipped(d: crate::acp::ReportedDiff) -> (Option<String>, String, u64) {
+    let mut omitted: u64 = 0;
+    let mut clip = |text: String| -> String {
+        if text.len() <= crate::acp::DIFF_KEPT_BYTES {
+            return text;
+        }
+        let mut end = crate::acp::DIFF_KEPT_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        omitted += (text.len() - end) as u64;
+        text[..end].to_string()
+    };
+    let old_text = d.old_text.map(&mut clip);
+    let new_text = clip(d.new_text);
+    (old_text, new_text, omitted)
 }
 
 /// Every call's diffs not yet written, for a turn or session that ended
@@ -1907,7 +2193,8 @@ pub async fn expire(state: &Shared, ask: &crate::core::ask::Ask, ended: &crate::
                 },
             )
             .because(ended.says())
-            .for_run(&ask.run),
+            .for_run(&ask.run)
+            .for_call(call_of(&ask.payload)),
         )
         .await;
 
@@ -1946,6 +2233,40 @@ fn offered_options(payload: &serde_json::Value) -> Vec<Choice> {
         .and_then(|o| serde_json::from_value(o).ok())
         .unwrap_or_default()
 }
+
+/// The driven tool call a recorded permission request was about, by the
+/// protocol's id, as Devplane wrote it into the payload.
+fn call_of(payload: &serde_json::Value) -> Option<&str> {
+    payload.get("call_id").and_then(|v| v.as_str())
+}
+
+/// The diffs a call's content carries now, clipped as they are kept, for a
+/// pending request's payload; `None` when the repository keeps no transcript
+/// (a diff is transcript content).
+fn proposed_diffs(pump: &Pump, call_id: &str) -> Option<serde_json::Value> {
+    if !pump.keep_transcript {
+        return None;
+    }
+    let diffs = pump.diffs.get(call_id)?;
+    Some(serde_json::Value::Array(
+        diffs
+            .iter()
+            .map(|d| {
+                let (old_text, new_text, omitted) = clipped(d.clone());
+                serde_json::json!({
+                    "path": d.path,
+                    "old_text": old_text,
+                    "new_text": new_text,
+                    "omitted_bytes": omitted,
+                    "says": EDIT_SAYS,
+                })
+            })
+            .collect(),
+    ))
+}
+
+/// How a kept diff is labelled wherever it is shown.
+pub const EDIT_SAYS: &str = "the agent's report of its edit";
 
 /// The option a recorded permission request offered for refusing, by id: the
 /// exact `reject_once` where the agent has it, any reject otherwise.
@@ -2025,11 +2346,56 @@ async fn handle(
             {
                 tracing::debug!(error = %e, "could not note that this agent declares modes");
             }
-            ingest(Event::AgentModeSeen { mode }).await;
+            ingest(Event::AgentModeSeen { mode: mode.clone() }).await;
+            // A change after set-up moves the statement; Devplane never moves
+            // the mode back.
+            if let Some(stated) = &pump.stated
+                && stated.as_deref() != Some(mode.as_str())
+            {
+                let statement = crate::acp::modes::moved(
+                    &pump.agent,
+                    pump.mode_profile,
+                    pump.mode_advertised.as_ref(),
+                    &mode,
+                );
+                pump.stated = Some(Some(mode));
+                ingest(Event::ModeStated { statement }).await;
+            }
+        }
+
+        // What the set-up said and asked: one statement, no decision row —
+        // asking an agent to ask first decides nothing for anybody.
+        AcpEvent::ModeAdvertised {
+            advertised,
+            profile,
+            plan,
+            outcome,
+        } => {
+            let statement = crate::acp::modes::statement(
+                &pump.agent,
+                profile,
+                advertised.as_ref(),
+                &plan,
+                outcome.as_ref(),
+                pump.preference.as_deref(),
+            );
+            pump.stated = Some(statement.mode.clone());
+            pump.mode_profile = profile;
+            pump.mode_advertised = advertised;
+            ingest(Event::ModeStated { statement }).await;
         }
 
         // A roster only fills gaps: `SessionInfo` carries no state.
-        AcpEvent::SessionsListed { sessions } => {
+        AcpEvent::SessionsListed {
+            sessions,
+            truncated,
+        } => {
+            if truncated {
+                tracing::info!(
+                    run = %run,
+                    "more sessions exist than were read from the agent's list"
+                );
+            }
             for listed in sessions {
                 ingest(Event::SessionListed {
                     agent_session: listed.agent_session,
@@ -2111,55 +2477,76 @@ async fn handle(
         }
 
         // A tool call ends the sentence before it.
-        AcpEvent::Tool { call, status } => {
+        AcpEvent::Tool { report } => {
             flush_transcript(state, run, pump).await;
-            // The protocol upserts by id, and updates need not repeat the
-            // title: the row opens once under the first label and closes on id.
-            let terminal = matches!(
-                status.as_deref(),
-                Some("completed" | "failed" | "cancelled")
-            );
-            let known = pump.open_calls.contains_key(&call.id);
-            if !known {
-                // Labelled for people; the arguments are what rules matched.
-                let label = tool_label(&call);
-                pump.open_calls.insert(call.id.clone(), label.clone());
-                ingest(Event::ToolStarted {
-                    tool: label,
-                    input: call.raw_input.clone().unwrap_or(serde_json::Value::Null),
-                    // The protocol does not say where a server came from.
-                    server_source: None,
-                    agent_id: None,
-                    call_id: Some(call.id.clone()),
-                })
-                .await;
+            // One record per id: a field a report carries replaces the stored
+            // one, a field it omits keeps it. The row opens once, with the
+            // input known then, and a finished call never reopens.
+            let id = report.id.clone();
+            let status = report.status.as_deref();
+            let terminal = matches!(status, Some("completed" | "failed" | "cancelled"));
+            let h = held(pump, &id);
+            h.call.merge(&report);
+            if h.finished {
+                return;
+            }
+            if h.ready(status) {
+                open_row(state, run, cwd, pump, &id).await;
             }
             if terminal {
-                keep_diffs(state, run, cwd, &call.id, pump).await;
-            }
-            if terminal && let Some(label) = pump.open_calls.remove(&call.id) {
-                ingest(Event::ToolFinished {
-                    tool: label,
-                    ok: status.as_deref() == Some("completed"),
-                    duration_ms: None,
-                    call_id: Some(call.id),
-                })
-                .await;
+                keep_diffs(state, run, cwd, &id, pump).await;
+                let h = held(pump, &id);
+                h.finished = true;
+                if let Some(label) = h.row.take() {
+                    ingest(Event::ToolFinished {
+                        tool: label,
+                        ok: status == Some("completed"),
+                        duration_ms: None,
+                        call_id: Some(id.clone()),
+                    })
+                    .await;
+                }
+                pump.finished.push_back(id);
+                while pump.finished.len() > FINISHED_KEPT {
+                    if let Some(old) = pump.finished.pop_front() {
+                        pump.calls.remove(&old);
+                    }
+                }
             }
         }
 
         AcpEvent::PermissionRequested {
             request_id,
-            call,
+            report,
             options,
         } => {
-            let title = call.title.clone();
+            // The request's fields over what the call reported before: the
+            // matcher, the ask row and the decision all read the whole call.
+            held(pump, &report.id).call.merge(&report);
+            open_row(state, run, cwd, pump, &report.id).await;
+            let call = held(pump, &report.id).call.clone();
+            let mut title = call.shown_title();
             // The same rules and vocabulary as a hook. A call that cannot be
             // classified is left to a person.
             let verdict = match call.policy_subject() {
-                Some((tool, input)) => state.policy.restrictive(cwd, tool, &input),
+                // A person was about to be asked, so the person's own grants
+                // answer too — after every prohibition, question and doubt.
+                Some((tool, input)) => state.policy.decide(cwd, tool, &input),
+                // A command the agent sent nothing readable for, where a rule
+                // governs commands: nobody could look, so a person decides —
+                // and the title is never matched in its place.
+                None if hides_its_command(&call)
+                    && state.policy.speaks_about(Some(cwd), "Bash") =>
+                {
+                    Verdict::Unresolved {
+                        why: "the agent did not send what it means to run".into(),
+                    }
+                }
                 None => Verdict::Undecided,
             };
+            if let Verdict::Unresolved { why } = &verdict {
+                title = format!("{title} — {why}");
+            }
 
             match verdict {
                 Verdict::Deny { rule } => {
@@ -2178,7 +2565,8 @@ async fn handle(
                                 "deny",
                             )
                             .because(&rule)
-                            .for_run(run),
+                            .for_run(run)
+                            .for_call(Some(&call.id)),
                         )
                         .await;
                     ingest(Event::PermissionDecided {
@@ -2191,6 +2579,48 @@ async fn handle(
                     })
                     .await;
                     return;
+                }
+                // The person's own grant answers with the agent's own
+                // allow-once option, never one the agent would remember; an
+                // agent offering none is asked the person, as before.
+                Verdict::Allow { grant } => {
+                    if let Some(once) = options.iter().find(|o| o.kind == "allow_once") {
+                        let _ = session.decide(&request_id, Some(once.id.clone())).await;
+                        let root = grant.root().to_path_buf();
+                        let widens = crate::policy_cache::widens_the_agent(
+                            grant.rule(),
+                            &crate::policy_cache::agent_allow_rules(
+                                &root,
+                                dirs::home_dir().as_deref(),
+                            ),
+                        );
+                        let mut row = crate::core::Decision::new(
+                            crate::core::Authority::Rule,
+                            "agent:tool.use",
+                            title.clone(),
+                            "allow",
+                        )
+                        .because(crate::core::grant::reason(&grant, widens))
+                        .by_grant(&grant)
+                        .for_run(run)
+                        .for_call(Some(&call.id));
+                        // The change too, so a gate that fails on it later is
+                        // counted against the grant.
+                        if let Some(change) = state.change_of_run.lock().await.get(run).cloned() {
+                            row = row.for_change(&change);
+                        }
+                        state.record(row).await;
+                        ingest(Event::PermissionDecided {
+                            tool: title,
+                            decision: "allow".into(),
+                            by: format!("grant:{}", grant.name()),
+                            reason: None,
+                            context: None,
+                            call_id: None,
+                        })
+                        .await;
+                        return;
+                    }
                 }
                 // Ask, Unresolved and Undecided all go to a person: a driven
                 // permission request already is one.
@@ -2212,6 +2642,20 @@ async fn handle(
                 tool: tool_label(&call),
                 input: call.raw_input.clone().unwrap_or(serde_json::Value::Null),
             };
+            // The call's id, so the person's decision names the call, and the
+            // diff it proposes, so the person sees the edit before answering.
+            let mut payload =
+                serde_json::json!({ "options": choices, "call": asked_call, "call_id": call.id });
+            match proposed_diffs(pump, &call.id) {
+                Some(diffs) => payload["diffs"] = diffs,
+                None if pump.keep_transcript => {
+                    payload["no_diff"] = "the agent sent no diff with this request".into()
+                }
+                None => {
+                    payload["no_diff"] =
+                        "no diff was kept: this project keeps no transcripts".into()
+                }
+            }
             // The ask row first; everything after it is a rebuildable projection.
             let token = persist_ask(
                 state,
@@ -2219,7 +2663,7 @@ async fn handle(
                 crate::core::ask::Kind::Permission,
                 &request_id,
                 &title,
-                serde_json::json!({ "options": choices, "call": asked_call }),
+                payload,
             )
             .await;
             let Some(token) = token else {
@@ -2270,6 +2714,7 @@ async fn handle(
         }
 
         AcpEvent::TurnEnded { stop_reason } => {
+            pump.turn_ended_stopping |= session.is_stopping();
             flush_transcript(state, run, pump).await;
             keep_all_diffs(state, run, cwd, pump).await;
             match stop_reason.as_str() {
@@ -2373,9 +2818,26 @@ async fn handle(
         }
         AcpEvent::Diffs { .. } => {}
 
-        AcpEvent::Closed { sent } => {
-            tracing::info!(run = %run, closed = sent, "the agent's session ended");
+        // Whether the session was closed over the protocol before the
+        // process went: on the record, not only in a log line.
+        AcpEvent::Closed { sent } => ingest(Event::SessionClosed { sent }).await,
+
+        // The agent's words to the person, shown on the change.
+        AcpEvent::Notice {
+            severity,
+            title,
+            description,
+        } => {
+            ingest(Event::NoticeSeen {
+                severity,
+                title,
+                description,
+            })
+            .await
         }
+
+        // The agent's own sign-in methods; the run ends right after.
+        AcpEvent::SignInRequired { methods } => ingest(Event::SignInRequired { methods }).await,
 
         AcpEvent::Ended { error } => {
             flush_transcript(state, run, pump).await;
@@ -2386,13 +2848,19 @@ async fn handle(
             // are closed first so the ending cannot overwrite them.
             let tearing_down = state.tearing_down.load(std::sync::atomic::Ordering::SeqCst);
             let by_person = session.stopped_because().as_deref() == Some(STOPPED_BY_PERSON);
+            // The agent stopped itself by claiming: its asks end as any run's
+            // that ends on its own, under nobody.
+            let claimed = session.stopped_because().as_deref() == Some(AGENT_CLAIMED);
             if !tearing_down {
                 end_open_asks(
                     state,
                     run,
-                    match by_person {
-                        true => crate::core::ask::Ended::Stopped,
-                        false => crate::core::ask::Ended::Nobody {
+                    match (by_person, claimed) {
+                        (true, _) => crate::core::ask::Ended::Stopped,
+                        (false, true) => crate::core::ask::Ended::Nobody {
+                            because: "the agent stopped before anybody answered".into(),
+                        },
+                        (false, false) => crate::core::ask::Ended::Nobody {
                             because: "the run ended before anybody answered".into(),
                         },
                     },
@@ -2448,8 +2916,75 @@ async fn handle(
                     })
                     .await
                 }
+                None if claimed => {
+                    ingest(Event::SessionEnded {
+                        reason: Some(AGENT_CLAIMED.into()),
+                    })
+                    .await
+                }
                 None => ingest(Event::SessionEnded { reason: None }).await,
             }
+            // A stopped run has no turn end of its own unless the agent
+            // acknowledged the cancel: the change's `check` runs once either
+            // way, on the tree the agent left, and hands nothing back.
+            if claimed && !tearing_down && !pump.turn_ended_stopping {
+                let state = state.clone();
+                let run = run.clone();
+                tokio::spawn(async move { crate::change::on_turn_ended(&state, &run).await });
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hides_its_command;
+    use crate::acp::ToolRequest;
+
+    /// A reported diff over the kept limit keeps its head and counts the
+    /// rest; markup in it is kept as the agent sent it, as text, for the
+    /// surfaces to quote.
+    #[test]
+    fn a_kept_diff_is_clipped_and_counted_and_kept_as_text() {
+        let big = "x".repeat(crate::acp::DIFF_KEPT_BYTES + 10);
+        let (old, new, omitted) = super::clipped(crate::acp::ReportedDiff {
+            path: "a.txt".into(),
+            old_text: Some("<script>alert(1)</script> [link](x)".into()),
+            new_text: big,
+        });
+        assert_eq!(new.len(), crate::acp::DIFF_KEPT_BYTES);
+        assert_eq!(omitted, 10);
+        assert_eq!(old.as_deref(), Some("<script>alert(1)</script> [link](x)"));
+    }
+
+    /// A command the agent sent nothing readable for is said so, and the
+    /// title is never read in its place.
+    #[test]
+    fn a_command_without_its_command_is_one_nobody_can_look_at() {
+        let call = |kind: Option<&str>, input: Option<serde_json::Value>| ToolRequest {
+            id: "c".into(),
+            title: Some("touch devplane-replay-marker".into()),
+            kind: kind.map(str::to_string),
+            raw_input: input,
+            locations: Vec::new(),
+        };
+        assert!(hides_its_command(&call(Some("execute"), None)));
+        assert!(hides_its_command(&call(
+            Some("execute"),
+            Some(serde_json::json!({}))
+        )));
+        assert!(hides_its_command(&call(
+            None,
+            Some(serde_json::json!({"command": ["ls"]}))
+        )));
+        assert!(!hides_its_command(&call(
+            Some("execute"),
+            Some(serde_json::json!({"command": "ls"}))
+        )));
+        assert!(
+            !hides_its_command(&call(Some("read"), None)),
+            "not a command"
+        );
+        assert!(!hides_its_command(&call(None, None)));
     }
 }

@@ -1,0 +1,18 @@
+SYNTHETIC — not GitHub Copilot's output.
+
+GitHub Copilot could not be run on the machine that built this (2026-10-02,
+Darwin 25.6.0): `session/new` answered "Authentication required". Its npm
+package is a native-binary loader, so its messages could not be read from
+source either. scripts/record-acp.sh copilot replaces this file once it can
+be run.
+
+Every message here is written by hand from the Agent Client Protocol's own
+documented shapes (agentclientprotocol.com/protocol/tool-calls, read
+2026-10-02): a `tool_call` with a title and kind, a `tool_call_update`
+carrying only `rawInput`, and a `session/request_permission` whose tool call
+names only its `toolCallId`, as the protocol's own example does. The
+`initialize` answer advertises only `loadSession`, as Copilot is documented
+to; it sends no agentInfo and no modes, so Copilot is unprofiled.
+
+It proves the client's handling of those documented shapes, not Copilot's
+behaviour. Later-input update: yes, by construction.

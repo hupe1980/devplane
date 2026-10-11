@@ -1,0 +1,7 @@
+runner pytest
+ran 10
+lines 1
+failed 1
+passed 9
+skipped 1
+errors 1

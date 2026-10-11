@@ -8,6 +8,10 @@
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::StopReason;
 use agent_client_protocol::schema::v1::{
+    AuthCapabilities, AuthMethod, AuthenticateRequest, ClientSessionCapabilities,
+    NoticeCapabilities,
+};
+use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, CloseSessionRequest, ContentBlock,
     CreateElicitationRequest, CreateElicitationResponse, ElicitationAction,
     ElicitationCapabilities, ElicitationFormCapabilities, EnvVariable, InitializeRequest,
@@ -24,6 +28,8 @@ use std::time::Duration;
 use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 
 use super::agent::AgentSpec;
+use super::calls::ToolReport;
+use super::modes::{Advertised, ModePlan, ModeProfile, Outcome};
 
 // There is no permission timeout here: the only clock that ends a wait is a
 // deadline the project sets in its own `devplane.toml` (default `never`),
@@ -36,6 +42,32 @@ const CANCEL_GRACE: Duration = Duration::from_secs(5);
 /// How long an agent that advertises `session/close` has to answer one before
 /// the connection is torn down anyway.
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
+
+/// How long an agent has to answer the one mode request Devplane may send at
+/// set-up before the first prompt goes anyway, reported as *did not answer*.
+const MODE_GRACE: Duration = Duration::from_secs(10);
+
+/// How many pages of `session/list` are read before the listing says more
+/// sessions exist than were read.
+pub const LIST_PAGES: usize = 20;
+
+/// The one protocol version this client speaks.
+const SPOKEN: u16 = 1;
+
+/// What a launch adds to the session it opens, beyond the agent and its
+/// directory.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Launch {
+    /// Directories outside the working directory the agent is told it may
+    /// read (`additionalDirectories`): absolute paths the caller has already
+    /// confined to the project. Declared only to an agent that advertises
+    /// the capability; when it does not, the session ends before any prompt.
+    pub additional_directories: Vec<PathBuf>,
+    /// The sign-in method the person chose, sent as `authenticate` right
+    /// after `initialize`. Only ever an agent-handled method; never carries a
+    /// credential.
+    pub authenticate: Option<String>,
+}
 
 /// The most of one side of a reported diff that is kept; the rest is counted.
 pub const DIFF_KEPT_BYTES: usize = 64 * 1024;
@@ -93,13 +125,9 @@ pub enum AcpEvent {
     /// The agent's plan for the turn: what it intends to do, and how far it
     /// has got.
     Plan(Vec<PlanStep>),
-    /// A tool call started or changed.
-    Tool {
-        call: ToolRequest,
-        /// `pending`, `in_progress`, `completed`, `failed`. Absent when the
-        /// update carried no status.
-        status: Option<String>,
-    },
+    /// A tool call was reported: as sent, every field the message omitted
+    /// left `None`. The reader merges reports per call id.
+    Tool { report: ToolReport },
     /// The agent withdrew a permission request before anybody answered it
     /// (`$/cancel_request`): nothing waits on an answer any more.
     PermissionWithdrawn { request_id: String },
@@ -118,7 +146,9 @@ pub enum AcpEvent {
     /// The agent wants permission. Answer it with [`Session::decide`].
     PermissionRequested {
         request_id: String,
-        call: ToolRequest,
+        /// The request's own account of the call, sparse: merged over what
+        /// the call reported before.
+        report: ToolReport,
         options: Vec<PermissionOption>,
     },
     /// The agent asked the person a question. Answer it with
@@ -145,11 +175,33 @@ pub enum AcpEvent {
     /// never says a session is waiting.
     SessionsListed {
         sessions: Vec<crate::core::run::ListedSession>,
+        /// The agent had more pages than [`LIST_PAGES`]: more sessions exist
+        /// than were read. The protocol reports no total.
+        truncated: bool,
+    },
+    /// A notice the agent addressed to the person: advisory, its own words.
+    Notice {
+        severity: String,
+        title: String,
+        description: Option<String>,
+    },
+    /// The agent says it needs signing in, and offers these ways. The session
+    /// ends after this; nothing was asked for or stored.
+    SignInRequired {
+        methods: Vec<crate::core::event::SignInMethod>,
     },
     /// The agent says which mode it is now in: the agent's own identifier,
     /// never mapped onto Claude Code's modes, since no specification defines
     /// that equivalence.
     ModeChanged { mode: String },
+    /// What the session's set-up said about its mode, what Devplane asked
+    /// for, and how that ended. Once per set-up, after `Ready`.
+    ModeAdvertised {
+        advertised: Option<Advertised>,
+        profile: Option<&'static ModeProfile>,
+        plan: ModePlan,
+        outcome: Option<Outcome>,
+    },
     /// The agent asked something over the question channel that Devplane could
     /// not render, so it was cancelled — reported, because the agent was told
     /// a form could be shown.
@@ -194,8 +246,9 @@ pub struct ToolRequest {
     /// The protocol's id for this call, which a start and a finish are
     /// correlated on.
     pub id: String,
-    /// Human-readable, and the only field that is always populated.
-    pub title: String,
+    /// Human-readable; `None` until the agent sends one
+    /// ([`ToolRequest::shown_title`] names it for a person).
+    pub title: Option<String>,
     /// `read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch`,
     /// `switch_mode`, `other` — the protocol's own spelling.
     pub kind: Option<String>,
@@ -262,6 +315,17 @@ pub struct PermissionOption {
 }
 
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Option<String>>>>>;
+
+/// The mode option a session advertised and the value last reported, so a
+/// config-option update and a mode update about one change are reported once.
+#[derive(Debug, Default)]
+struct ModeSeen {
+    /// The config option that carries the mode, when the agent uses one.
+    config_id: Option<String>,
+    last: Option<String>,
+}
+
+type Seen = Arc<std::sync::Mutex<ModeSeen>>;
 
 /// Waiting questions. Separate from [`Pending`] because an answer is a map of
 /// fields to what the person chose or typed, not an option id.
@@ -412,7 +476,19 @@ pub async fn spawn(
     env: &[(String, PathBuf)],
     mcp: Option<McpOffer>,
 ) -> anyhow::Result<(Session, mpsc::Receiver<AcpEvent>)> {
-    connect(spec, cwd, None, env, mcp).await
+    connect(spec, cwd, None, env, mcp, Launch::default()).await
+}
+
+/// [`spawn`], with what the launch adds: directories to declare, a sign-in
+/// method to ask for first.
+pub async fn spawn_with(
+    spec: &AgentSpec,
+    cwd: PathBuf,
+    env: &[(String, PathBuf)],
+    mcp: Option<McpOffer>,
+    launch: Launch,
+) -> anyhow::Result<(Session, mpsc::Receiver<AcpEvent>)> {
+    connect(spec, cwd, None, env, mcp, launch).await
 }
 
 /// Starts the agent and continues an existing conversation, so a change
@@ -426,7 +502,19 @@ pub async fn resume(
     env: &[(String, PathBuf)],
     mcp: Option<McpOffer>,
 ) -> anyhow::Result<(Session, mpsc::Receiver<AcpEvent>)> {
-    connect(spec, cwd, Some(agent_session), env, mcp).await
+    connect(spec, cwd, Some(agent_session), env, mcp, Launch::default()).await
+}
+
+/// [`resume`], with what the launch adds.
+pub async fn resume_with(
+    spec: &AgentSpec,
+    cwd: PathBuf,
+    agent_session: String,
+    env: &[(String, PathBuf)],
+    mcp: Option<McpOffer>,
+    launch: Launch,
+) -> anyhow::Result<(Session, mpsc::Receiver<AcpEvent>)> {
+    connect(spec, cwd, Some(agent_session), env, mcp, launch).await
 }
 
 async fn connect(
@@ -435,6 +523,7 @@ async fn connect(
     resuming: Option<String>,
     env: &[(String, PathBuf)],
     mcp: Option<McpOffer>,
+    launch: Launch,
 ) -> anyhow::Result<(Session, mpsc::Receiver<AcpEvent>)> {
     let (cmd_tx, cmd_rx) = mpsc::channel::<String>(32);
     let (ev_tx, ev_rx) = mpsc::channel::<AcpEvent>(1024);
@@ -470,6 +559,10 @@ async fn connect(
     // transcript is already held, so the replayed prose is dropped.
     let replaying = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let replaying_for_notify = replaying.clone();
+    let seen: Seen = Arc::default();
+    let seen_for_notify = seen.clone();
+    let seen_for_run = seen.clone();
+    let preference = spec.mode.clone();
 
     tokio::spawn(async move {
         let result = agent_client_protocol::Client
@@ -478,7 +571,7 @@ async fn connect(
             .on_receive_notification(
                 async move |notification: SessionNotification, _cx| {
                     let replaying = replaying_for_notify.load(std::sync::atomic::Ordering::Relaxed);
-                    for event in map_update(notification.update) {
+                    for event in map_update(notification.update, &seen_for_notify) {
                         // Only the conversation is suppressed; state
                         // updates still say something true.
                         if replaying && event.is_conversation() {
@@ -568,6 +661,11 @@ async fn connect(
                         asked: asked_for_run,
                     },
                     mcp.map(|m| vec![m.wire()]).unwrap_or_default(),
+                    Setup {
+                        preference,
+                        seen: seen_for_run,
+                        launch,
+                    },
                 )
                 .await
             })
@@ -610,26 +708,32 @@ fn in_directory(
         .envs(config.environment().clone())
 }
 
-/// What an agent said about signing in, as a sentence for a person.
-///
-///
-/// `auth/login` is not implemented: a login belongs in the agent's own
-/// terminal, so this repeats the advertised `authMethods`.
-fn describe_auth(methods: &[agent_client_protocol::schema::v1::AuthMethod]) -> Option<String> {
-    if methods.is_empty() {
-        return None;
-    }
-    let listed: Vec<String> = methods
+/// The sign-in methods an agent advertised, in Devplane's terms: the agent's
+/// own names and kinds. Nothing here is a credential.
+fn sign_in_methods(methods: &[AuthMethod]) -> Vec<crate::core::event::SignInMethod> {
+    methods
         .iter()
-        .map(|m| match m.description() {
-            Some(d) => format!("  • {} — {d}", m.name()),
-            None => format!("  • {}", m.name()),
+        .map(|m| {
+            let (kind, args, env) = match m {
+                AuthMethod::Agent(_) => ("agent", Vec::new(), Default::default()),
+                AuthMethod::Terminal(t) => (
+                    "terminal",
+                    t.args.clone(),
+                    t.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                ),
+                #[allow(unreachable_patterns)]
+                _ => ("other", Vec::new(), Default::default()),
+            };
+            crate::core::event::SignInMethod {
+                id: m.id().to_string(),
+                name: m.name().to_string(),
+                description: m.description().map(str::to_string),
+                kind: kind.into(),
+                args,
+                env,
+            }
         })
-        .collect();
-    Some(format!(
-        "This agent may need signing in first. It offers:\n{}",
-        listed.join("\n")
-    ))
+        .collect()
 }
 
 /// The requests an agent is waiting on an answer to.
@@ -651,12 +755,22 @@ impl Parked {
     }
 }
 
+/// What setting up a session needs beyond the connection.
+struct Setup {
+    /// The mode the person chose for this agent, if any.
+    preference: Option<String>,
+    seen: Seen,
+    launch: Launch,
+}
+
 /// What setting up a session produced, when it produced one.
 struct Opened {
     session_id: agent_client_protocol::schema::v1::SessionId,
     agent_name: Option<String>,
     initial_mode: Option<String>,
     can_close: bool,
+    /// The set-up's mode: advertised, planned, and how the request ended.
+    mode: AcpEvent,
 }
 
 /// The body of the connection: initialise, open a session, then serve prompts
@@ -673,6 +787,7 @@ async fn run(
     replaying: std::sync::Arc<std::sync::atomic::AtomicBool>,
     parked: Parked,
     mcp_servers: Vec<McpServer>,
+    setup: Setup,
 ) -> agent_client_protocol::Result<()> {
     // A stop during set-up — an `npx` install, a sign-in prompt, a long
     // replay, a binary that never speaks ACP — ends it here: returning tears
@@ -683,13 +798,14 @@ async fn run(
             let _ = events.send(AcpEvent::Ended { error: None }).await;
             return Ok(());
         }
-        o = open(&connection, cwd, resuming, &events, &replaying, mcp_servers) => o?,
+        o = open(&connection, cwd, resuming, &events, &replaying, mcp_servers, setup) => o?,
     };
     let Some(Opened {
         session_id,
         agent_name,
         initial_mode,
         can_close,
+        mode,
     }) = opened
     else {
         return Ok(());
@@ -704,7 +820,9 @@ async fn run(
         })
         .await;
 
-    // After `Ready`, so the run exists to record against.
+    // After `Ready`, so the run exists to record against; and before the
+    // first prompt, which `open` has held back until the mode was settled.
+    let _ = events.send(mode).await;
     if let Some(mode) = initial_mode {
         let _ = events.send(AcpEvent::ModeChanged { mode }).await;
     }
@@ -802,21 +920,29 @@ async fn open(
     events: &mpsc::Sender<AcpEvent>,
     replaying: &std::sync::atomic::AtomicBool,
     mcp_servers: Vec<McpServer>,
+    setup: Setup,
 ) -> agent_client_protocol::Result<Option<Opened>> {
-    // Declaring form elicitation is what lets an agent ask a question: the
-    // Claude adapter offers `AskUserQuestion` only to a client with
-    // `clientCapabilities.elicitation.form`. No `fs` and no `terminal`: the
-    // agent works in its own worktree with its own tools.
     let init = connection
-        .send_request(
-            InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
-                ClientCapabilities::new().elicitation(
-                    ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()),
-                ),
-            ),
-        )
+        .send_request(InitializeRequest::new(ProtocolVersion::V1).client_capabilities(declared()))
         .block_task()
         .await?;
+
+    // Only version 1 is spoken; an agent answering another is not driven
+    // under a guess of what it means.
+    let answered = serde_json::to_value(init.protocol_version)
+        .ok()
+        .and_then(|v| v.as_u64());
+    if answered != Some(u64::from(SPOKEN)) {
+        let _ = events
+            .send(AcpEvent::Ended {
+                error: Some(format!(
+                    "this agent speaks ACP protocol version {}; Devplane speaks version {SPOKEN}",
+                    answered.map_or_else(|| "unknown".to_string(), |v| v.to_string())
+                )),
+            })
+            .await;
+        return Ok(None);
+    }
 
     // Recorded before anything is asked, so an agent whose session creation
     // fails is still recorded.
@@ -834,32 +960,79 @@ async fn open(
         })
         .await;
 
-    // The roster, where the agent has one: asked once, after the handshake.
-    // Errors are dropped — a listing is enrichment, not worth ending a session.
-    if init.agent_capabilities.session_capabilities.list.is_some() {
-        let listed = connection
-            .send_request(agent_client_protocol::schema::v1::ListSessionsRequest::default())
+    // The sign-in the person chose, asked for before any session: only an
+    // agent-handled method, by its id. The agent's answer, in its words, ends
+    // the run when it refuses.
+    if let Some(method) = setup.launch.authenticate.clone()
+        && let Err(e) = connection
+            .send_request(AuthenticateRequest::new(method.clone()))
             .block_task()
+            .await
+    {
+        let _ = events
+            .send(AcpEvent::Ended {
+                error: Some(format!("signing in with `{method}` failed: {}", e.message)),
+            })
             .await;
-        if let Ok(page) = listed {
-            let sessions: Vec<crate::core::run::ListedSession> = page
-                .sessions
-                .into_iter()
-                .map(|s| crate::core::run::ListedSession {
-                    agent_session: s.session_id.to_string(),
-                    title: s.title,
+        return Ok(None);
+    }
+
+    // The roster, where the agent has one: asked after the handshake, every
+    // page up to [`LIST_PAGES`]. Errors are dropped — a listing is
+    // enrichment, not worth ending a session.
+    if init.agent_capabilities.session_capabilities.list.is_some() {
+        let (sessions, truncated) = list_sessions(connection).await;
+        if !sessions.is_empty() || truncated {
+            let _ = events
+                .send(AcpEvent::SessionsListed {
+                    sessions,
+                    truncated,
                 })
-                .collect();
-            if !sessions.is_empty() {
-                let _ = events.send(AcpEvent::SessionsListed { sessions }).await;
-            }
+                .await;
         }
-        // One page: the session in front of us is on it or it is not.
+    }
+
+    // A folder the session needs that is outside its directory is declared,
+    // or the session does not start: an agent that cannot see its
+    // specification must not be prompted to implement it.
+    let extra = setup.launch.additional_directories.clone();
+    if !extra.is_empty()
+        && init
+            .agent_capabilities
+            .session_capabilities
+            .additional_directories
+            .is_none()
+    {
+        let _ = events
+            .send(AcpEvent::Ended {
+                error: Some(format!(
+                    "{} cannot be told about {}, which is outside its working directory, so \
+                     it would never see the specification; commit the folder to the base \
+                     branch, or start the change in place",
+                    init.agent_info
+                        .as_ref()
+                        .map_or("this agent", |i| i.name.as_str()),
+                    extra
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            })
+            .await;
+        return Ok(None);
     }
 
     let can_close = init.agent_capabilities.session_capabilities.close.is_some();
     let agent_name = init.agent_info.as_ref().map(|i| i.name.clone());
-    let mut initial_mode: Option<String> = None;
+    // Keyed by the agent's own name and version, so an overridden command or
+    // another version is unprofiled rather than misread.
+    let profile = init
+        .agent_info
+        .as_ref()
+        .and_then(|i| super::modes::profile_for(&i.name, &i.version));
+    // The set-up response's `configOptions` and `modes`, as JSON.
+    let mut setup_says = serde_json::Value::Null;
     let session_id = match resuming {
         Some(previous) => {
             // Checked up front, so a missing capability is a refusal rather
@@ -890,11 +1063,13 @@ async fn open(
             let resumed = if can_resume {
                 connection
                     .send_request(
-                        ResumeSessionRequest::new(sid, cwd.as_path()).mcp_servers(mcp_servers),
+                        ResumeSessionRequest::new(sid, cwd.as_path())
+                            .mcp_servers(mcp_servers)
+                            .additional_directories(extra.clone()),
                     )
                     .block_task()
                     .await
-                    .map(|_| ())
+                    .map(|r| setup_says = serde_json::to_value(&r).unwrap_or_default())
             } else {
                 connection
                     .send_request(
@@ -902,11 +1077,12 @@ async fn open(
                             sid,
                             cwd.as_path(),
                         )
-                        .mcp_servers(mcp_servers),
+                        .mcp_servers(mcp_servers)
+                        .additional_directories(extra.clone()),
                     )
                     .block_task()
                     .await
-                    .map(|_| ())
+                    .map(|r| setup_says = serde_json::to_value(&r).unwrap_or_default())
             };
             replaying.store(false, std::sync::atomic::Ordering::Relaxed);
             match resumed {
@@ -925,27 +1101,41 @@ async fn open(
         }
         None => {
             match connection
-                .send_request(NewSessionRequest::new(cwd).mcp_servers(mcp_servers))
+                .send_request(
+                    NewSessionRequest::new(cwd)
+                        .mcp_servers(mcp_servers)
+                        .additional_directories(extra),
+                )
                 .block_task()
                 .await
             {
                 Ok(r) => {
                     // The mode a session starts in: `current_mode_update`
-                    // fires only on a change, so the initial mode is reported
-                    // here.
-                    initial_mode = r.modes.as_ref().map(|m| m.current_mode_id.to_string());
+                    // fires only on a change, so it is read here.
+                    setup_says = serde_json::to_value(&r).unwrap_or_default();
                     r.session_id
                 }
                 Err(e) => {
-                    // An agent that needs signing in advertises `authMethods`,
-                    // often with the command to run. The message says *may*:
-                    // the methods existing does not make this an auth failure.
-                    let hint = describe_auth(&init.auth_methods);
+                    // An agent that needs signing in says so (`auth_required`)
+                    // or fails while it advertises ways to sign in: the person
+                    // is shown the agent's own methods and chooses one.
+                    let needs_sign_in = e.code == agent_client_protocol::ErrorCode::AuthRequired
+                        || !init.auth_methods.is_empty();
+                    if needs_sign_in && !init.auth_methods.is_empty() {
+                        let _ = events
+                            .send(AcpEvent::SignInRequired {
+                                methods: sign_in_methods(&init.auth_methods),
+                            })
+                            .await;
+                    }
                     let _ = events
                         .send(AcpEvent::Ended {
-                            error: Some(match hint {
-                                Some(h) => format!("could not start a session: {e}.\n{h}"),
-                                None => format!("could not start a session: {e}"),
+                            error: Some(match needs_sign_in {
+                                true => format!(
+                                    "the agent needs signing in before a session can start: {}",
+                                    e.message
+                                ),
+                                false => format!("could not start a session: {e}"),
                             }),
                         })
                         .await;
@@ -954,12 +1144,131 @@ async fn open(
             }
         }
     };
+    // `configOptions` first (the protocol says a client that supports them
+    // ignores `modes`), an older agent's `modes` otherwise.
+    let advertised = Advertised::read(&setup_says["configOptions"], &setup_says["modes"], profile);
+    let plan = ModePlan::of(profile, advertised.as_ref(), setup.preference.as_deref());
+    let outcome = match (&plan.request, &advertised) {
+        (Some(value), Some(ad)) => Some(request_mode(connection, &session_id, ad, value).await),
+        _ => None,
+    };
+    let initial_mode = match (&outcome, &advertised) {
+        (Some(Outcome::Confirmed(v)), _) => Some(v.clone()),
+        (_, Some(ad)) => Some(ad.current.clone()),
+        _ => None,
+    };
+    {
+        let mut seen = setup.seen.lock().expect("mode seen");
+        seen.config_id = match advertised.as_ref().map(|a| &a.via) {
+            Some(super::modes::Via::Config(id)) => Some(id.clone()),
+            _ => None,
+        };
+        seen.last = initial_mode.clone();
+    }
     Ok(Some(Opened {
         session_id,
         agent_name,
         initial_mode,
         can_close,
+        mode: AcpEvent::ModeAdvertised {
+            advertised,
+            profile,
+            plan,
+            outcome,
+        },
     }))
+}
+
+/// What the client declares at `initialize`. Form elicitation lets an agent
+/// ask a question (the Claude adapter offers `AskUserQuestion` only to a client
+/// with `elicitation.form`); terminal sign-in lets it name the login a person
+/// runs in their own terminal (`devplane change login`); notices let it
+/// address the person. No `fs` and no `terminal`: the agent works in its own
+/// worktree with its own tools.
+fn declared() -> ClientCapabilities {
+    ClientCapabilities::new()
+        .elicitation(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()))
+        .auth(AuthCapabilities::new().terminal(true))
+        .session(ClientSessionCapabilities::new().notices(NoticeCapabilities::new()))
+}
+
+/// Every page of the agent's session list up to [`LIST_PAGES`], and whether
+/// pages were left unread. A page that fails ends the reading with what was
+/// read.
+async fn list_sessions(
+    connection: &ConnectionTo<Agent>,
+) -> (Vec<crate::core::run::ListedSession>, bool) {
+    let mut out = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..LIST_PAGES {
+        let mut ask = agent_client_protocol::schema::v1::ListSessionsRequest::default();
+        ask.cursor = cursor.take();
+        let Ok(page) = connection.send_request(ask).block_task().await else {
+            return (out, false);
+        };
+        out.extend(
+            page.sessions
+                .into_iter()
+                .map(|s| crate::core::run::ListedSession {
+                    agent_session: s.session_id.to_string(),
+                    title: s.title,
+                }),
+        );
+        match page.next_cursor.filter(|c| !c.is_empty()) {
+            Some(next) => cursor = Some(next),
+            None => return (out, false),
+        }
+    }
+    (out, cursor.is_some())
+}
+
+/// Sends the one mode request a set-up may make, and waits for its answer up
+/// to [`MODE_GRACE`]. Never retried: a refusal or silence is reported, and the
+/// session goes on in the mode the agent is in.
+async fn request_mode(
+    connection: &ConnectionTo<Agent>,
+    session_id: &agent_client_protocol::schema::v1::SessionId,
+    advertised: &Advertised,
+    value: &str,
+) -> Outcome {
+    use agent_client_protocol::schema::v1::{SetSessionConfigOptionRequest, SetSessionModeRequest};
+    let answered = match &advertised.via {
+        super::modes::Via::Config(id) => {
+            let asked = connection
+                .send_request(SetSessionConfigOptionRequest::new(
+                    session_id.clone(),
+                    id.clone(),
+                    value,
+                ))
+                .block_task();
+            match tokio::time::timeout(MODE_GRACE, asked).await {
+                Err(_) => return Outcome::NoAnswer,
+                // The agent answers with every option's current value, which
+                // may not be the one asked for.
+                Ok(r) => r.map(|r| {
+                    advertised
+                        .current_in(&serde_json::to_value(&r.config_options).unwrap_or_default())
+                        .unwrap_or_else(|| value.to_string())
+                }),
+            }
+        }
+        super::modes::Via::Modes => {
+            let asked = connection
+                .send_request(SetSessionModeRequest::new(
+                    session_id.clone(),
+                    value.to_string(),
+                ))
+                .block_task();
+            match tokio::time::timeout(MODE_GRACE, asked).await {
+                Err(_) => return Outcome::NoAnswer,
+                Ok(r) => r.map(|_| value.to_string()),
+            }
+        }
+    };
+    match answered {
+        Ok(v) => Outcome::Confirmed(v),
+        Err(e) => Outcome::Refused(e.message.clone()),
+    }
 }
 
 /// The wire name of a stop reason.
@@ -1009,7 +1318,7 @@ async fn ask(
     let _ = events
         .send(AcpEvent::PermissionRequested {
             request_id: request_id.clone(),
-            call: describe(request),
+            report: describe(request),
             options,
         })
         .await;
@@ -1111,31 +1420,23 @@ fn option_kind_name(k: agent_client_protocol::schema::v1::PermissionOptionKind) 
     }
 }
 
-/// What the agent is asking to do, in the protocol's own terms.
-fn describe(request: &RequestPermissionRequest) -> ToolRequest {
-    let f = &request.tool_call.fields;
-    ToolRequest {
-        id: request.tool_call.tool_call_id.to_string(),
-        title: crate::core::text::clip(
-            f.title
-                .as_deref()
-                .unwrap_or(&request.tool_call.tool_call_id.to_string()),
-            200,
-        ),
-        kind: f.kind.as_ref().and_then(wire),
-        raw_input: f.raw_input.clone(),
-        locations: f
-            .locations
-            .clone()
-            .unwrap_or_default()
-            .iter()
-            .map(|l| l.path.clone())
-            .collect(),
-    }
+/// What the request says about the call, as sent: a request may name the
+/// call by its id alone, and the reader merges it over the call's reports.
+fn describe(request: &RequestPermissionRequest) -> ToolReport {
+    report_of(
+        request.tool_call.tool_call_id.to_string(),
+        &request.tool_call.fields,
+    )
+}
+
+/// A sparse report from any of the protocol's tool-call shapes, read as JSON
+/// so an absent field and a `null` one are both *not said*.
+fn report_of(id: String, fields: &impl serde::Serialize) -> ToolReport {
+    ToolReport::from_wire(id, &serde_json::to_value(fields).unwrap_or_default())
 }
 
 /// Maps one protocol update to zero or more events.
-fn map_update(update: SessionUpdate) -> Vec<AcpEvent> {
+fn map_update(update: SessionUpdate, seen: &Seen) -> Vec<AcpEvent> {
     match update {
         SessionUpdate::AgentMessageChunk(c) => {
             text_of(&c).map(AcpEvent::Text).into_iter().collect()
@@ -1152,16 +1453,13 @@ fn map_update(update: SessionUpdate) -> Vec<AcpEvent> {
                     diffs,
                 });
             }
-            out.push(AcpEvent::Tool {
-                call: ToolRequest {
-                    id: t.tool_call_id.to_string(),
-                    title: t.title.clone(),
-                    kind: wire(&t.kind),
-                    raw_input: t.raw_input.clone(),
-                    locations: t.locations.iter().map(|l| l.path.clone()).collect(),
-                },
-                status: wire(&t.status),
-            });
+            // A first report's status and kind have schema defaults
+            // (`pending`, `other`) that are not written on the wire, so they
+            // are read from the typed call rather than the JSON.
+            let mut report = report_of(t.tool_call_id.to_string(), &t);
+            report.status = wire(&t.status);
+            report.kind = wire(&t.kind);
+            out.push(AcpEvent::Tool { report });
             out
         }
         // Content replaces the call's whole collection, so the diffs it
@@ -1178,10 +1476,12 @@ fn map_update(update: SessionUpdate) -> Vec<AcpEvent> {
                     });
                 }
             }
-            // No status means content streaming in; reporting it would count
-            // one call per chunk and blank the title.
-            if t.fields.status.is_some() {
-                out.push(tool_update(t));
+            // Sparse, as sent: an update carries only what changed, and one
+            // with no status may still bring the call's input. One that
+            // carries only content has said nothing more.
+            let report = report_of(t.tool_call_id.to_string(), &t.fields);
+            if report.says_something() {
+                out.push(AcpEvent::Tool { report });
             }
             out
         }
@@ -1209,33 +1509,43 @@ fn map_update(update: SessionUpdate) -> Vec<AcpEvent> {
         // sent.
         SessionUpdate::UserMessageChunk(_) => Vec::new(),
         // The cross-vendor answer to *which sessions decide without you*.
-        SessionUpdate::CurrentModeUpdate(m) => vec![AcpEvent::ModeChanged {
-            mode: m.current_mode_id.to_string(),
+        SessionUpdate::CurrentModeUpdate(m) => moved_to(seen, m.current_mode_id.to_string()),
+        // A config-option update is about the mode only when the mode
+        // option's value changed; an agent that sends both kinds for one
+        // change is reported once.
+        SessionUpdate::ConfigOptionUpdate(u) => {
+            let config_id = seen.lock().expect("mode seen").config_id.clone();
+            let current = config_id.and_then(|id| {
+                serde_json::to_value(&u.config_options)
+                    .ok()?
+                    .as_array()?
+                    .iter()
+                    .find(|o| o["id"] == id.as_str())?["currentValue"]
+                    .as_str()
+                    .map(str::to_string)
+            });
+            current.map(|v| moved_to(seen, v)).unwrap_or_default()
+        }
+        // Advisory words for the person, shown on the change rather than
+        // dropped; never read as an instruction to Devplane.
+        SessionUpdate::Notice(n) => vec![AcpEvent::Notice {
+            severity: wire(&n.severity).unwrap_or_else(|| "info".into()),
+            title: n.title,
+            description: n.description,
         }],
-        // Command lists are not consumed yet.
+        // Command lists are not consumed.
         _ => Vec::new(),
     }
 }
 
-/// A status-carrying `tool_call_update`, as a [`AcpEvent::Tool`].
-fn tool_update(t: agent_client_protocol::schema::v1::ToolCallUpdate) -> AcpEvent {
-    AcpEvent::Tool {
-        call: ToolRequest {
-            id: t.tool_call_id.to_string(),
-            title: t.fields.title.clone().unwrap_or_default(),
-            kind: t.fields.kind.as_ref().and_then(wire),
-            raw_input: t.fields.raw_input.clone(),
-            locations: t
-                .fields
-                .locations
-                .clone()
-                .unwrap_or_default()
-                .iter()
-                .map(|l| l.path.clone())
-                .collect(),
-        },
-        status: t.fields.status.as_ref().and_then(wire),
+/// A mode change, reported only when the value differs from the last seen.
+fn moved_to(seen: &Seen, mode: String) -> Vec<AcpEvent> {
+    let mut seen = seen.lock().expect("mode seen");
+    if seen.last.as_deref() == Some(mode.as_str()) {
+        return Vec::new();
     }
+    seen.last = Some(mode.clone());
+    vec![AcpEvent::ModeChanged { mode }]
 }
 
 /// The diffs in a tool call's content, in order. Terminal and plain content

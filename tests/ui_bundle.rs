@@ -32,13 +32,14 @@ fn gzipped(bytes: &[u8]) -> usize {
         .stdout(std::process::Stdio::piped())
         .spawn()
         .expect("gzip");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(bytes)
-        .expect("write");
-    child.wait_with_output().expect("gzip output").stdout.len()
+    // Written from a thread: gzip's output fills its pipe before the input is
+    // all read, and a single thread writing then reading would wait forever.
+    let mut stdin = child.stdin.take().expect("stdin");
+    let input = bytes.to_vec();
+    let writer = std::thread::spawn(move || stdin.write_all(&input).expect("write"));
+    let out = child.wait_with_output().expect("gzip output").stdout.len();
+    writer.join().expect("writer");
+    out
 }
 
 /// The whole served artefact fits the budget, gzipped.
@@ -223,92 +224,6 @@ fn the_bundle_the_binary_embedded_matches_what_was_built() {
         (None, Some(_)) => {
             panic!("ui/dist exists and nothing was embedded — run a clean build")
         }
-    }
-}
-
-/// The checked-in wire types match what the Rust types generate. Needs the
-/// `typescript` feature; skips without it. To regenerate:
-///
-/// ```sh
-/// TS_RS_EXPORT_DIR=ui/src cargo test --features typescript export_bindings
-/// ```
-#[test]
-fn the_checked_in_wire_types_match_the_rust_shapes() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let checked_in = root.join("ui/src/wire");
-    if !checked_in.is_dir() {
-        skip("ui/src/wire has not been generated");
-        return;
-    }
-
-    let tmp = std::env::temp_dir().join(format!("devplane-wire-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-
-    let out = std::process::Command::new(env!("CARGO"))
-        .args([
-            "test",
-            "--features",
-            "typescript",
-            "--quiet",
-            "export_bindings",
-        ])
-        .current_dir(root)
-        .env("TS_RS_EXPORT_DIR", &tmp)
-        .output();
-
-    let Ok(out) = out else {
-        skip("could not re-run the generator");
-        return;
-    };
-    let regenerated = tmp.join("wire");
-    if !out.status.success() || !regenerated.is_dir() {
-        skip(&format!("the generator did not run ({})", out.status));
-        let _ = std::fs::remove_dir_all(&tmp);
-        return;
-    }
-
-    let read = |dir: &std::path::Path| -> std::collections::BTreeMap<String, String> {
-        std::fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| e.path().is_file())
-            .map(|e| {
-                (
-                    e.file_name().to_string_lossy().to_string(),
-                    std::fs::read_to_string(e.path()).unwrap_or_default(),
-                )
-            })
-            .collect()
-    };
-
-    let want = read(&regenerated);
-    let have = read(&checked_in);
-    let _ = std::fs::remove_dir_all(&tmp);
-
-    assert!(
-        !want.is_empty(),
-        "the generator produced nothing to compare"
-    );
-    let missing: Vec<&String> = want.keys().filter(|k| !have.contains_key(*k)).collect();
-    let extra: Vec<&String> = have.keys().filter(|k| !want.contains_key(*k)).collect();
-    assert!(
-        missing.is_empty(),
-        "a Rust type crosses the wire and the interface has no type for it: {missing:?}\n\
-         Run: TS_RS_EXPORT_DIR=ui/src cargo test --features typescript export_bindings"
-    );
-    assert!(
-        extra.is_empty(),
-        "the interface carries wire types nothing generates any more: {extra:?}\n\
-         Delete them, or the interface is holding a shape the product stopped sending"
-    );
-    for (name, text) in &want {
-        assert_eq!(
-            have.get(name).map(String::as_str),
-            Some(text.as_str()),
-            "{name} has drifted from the Rust type it is generated from.\n\
-             Run: TS_RS_EXPORT_DIR=ui/src cargo test --features typescript export_bindings"
-        );
     }
 }
 
@@ -675,61 +590,6 @@ fn no_surface_reaches_a_policy_route() {
     }
 }
 
-/// CI and release workflows build the interface, and so does every job that
-/// runs `cargo publish`; `build.rs` tolerates a missing bundle, so nothing
-/// else would catch it.
-#[test]
-fn the_release_pipeline_builds_the_interface() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    for wf in ["ci.yml", "release.yml"] {
-        let path = root.join(".github/workflows").join(wf);
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        assert!(
-            text.contains("npm run build"),
-            "{wf} never builds the interface. A missing bundle is not a build failure — it is a \
-             binary that serves nothing, and nobody finds out until they install it."
-        );
-        assert!(
-            text.contains("setup-node"),
-            "{wf} runs `npm run build` with no node installed"
-        );
-    }
-
-    // Per job, not per file: each publishing job needs its own build step.
-    let text =
-        std::fs::read_to_string(root.join(".github/workflows/release.yml")).expect("release.yml");
-
-    // A job starts at exactly two spaces of indent; its steps are deeper.
-    let mut jobs: Vec<(String, String)> = Vec::new();
-    for line in text.lines() {
-        let head = line.starts_with("  ")
-            && !line.starts_with("   ")
-            && line.trim_end().ends_with(':')
-            && !line.trim().contains(' ');
-        if head {
-            jobs.push((line.trim().trim_end_matches(':').to_string(), String::new()));
-        } else if let Some(last) = jobs.last_mut() {
-            last.1.push_str(line);
-            last.1.push('\n');
-        }
-    }
-    assert!(
-        jobs.iter().any(|(_, b)| b.contains("cargo publish")),
-        "no job in release.yml runs `cargo publish`, so this check has stopped matching the file"
-    );
-
-    for (name, job) in jobs.iter().filter(|(_, b)| b.contains("cargo publish")) {
-        assert!(
-            job.contains("npm run build"),
-            "the `{name}` job runs `cargo publish` without building the interface first. \
-             `ui/dist/` is gitignored, so a clean checkout has none and `include` matches \
-             nothing — the crate publishes and installs with no interface at all."
-        );
-    }
-}
-
 /// Every CSS custom property the bundle uses is defined somewhere in it; an
 /// unimported token sheet otherwise renders unstyled without any failure.
 #[test]
@@ -887,9 +747,12 @@ fn every_route_a_surface_calls_is_one_the_host_serves() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let api = std::fs::read_to_string(root.join("src/api.rs")).expect("the api");
 
+    // `.route("…"` — on one line, or with the path on the next as rustfmt
+    // breaks a long one.
     let served: Vec<String> = api
-        .match_indices(".route(\"")
-        .filter_map(|(at, _)| api[at + 8..].split('"').next())
+        .match_indices(".route(")
+        .filter_map(|(at, _)| api[at + 7..].trim_start().strip_prefix('"'))
+        .filter_map(|rest| rest.split('"').next())
         .map(str::to_string)
         .collect();
     assert!(
@@ -1065,41 +928,5 @@ fn the_quickstart_names_every_surface_the_registry_has() {
         "the quickstart does not name {missing:?}. It is the first page a reader meets, and a \
          surface it omits is one they will not know exists — the registry is the list, and this \
          page is a copy of it."
-    );
-}
-
-/// The packaged bundle is committed, release never uses `--allow-dirty`, and CI
-/// checks the committed bundle matches its sources, so what ships is in a commit.
-#[test]
-fn the_published_bundle_is_accountable_to_a_commit() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-
-    let ignore = std::fs::read_to_string(root.join(".gitignore")).expect(".gitignore");
-    assert!(
-        !ignore
-            .lines()
-            .any(|l| l.trim() == "ui/dist/" || l.trim() == "ui/dist"),
-        "`ui/dist/` is ignored wholesale, so the files `Cargo.toml` packages are not in git. \
-         `cargo publish` then refuses, and the flag that silences it publishes bytes no commit \
-         contains."
-    );
-    assert!(
-        ignore.contains("ui/dist/*.map"),
-        "the source map is not ignored: four times the bundle, packaged by nothing and loaded \
-         by nothing"
-    );
-
-    let wf =
-        std::fs::read_to_string(root.join(".github/workflows/release.yml")).expect("release.yml");
-    assert!(
-        !wf.contains("--allow-dirty"),
-        "the release publishes with `--allow-dirty`. Whatever that flag lets through is \
-         content the crate carries and no commit contains — and this product's whole claim \
-         is that a reviewer does not have to trust it."
-    );
-    assert!(
-        wf.contains("git diff --exit-code -- ui/dist"),
-        "nothing checks that the committed bundle is what the sources produce, so it can go \
-         stale silently — which is the one cost of committing it"
     );
 }

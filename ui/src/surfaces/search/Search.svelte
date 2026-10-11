@@ -1,15 +1,18 @@
 <script lang="ts">
   // Search every session's tool calls, questions and errors. It says that
   // prompts and replies are never recorded, so cannot be found.
+  import Inline from "../../lib/ui/Inline.svelte";
   import { untrack } from "svelte";
   import { api } from "../../lib/api";
   import { failure } from "../../lib/resource.svelte";
   import Grid, { type Column } from "../../lib/ui/Grid.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
   import Empty from "../../lib/ui/Empty.svelte";
+  import { cursor } from "../../lib/cursor";
+  import { go } from "../../lib/route";
 
   type Hit = { run_id: string; at: string; text: string };
-  let { q = "" }: { q?: string } = $props();
+  let { q = "", blind = "" }: { q?: string; blind?: string } = $props();
 
   let query = $state("");
   let hits = $state<Hit[]>([]);
@@ -55,6 +58,21 @@
       if (mine === gen) busy = false;
     }
   }
+  const keyOf = (h: Hit) => h.run_id + h.at + h.text;
+  /// The rows as the grid shows them (sorted, if a header was clicked).
+  let order = $state<string[]>([]);
+  $effect(() =>
+    cursor({
+      scope: "search",
+      size: () => order.length,
+      at: () => order.indexOf(selected ?? ""),
+      go: (i) => (selected = order[i]),
+      open: (i) => {
+        const h = hits.find((x) => keyOf(x) === order[i]);
+        if (h) go(`#why/${encodeURIComponent(h.run_id)}`);
+      },
+    }),
+  );
   const columns: Column<Hit>[] = [
     { key: "at", label: "When", width: 150, sort: (h) => h.at, mono: true },
     { key: "run", label: "Session", width: 150, mono: true },
@@ -72,13 +90,14 @@
     <button type="submit" disabled={busy}>{busy ? "Searching…" : "Search"}</button>
   </form>
   <p class="note">Tool calls, questions and errors from every session. Prompts and replies are never recorded, so they are never found.</p>
-  {#if said}<p class="fail">{said}</p>{/if}
+  {#if said}<p class="fail"><Inline text={said} /></p>{/if}
+  {#if blind}<p class="note"><Inline text={blind} /></p>{/if}
 
   {#if ran && hits.length === 0 && !busy}
     <Empty icon="search" title="Nothing matched" body={`Nothing any session recorded contains “${ranFor}”.`} />
   {:else if hits.length > 0}
     <div class="frame">
-      <Grid id="search" {columns} rows={hits} key={(h) => h.run_id + h.at + h.text} bind:selected label="matches">
+      <Grid id="search" {columns} rows={hits} key={keyOf} bind:selected bind:order label="matches">
         {#snippet cell(h, c)}
           {#if c.key === "at"}{new Date(h.at).toLocaleString()}
           {:else if c.key === "run"}<a href={`#why/${encodeURIComponent(h.run_id)}`}>{h.run_id.slice(0, 14)}</a>

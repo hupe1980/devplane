@@ -1,0 +1,28 @@
+
+  .lead.svelte-p2t6jw {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35em;
+    white-space: nowrap;
+    font-size: var(--t-xs);
+    min-width: 0;
+  }
+  .weak.svelte-p2t6jw {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3em;
+    padding: 0 0.5em;
+    height: 1.35rem;
+    border-radius: 999px;
+    border: 1px solid var(--fail);
+    color: var(--fail);
+    font-weight: 700;
+  }
+  .sep.svelte-p2t6jw {
+    color: var(--faint);
+  }
+  /* Subordinate: the word, not the verified green. */
+  .sub.svelte-p2t6jw {
+    color: var(--dim);
+    font-weight: 400;
+  }

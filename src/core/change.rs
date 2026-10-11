@@ -14,7 +14,6 @@ use std::path::PathBuf;
 /// Every surface reads the word and glyph from here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub enum ChangeState {
     /// A record exists. No branch, no worktree, nothing has run.
     #[serde(rename = "drafted")]
@@ -148,6 +147,10 @@ pub enum Standing {
         then: Option<String>,
         /// The working-tree digest now; `None` when it could not be read.
         now: Option<String>,
+        /// Why a digest is missing, when that is known: the paths a `check`
+        /// moved, or an embedded repository it cannot see into.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why: Option<String>,
     },
     /// The latest `check` did not pass.
     Failed { summary: String },
@@ -187,10 +190,10 @@ impl Standing {
             Standing::Verified => {
                 "`check` exited zero against the working tree as it stands".into()
             }
-            Standing::Stale { then, now } => {
+            Standing::Stale { then, now, why } => {
                 format!(
                     "gates passed, stale — {}",
-                    stale_clause(then.as_deref(), now.as_deref())
+                    stale_clause(then.as_deref(), now.as_deref(), why.as_deref())
                 )
             }
             Standing::ChecksChanged { .. } => {
@@ -213,16 +216,28 @@ impl Standing {
 
 /// Why a passing `check` no longer describes the tree: which negation of
 /// `still_current` happened.
-fn stale_clause(then: Option<&str>, now: Option<&str>) -> String {
+fn stale_clause(then: Option<&str>, now: Option<&str>, why: Option<&str>) -> String {
     let short = |d: &str| d.chars().take(7).collect::<String>();
     match (then, now) {
-        (None, _) => "no tree digest was recorded when it ran (the tree moved while it ran, \
-                      or could not be read), so nothing says what it passed against"
-            .into(),
-        (Some(t), None) => format!(
-            "it ran against tree {} and the tree now could not be read",
-            short(t)
-        ),
+        (None, _) => match why {
+            Some(why) => format!(
+                "no tree digest was recorded when it ran — {why} — so nothing says what it \
+                 passed against"
+            ),
+            None => "no tree digest was recorded when it ran (the tree moved while it ran, \
+                     or could not be read), so nothing says what it passed against"
+                .into(),
+        },
+        (Some(t), None) => match why {
+            Some(why) => format!(
+                "it ran against tree {} and the tree now could not be read — {why}",
+                short(t)
+            ),
+            None => format!(
+                "it ran against tree {} and the tree now could not be read",
+                short(t)
+            ),
+        },
         (Some(t), Some(n)) => format!(
             "the working tree changed after it ran (tree {} then, {} now)",
             short(t),
@@ -409,9 +424,17 @@ fn stale_because(ran_at: Option<&CommitStamp>, now: Option<&CommitStamp>) -> Str
                 passed against"
             .into();
     };
+    let why = match &then.tree {
+        None => then.tree_unknown.as_deref(),
+        Some(_) => now.and_then(|n| n.tree_unknown.as_deref()),
+    };
     format!(
         "but {}",
-        stale_clause(then.tree.as_deref(), now.and_then(|n| n.tree.as_deref()))
+        stale_clause(
+            then.tree.as_deref(),
+            now.and_then(|n| n.tree.as_deref()),
+            why
+        )
     )
 }
 
@@ -475,11 +498,35 @@ pub struct CommandResult {
     /// Lines that look like the actual failures, where the runner is
     /// recognised; empty otherwise rather than a guess.
     pub failures: Vec<String>,
+    /// How many tests ran, as the runner printed it anywhere in the output;
+    /// or why that is not known. Never an input to *verified*.
+    #[serde(default)]
+    pub tests: crate::core::testcount::CommandCount,
 }
 
 impl CommandResult {
     pub fn passed(&self) -> bool {
         matches!(self.outcome, Outcome::Exited { code: 0 })
+    }
+
+    /// `` `<program>` is not on PATH `` when the shell said it could not find
+    /// the program (exit 127 and its *not found*): a gate that cannot run here,
+    /// which is not a failing check. The exit and output stay as evidence.
+    pub fn not_on_path(&self) -> Option<String> {
+        if self.outcome != (Outcome::Exited { code: 127 }) {
+            return None;
+        }
+        let out = self.output_tail.to_ascii_lowercase();
+        if !(out.contains("not found") || out.contains("no such file or directory")) {
+            return None;
+        }
+        // The program: the first word that is not a `NAME=value` assignment.
+        let program = self
+            .command
+            .split_whitespace()
+            .find(|w| !(w.contains('=') && !w.starts_with('=')))?;
+        out.contains(&program.to_ascii_lowercase())
+            .then(|| format!("`{program}` is not on PATH"))
     }
 
     /// Whether this command produced a verdict at all.
@@ -497,6 +544,7 @@ impl CommandResult {
             output_bytes: 0,
             output_digest: crate::core::hash::hex(b""),
             failures: Vec::new(),
+            tests: Default::default(),
         }
     }
 
@@ -547,9 +595,16 @@ pub struct CommitStamp {
     /// tree moved while a gate ran: *cannot verify*.
     #[serde(default)]
     pub tree: Option<String>,
+    /// Why `tree` is `None`, when that is known: an embedded repository with
+    /// work its commit does not record, or a `check` that moved the tree
+    /// (naming the paths it moved).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_unknown: Option<String>,
     /// `None` on a detached head.
     pub branch: Option<String>,
-    /// Whether nothing was uncommitted or untracked. Shown, never a condition
+    /// Whether the working-tree digest is the commit's own tree: nothing on
+    /// disk the commit does not record. Never read from `git status`, which
+    /// an `assume-unchanged` flag hides an edit from. Shown, never a condition
     /// of `verified` (the digest covers what the commit does not).
     pub clean: bool,
     pub changed_files: u32,
@@ -604,7 +659,7 @@ impl Change {
 
 /// The specification moved under a run, and the run never saw it. Derived
 /// from the run's close against the change's start; never stored.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(
     feature = "typescript",
@@ -737,6 +792,14 @@ pub struct GateReport {
     /// The tree when this gate ran; `None` outside a repository (a finding).
     #[serde(default)]
     pub commit: Option<CommitStamp>,
+    /// The JUnit files `check` declared, as read after this run. Empty for
+    /// every other gate. Older `check` reports keep the reads, not the cases.
+    #[serde(default)]
+    pub junit: Vec<crate::core::testcount::junit::JunitFile>,
+    /// Where the change left its base branch when this ran: the one home of
+    /// the change's merge base, stamped by the host on every `check` report.
+    #[serde(default)]
+    pub base_commit: Option<String>,
 }
 
 /// What a gate run in a repository amounts to, for callers outside this
@@ -745,10 +808,10 @@ pub struct GateReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub enum GateState {
-    /// Gates were declared and every command passed.
-    Verified,
+    /// Gates were declared and every command passed. Never *verified*: that
+    /// word is a change's, against its tree, and only `check`'s.
+    Passed,
     /// Gates were declared and at least one did not pass.
     Failed,
     /// No `devplane.toml`, or one that declares no checks.
@@ -761,22 +824,22 @@ pub enum GateState {
 impl GateState {
     pub fn as_str(self) -> &'static str {
         match self {
-            GateState::Verified => "verified",
+            GateState::Passed => "passed",
             GateState::Failed => "failed",
             GateState::NoGates => "no_gates",
             GateState::ConfigUnreadable => "config_unreadable",
         }
     }
 
-    /// Only `Verified` is a pass; *nothing was checked* is never success.
+    /// Only `Passed` is a pass; *nothing was checked* is never success.
     pub fn passed(self) -> bool {
-        matches!(self, GateState::Verified)
+        matches!(self, GateState::Passed)
     }
 
     /// One sentence, and no two of them read alike.
     pub fn says(self) -> &'static str {
         match self {
-            GateState::Verified => "This project's own checks passed.",
+            GateState::Passed => "This project's own checks passed.",
             GateState::Failed => "A check did not pass. Nothing here has been marked done.",
             GateState::NoGates => {
                 "This repository declares no checks, so nothing is verified and nothing pretends to be."
@@ -814,6 +877,11 @@ impl GateReport {
                     c.outcome.headline()
                 )
             }
+            Some(c) if c.not_on_path().is_some() => format!(
+                "{} could not run: {}",
+                self.gate,
+                c.not_on_path().unwrap_or_default()
+            ),
             Some(c) if !c.failures.is_empty() => format!(
                 "{} failed: {} ({} failing)",
                 self.gate,
@@ -853,7 +921,7 @@ impl GateReport {
 
 /// The pull request a change produced. Number and URL are fixed; the status
 /// is refreshed by the poller.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct PullRequestRef {
     pub number: u64,
     pub url: String,
@@ -863,6 +931,30 @@ pub struct PullRequestRef {
     /// Names of the checks that are red, for the inbox card.
     #[serde(default)]
     pub failing_checks: Vec<String>,
+    /// Who the pull request's approvals came from, as last read from the
+    /// forge — evidence about a merge decided there, never a decision.
+    /// Absent until the host first reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approvals: Option<super::approvals::ReadingState>,
+    /// GitHub's own review decision (`APPROVED`, `CHANGES_REQUESTED`,
+    /// `REVIEW_REQUIRED`), shown beside the approvals and quoted as GitHub's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_decision: Option<String>,
+    /// The pull request's `updatedAt` when its approvals were last read, so
+    /// an unchanged pull request is not read again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approvals_for: Option<String>,
+}
+
+impl PullRequestRef {
+    /// GitHub's own review decision in words (`approved`, `changes
+    /// requested`, `review required`), quoted as GitHub's.
+    pub fn decision_quote(&self) -> Option<String> {
+        self.review_decision
+            .as_deref()
+            .filter(|d| !d.is_empty())
+            .map(|d| d.to_lowercase().replace('_', " "))
+    }
 }
 
 /// A unit of work.
@@ -885,10 +977,6 @@ pub struct Change {
     /// The isolated checkout, when the change has one.
     pub worktree: Option<PathBuf>,
     pub branch: Option<String>,
-    /// The report this change was started from, when a person started it from
-    /// one. Offering or finishing the change answers that report as fixed.
-    #[serde(default)]
-    pub from_report: Option<crate::core::ReportId>,
     /// Runs that have worked on this, oldest first.
     pub runs: Vec<RunId>,
     /// What preparing the checkout did. Not a gate and not in `gates`: it says
@@ -921,6 +1009,12 @@ pub struct Change {
     /// *verified* follows the tree. `None` is unknown, never unchanged.
     #[serde(default)]
     pub tree_now: Option<CommitStamp>,
+    /// When `tree_now` was read from disk; `None` when nobody recorded it.
+    /// A surface that shows `verified` from it says how old it is; one that
+    /// states it (a single change, the certificate, the offer) reads the
+    /// tree again instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_as_of: Option<Timestamp>,
     /// When the worktree was removed. Archived is not deleted: the record stays.
     #[serde(default)]
     pub archived_at: Option<Timestamp>,
@@ -932,6 +1026,25 @@ pub struct Change {
     /// budget) often outlive every run.
     #[serde(default)]
     pub snoozed: crate::core::attention::Snoozed,
+    /// The latest base checks: the base's tests on this change and its new
+    /// tests on the base, for one (base, tree, definition). Beside the gates,
+    /// never among them: nothing that derives the state reads it.
+    #[serde(
+        default,
+        rename = "base_checks_result",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub base_checks: Option<crate::core::base_checks::BaseChecks>,
+    /// What the change's agents said about it through the stop tool, in order
+    /// of arrival. The agents' claims, beside the gates and never among them:
+    /// nothing that derives the state or the verdict reads it. A claim is
+    /// never removed, only closed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_claims: Vec<crate::core::claim::StopClaim>,
+    /// The specification draft this change was started for, when it was: the
+    /// methodology's own command, what was sent, and where it got to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<crate::core::draft::Draft>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }
@@ -958,7 +1071,6 @@ impl Change {
             spec_at_start: None,
             worktree: None,
             branch: None,
-            from_report: None,
             runs: Vec::new(),
             setup: None,
             gates: Vec::new(),
@@ -969,9 +1081,13 @@ impl Change {
             stopped: None,
             waiting: None,
             tree_now: None,
+            tree_as_of: None,
             archived_at: None,
             pull_request: None,
             snoozed: Default::default(),
+            base_checks: None,
+            stop_claims: Vec::new(),
+            draft: None,
             created_at: now,
             updated_at: now,
         }
@@ -1051,6 +1167,10 @@ impl Change {
         Standing::Stale {
             then: report.commit.as_ref().and_then(|c| c.tree.clone()),
             now: now.and_then(|c| c.tree.clone()),
+            why: match report.commit.as_ref().and_then(|c| c.tree.as_ref()) {
+                None => report.commit.as_ref().and_then(|c| c.tree_unknown.clone()),
+                Some(_) => now.and_then(|c| c.tree_unknown.clone()),
+            },
         }
     }
 
@@ -1114,6 +1234,44 @@ impl Change {
     pub fn in_place_says(&self) -> Option<&'static str> {
         self.in_place()
             .then_some("in place — no parallel safety, and the diff is against the working tree")
+    }
+
+    /// The newest open stop claim, if any of this change's agents has one.
+    pub fn open_claim(&self) -> Option<&crate::core::claim::StopClaim> {
+        self.stop_claims.iter().rev().find(|c| c.is_open())
+    }
+
+    /// The open stop claim `run` made, if it has one.
+    pub fn open_claim_for(&self, run: &RunId) -> Option<&crate::core::claim::StopClaim> {
+        self.stop_claims
+            .iter()
+            .rev()
+            .find(|c| c.is_open() && c.origin.run() == run)
+    }
+
+    /// Records a claim; refused while the same run already has one open, so
+    /// at most one is open per run whatever order calls arrive in.
+    pub fn push_claim(
+        &mut self,
+        claim: crate::core::claim::StopClaim,
+    ) -> Result<(), crate::core::claim::ClaimRefusal> {
+        if let Some(open) = self.open_claim_for(claim.origin.run()) {
+            return Err(crate::core::claim::ClaimRefusal::AlreadyOpen {
+                at: open.origin.at(),
+            });
+        }
+        self.stop_claims.push(claim);
+        Ok(())
+    }
+
+    /// Closes every open claim; returns whether any was open. Writes no
+    /// decision: closing a claim decides nothing.
+    pub fn close_claims(&mut self, by: crate::core::claim::ClosedBy, at: Timestamp) -> bool {
+        let mut any = false;
+        for c in &mut self.stop_claims {
+            any |= c.close(by, at);
+        }
+        any
     }
 
     pub fn current_run(&self) -> Option<&RunId> {
@@ -1256,6 +1414,8 @@ mod drift_tests {
         assert_eq!(w.last_pass_at(), None);
         let at = |s: &str| -> Timestamp { s.parse().unwrap() };
         let report = |when: &str, ok: bool| GateReport {
+            junit: Vec::new(),
+            base_commit: None,
             gate: "check".into(),
             at: at(when),
             duration_ms: 1,
@@ -1313,6 +1473,8 @@ mod tests {
         assert!(!w.claim_is_worth_showing());
 
         let report = |ok: bool| GateReport {
+            junit: Vec::new(),
+            base_commit: None,
             gate: "check".into(),
             at: Timestamp::now(),
             duration_ms: 1,
@@ -1469,6 +1631,8 @@ mod tests {
             ..ok.clone()
         };
         let report = |cmds: Vec<CommandResult>| GateReport {
+            junit: Vec::new(),
+            base_commit: None,
             gate: "check".into(),
             at: Timestamp::now(),
             duration_ms: 1,
@@ -1486,6 +1650,8 @@ mod tests {
     #[test]
     fn feedback_names_the_failures_not_the_whole_log() {
         let report = GateReport {
+            junit: Vec::new(),
+            base_commit: None,
             gate: "check".into(),
             at: Timestamp::now(),
             duration_ms: 1,
@@ -1511,6 +1677,8 @@ mod tests {
     #[test]
     fn a_timeout_is_reported_as_one() {
         let report = GateReport {
+            junit: Vec::new(),
+            base_commit: None,
             gate: "check".into(),
             at: Timestamp::now(),
             duration_ms: 1,
@@ -1530,11 +1698,11 @@ mod tests {
     }
     /// Four situations, four distinct sentences, one pass.
     #[test]
-    fn only_a_verified_gate_is_a_pass_and_no_two_states_read_alike() {
+    fn only_a_passed_gate_is_a_pass_and_no_two_states_read_alike() {
         use GateState::*;
-        let all = [Verified, Failed, NoGates, ConfigUnreadable];
+        let all = [Passed, Failed, NoGates, ConfigUnreadable];
 
-        assert!(Verified.passed());
+        assert!(Passed.passed());
         for state in [Failed, NoGates, ConfigUnreadable] {
             assert!(!state.passed(), "{state:?} must not be a pass");
         }
@@ -1561,6 +1729,122 @@ mod tests {
                 serde_json::to_string(&state).unwrap(),
                 format!("\"{}\"", state.as_str())
             );
+        }
+    }
+
+    fn claim_by(run: &str, at: &str) -> crate::core::claim::StopClaim {
+        use crate::core::claim::*;
+        StopClaim::new(
+            ClaimId::new(format!("sc-{run}-{at}")),
+            ClaimDraft {
+                reason: "the spec says 30 days; the test asserts 7".into(),
+                paths: vec!["tests/session_test.rs".into()],
+            },
+            ClaimOrigin::of_run(
+                crate::core::ids::ProjectId::new("/p"),
+                "p",
+                crate::core::ids::ChangeId::new("c-1"),
+                RunId::new(run),
+                "echo",
+                at.parse().unwrap(),
+            ),
+            |_| Ok(()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn at_most_one_claim_is_open_per_run_whatever_arrives() {
+        use crate::core::claim::ClosedBy;
+        let mut w = Change::new(
+            crate::core::ids::ProjectId::from_path(std::path::Path::new("/tmp/x")),
+            "t".into(),
+            "p".into(),
+        );
+        let at = "2026-09-27T10:00:00Z";
+        assert!(w.push_claim(claim_by("r1", at)).is_ok());
+        assert_eq!(
+            w.push_claim(claim_by("r1", "2026-09-27T10:00:01Z"))
+                .unwrap_err()
+                .name(),
+            "already_open"
+        );
+        // Another run of the same change may say so too.
+        assert!(w.push_claim(claim_by("r2", at)).is_ok());
+        for run in ["r1", "r2"] {
+            let open = w
+                .stop_claims
+                .iter()
+                .filter(|c| c.origin.run().as_str() == run && c.is_open())
+                .count();
+            assert_eq!(open, 1);
+        }
+        assert_eq!(w.open_claim().unwrap().origin.run().as_str(), "r2");
+        // Closed, and kept: a run that is answered may say so again.
+        assert!(w.close_claims(ClosedBy::Read, at.parse().unwrap()));
+        assert!(w.open_claim().is_none());
+        assert!(!w.close_claims(ClosedBy::Read, at.parse().unwrap()));
+        assert!(w.push_claim(claim_by("r1", "2026-09-27T11:00:00Z")).is_ok());
+        assert_eq!(w.stop_claims.len(), 3, "a claim is never removed");
+        assert!(w.open_claim_for(&RunId::new("r1")).is_some());
+        assert!(w.open_claim_for(&RunId::new("r2")).is_none());
+    }
+
+    /// The claim is the agent's; the verdict is the gate's. Whether the
+    /// gate passed or failed, a change reads the same with and without one.
+    #[test]
+    fn a_claim_leaves_the_verdict_and_the_state_exactly_as_the_gate_left_them() {
+        let stamp = CommitStamp {
+            commit: Some("abc".into()),
+            tree: Some("t1".into()),
+            tree_unknown: None,
+            branch: Some("main".into()),
+            clean: true,
+            changed_files: 0,
+            reach: Reach::NoRemote,
+            remote: None,
+        };
+        let checks = vec!["cargo test".to_string()];
+        for code in [0, 101] {
+            let mut w = Change::new(
+                crate::core::ids::ProjectId::from_path(std::path::Path::new("/tmp/x")),
+                "t".into(),
+                "p".into(),
+            );
+            w.gates.push(GateReport {
+                junit: Vec::new(),
+                base_commit: None,
+                gate: "check".into(),
+                at: "2026-09-27T10:00:00Z".parse().unwrap(),
+                duration_ms: 1,
+                attempt: 1,
+                spec: None,
+                commit: Some(stamp.clone()),
+                commands: vec![CommandResult {
+                    duration_ms: 1,
+                    ..CommandResult::exited("cargo test", code)
+                }],
+            });
+            w.tree_now = Some(stamp.clone());
+            w.waiting = Some(Waiting::Person);
+            let declared = || Declared::of(Some(&checks));
+            let without = (
+                w.state(declared(), w.tree_now.as_ref()),
+                w.verdict(declared(), w.tree_now.as_ref()),
+            );
+            let mut with = w.clone();
+            with.push_claim(claim_by("r1", "2026-09-27T10:01:00Z"))
+                .unwrap();
+            assert_eq!(
+                (
+                    with.state(declared(), with.tree_now.as_ref()),
+                    with.verdict(declared(), with.tree_now.as_ref()),
+                ),
+                without,
+                "a claim moved the verdict when check exited {code}"
+            );
+            assert!(with.stopped.is_none(), "a claim is not a failure");
+            assert_eq!(code == 0, without.0 == ChangeState::Verified);
         }
     }
 }

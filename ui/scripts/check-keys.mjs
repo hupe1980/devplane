@@ -63,6 +63,17 @@ for (const b of bindings) {
     process.exit(1);
   }
 }
+// A mode rebinds only its surface's list keys; any other shared key is a collision.
+const LIST = ["Down", "j", "Up", "k", "Enter", "g g", "G"];
+for (const b of bindings) {
+  const [parent, mode] = b.surface.split(":");
+  if (!mode) continue;
+  const over = bindings.find((x) => x.surface === parent && x.combo === b.combo);
+  if (over && !LIST.includes(b.combo)) {
+    console.error(`check-keys: ${b.surface} rebinds ${b.combo} of ${parent}: "${b.label}" against "${over.label}"`);
+    process.exit(1);
+  }
+}
 
 /** @type {string[]} */
 const problems = [];

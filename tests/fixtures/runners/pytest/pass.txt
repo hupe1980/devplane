@@ -1,0 +1,8 @@
+[1m============================= test session starts ==============================[0m
+platform darwin -- Python 3.14.7, pytest-9.1.1, pluggy-1.6.0
+rootdir: /work/py
+collected 12 items
+
+tests/test_login.py [32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[33ms[0m[32m.[0m[32m.[0m[32m                                         [100%][0m
+
+[32m======================== [32m[1m11 passed[0m, [33m1 skipped[0m[32m in 0.01s[0m[32m =========================[0m
